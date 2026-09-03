@@ -20,8 +20,10 @@ project and light, dark, or system appearance preference are stored in SQLite an
 next launch.
 
 Coding-agent clients can connect to the local streamable HTTP MCP endpoint at
-`http://127.0.0.1:3000/api/mcp`. The initial read-only tools are `list_projects` and
-`get_active_project`.
+`http://127.0.0.1:3000/api/mcp`. Register the connection with `register_agent_run` before using
+agent-attributed tools. Registered agents can discover paginated work with `find_work` and load a
+complete package with `get_task_context`; `list_projects` and `get_active_project` remain available
+as read-only project queries.
 
 ## Production build
 

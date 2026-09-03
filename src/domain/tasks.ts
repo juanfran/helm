@@ -177,6 +177,86 @@ export const taskSchema = z.object({
 });
 export type Task = z.infer<typeof taskSchema>;
 
+export const taskAttemptSummarySchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  agentRunId: z.string().nullable(),
+  status: z.enum(["active", "completed", "failed", "abandoned"]),
+  summary: z.string(),
+  verification: z.array(z.string()),
+  createdAt: z.string(),
+  completedAt: z.string().nullable(),
+});
+export type TaskAttemptSummary = z.infer<typeof taskAttemptSummarySchema>;
+
+export const taskContextPackageSchema = z.object({
+  projectId: z.string(),
+  task: taskSchema,
+  acceptanceCriteria: z.string(),
+  agentContext: z.string(),
+  checklist: z.array(checklistItemSchema),
+  relations: z.object({
+    upstream: z.array(taskRelationSchema),
+    downstream: z.array(taskRelationSchema),
+  }),
+  paths: z.object({
+    repositoryRoot: z.string(),
+    referencedPaths: z.array(z.string()),
+  }),
+  priorAttempts: z.array(taskAttemptSummarySchema),
+  projectInstructions: z.array(
+    z.object({
+      path: z.string(),
+      text: z.string(),
+    }),
+  ),
+});
+export type TaskContextPackage = z.infer<typeof taskContextPackageSchema>;
+
+export const taskCandidateFieldSchema = z.enum([
+  "descriptionText",
+  "expectedOutcome",
+  "acceptanceCriteria",
+  "agentContext",
+  "checklist",
+  "relations",
+  "timestamps",
+]);
+export type TaskCandidateField = z.infer<typeof taskCandidateFieldSchema>;
+
+export const taskCandidateSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  sequence: z.number().int().positive(),
+  parentTaskId: z.string().nullable(),
+  title: z.string(),
+  lifecycle: taskLifecycleSchema,
+  priority: taskPrioritySchema,
+  position: z.number().int().nonnegative(),
+  dueAt: taskDateSchema.nullable(),
+  size: taskSizeSchema.nullable(),
+  tags: z.array(tagSchema),
+  requiredCapabilities: z.array(capabilityNameSchema),
+  eligibility: taskEligibilitySchema,
+  version: z.number().int().positive(),
+  descriptionText: z.string().optional(),
+  expectedOutcome: z.string().optional(),
+  acceptanceCriteria: z.string().optional(),
+  agentContext: z.string().optional(),
+  checklist: z.array(checklistItemSchema).optional(),
+  upstreamRelations: z.array(taskRelationSchema).optional(),
+  downstreamRelations: z.array(taskRelationSchema).optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+});
+export type TaskCandidate = z.infer<typeof taskCandidateSchema>;
+
+export const taskDiscoveryPageSchema = z.object({
+  candidates: z.array(taskCandidateSchema),
+  nextCursor: z.string().nullable(),
+});
+export type TaskDiscoveryPage = z.infer<typeof taskDiscoveryPageSchema>;
+
 const taskFieldsSchema = z.object({
   title: z.string().trim().min(1).max(300),
   description: richTextDocumentSchema,
@@ -275,8 +355,25 @@ export const discoverTasksInputSchema = z.object({
   agentCapabilities: z.array(capabilityNameSchema).optional().default([]),
   now: taskDateSchema.optional(),
   limit: z.number().int().positive().max(100).optional().default(25),
+  cursor: z.string().trim().regex(/^\d+$/).nullable().optional().default(null),
 });
 export type DiscoverTasksInput = z.infer<typeof discoverTasksInputSchema>;
+
+export const findWorkInputSchema = z.object({
+  projectId: z.string().trim().min(1),
+  now: taskDateSchema.optional(),
+  limit: z.number().int().positive().max(100).optional().default(25),
+  cursor: z.string().trim().regex(/^\d+$/).nullable().optional().default(null),
+  fields: z.array(taskCandidateFieldSchema).max(20).optional().default([]),
+});
+export type FindWorkInput = z.infer<typeof findWorkInputSchema>;
+
+export const taskContextInputSchema = z.object({
+  projectId: z.string().trim().min(1),
+  taskId: z.string().trim().min(1),
+  now: taskDateSchema.optional(),
+});
+export type TaskContextInput = z.infer<typeof taskContextInputSchema>;
 
 export const compiledCreateTaskInputSchema = z.compile(createTaskInputSchema);
 export const compiledPrepareTaskInputSchema = z.compile(prepareTaskInputSchema);
@@ -287,6 +384,8 @@ export const compiledUpdateTaskPlanningInputSchema = z.compile(updateTaskPlannin
 export const compiledCreateTaskRelationInputSchema = z.compile(createTaskRelationInputSchema);
 export const compiledListTasksInputSchema = z.compile(listTasksInputSchema);
 export const compiledDiscoverTasksInputSchema = z.compile(discoverTasksInputSchema);
+export const compiledFindWorkInputSchema = z.compile(findWorkInputSchema);
+export const compiledTaskContextInputSchema = z.compile(taskContextInputSchema);
 
 function nodePlainText(value: unknown): string {
   const parsed = tipTapNodeSchema.safeParse(value);

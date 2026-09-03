@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 
 import Database from "better-sqlite3";
 import { and, asc, eq, isNull, max } from "drizzle-orm";
@@ -18,8 +20,10 @@ import {
 } from "../application/task-errors";
 import type { TaskStore } from "../application/tasks";
 import {
+  attempts,
   events,
   idempotencyRecords,
+  projects,
   schema,
   tags,
   taskCapabilityRequirements,
@@ -30,6 +34,7 @@ import {
 import {
   richTextToPlainText,
   taskRelationSchema,
+  taskContextPackageSchema,
   taskSchema,
   taskPriorityRank,
   todayIsoDate,
@@ -44,6 +49,11 @@ import {
   type ReopenTaskInput,
   type TagInput,
   type Task,
+  type TaskCandidate,
+  type TaskCandidateField,
+  type TaskContextInput,
+  type TaskContextPackage,
+  type TaskDiscoveryPage,
   type TaskEligibility,
   type TaskRelation,
   type UpdateTaskPlanningInput,
@@ -245,6 +255,68 @@ function compareTasks(left: Task, right: Task) {
     return left.dueAt.localeCompare(right.dueAt);
   }
   return left.sequence - right.sequence;
+}
+
+function discoverableTasks(db: DatabaseSession, input: DiscoverTasksInput): readonly Task[] {
+  return db
+    .select()
+    .from(tasks)
+    .where(and(eq(tasks.projectId, input.projectId), isNull(tasks.archivedAt)))
+    .orderBy(asc(tasks.sequence))
+    .all()
+    .map((row) => taskFromRow(db, row, defaultEligibilityContext(input)))
+    .filter((task) => task.eligibility?.claimable)
+    .toSorted(compareTasks);
+}
+
+function candidateFromTask(task: Task, fields: readonly TaskCandidateField[] = []): TaskCandidate {
+  const selectedFields = new Set(fields);
+  return {
+    id: task.id,
+    projectId: task.projectId,
+    sequence: task.sequence,
+    parentTaskId: task.parentTaskId,
+    title: task.title,
+    lifecycle: task.lifecycle,
+    priority: task.priority,
+    position: task.position,
+    dueAt: task.dueAt,
+    size: task.size,
+    tags: task.tags,
+    requiredCapabilities: task.requiredCapabilities,
+    eligibility: task.eligibility ?? taskEligibility(task, defaultEligibilityContext(), []),
+    version: task.version,
+    ...(selectedFields.has("descriptionText") ? { descriptionText: task.descriptionText } : {}),
+    ...(selectedFields.has("expectedOutcome") ? { expectedOutcome: task.expectedOutcome } : {}),
+    ...(selectedFields.has("acceptanceCriteria")
+      ? { acceptanceCriteria: task.acceptanceCriteria }
+      : {}),
+    ...(selectedFields.has("agentContext") ? { agentContext: task.agentContext } : {}),
+    ...(selectedFields.has("checklist") ? { checklist: task.checklist } : {}),
+    ...(selectedFields.has("relations")
+      ? {
+          upstreamRelations: task.upstreamRelations,
+          downstreamRelations: task.downstreamRelations,
+        }
+      : {}),
+    ...(selectedFields.has("timestamps")
+      ? { createdAt: task.createdAt, updatedAt: task.updatedAt }
+      : {}),
+  };
+}
+
+function discoveryPageFromTasks(
+  sortedTasks: readonly Task[],
+  input: DiscoverTasksInput,
+  fields: readonly TaskCandidateField[] = [],
+): TaskDiscoveryPage {
+  const offset = input.cursor ? Number(input.cursor) : 0;
+  const page = sortedTasks.slice(offset, offset + input.limit);
+  const nextOffset = offset + page.length;
+  return {
+    candidates: page.map((task) => candidateFromTask(task, fields)),
+    nextCursor: nextOffset < sortedTasks.length ? String(nextOffset) : null,
+  };
 }
 
 function taskFromRow(db: DatabaseSession, row: TaskRow, context?: EligibilityContext): Task {
@@ -533,6 +605,69 @@ function currentTask(db: DatabaseSession, taskId: string) {
   return row;
 }
 
+function projectRootForTaskContext(db: DatabaseSession, projectId: string) {
+  const [project] = db.select().from(projects).where(eq(projects.id, projectId)).limit(1).all();
+  if (!project) {
+    throw new TaskNotFoundError({ taskId: projectId, message: "That project does not exist." });
+  }
+  return project.repositoryRoot;
+}
+
+function projectInstructions(repositoryRoot: string) {
+  const path = join(repositoryRoot, "AGENTS.md");
+  if (!existsSync(path)) return [];
+  const relativePath = relative(repositoryRoot, path);
+  return [{ path: relativePath || "AGENTS.md", text: readFileSync(path, "utf8") }];
+}
+
+function attemptSummariesForTask(db: DatabaseSession, taskId: string) {
+  return db
+    .select()
+    .from(attempts)
+    .where(eq(attempts.taskId, taskId))
+    .orderBy(asc(attempts.createdAt))
+    .all()
+    .map((row) => ({
+      id: row.id,
+      taskId: row.taskId,
+      agentRunId: row.agentRunId,
+      status: row.status,
+      summary: row.summary,
+      verification: JSON.parse(row.verificationJson),
+      createdAt: row.createdAt,
+      completedAt: row.completedAt,
+    }));
+}
+
+function taskContextFromInput(db: DatabaseSession, input: TaskContextInput): TaskContextPackage {
+  const row = currentTask(db, input.taskId);
+  if (row.projectId !== input.projectId) {
+    throw new TaskNotFoundError({
+      taskId: input.taskId,
+      message: "That task does not belong to the requested project.",
+    });
+  }
+  const task = taskFromRow(db, row, defaultEligibilityContext({ now: input.now }));
+  const repositoryRoot = projectRootForTaskContext(db, input.projectId);
+  return taskContextPackageSchema.parse({
+    projectId: input.projectId,
+    task,
+    acceptanceCriteria: task.acceptanceCriteria,
+    agentContext: task.agentContext,
+    checklist: task.checklist,
+    relations: {
+      upstream: task.upstreamRelations,
+      downstream: task.downstreamRelations,
+    },
+    paths: {
+      repositoryRoot,
+      referencedPaths: [],
+    },
+    priorAttempts: attemptSummariesForTask(db, task.id),
+    projectInstructions: projectInstructions(repositoryRoot),
+  });
+}
+
 function assertExpectedVersion(row: TaskRow, expectedVersion: number) {
   if (row.version !== expectedVersion) {
     throw new TaskVersionConflictError({
@@ -584,18 +719,23 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
     },
     discover(input: DiscoverTasksInput) {
       return Effect.try({
-        try: () =>
-          db
-            .select()
-            .from(tasks)
-            .where(and(eq(tasks.projectId, input.projectId), isNull(tasks.archivedAt)))
-            .orderBy(asc(tasks.sequence))
-            .all()
-            .map((row) => taskFromRow(db, row, defaultEligibilityContext(input)))
-            .filter((task) => task.eligibility?.claimable)
-            .toSorted(compareTasks)
-            .slice(0, input.limit),
+        try: () => {
+          const offset = input.cursor ? Number(input.cursor) : 0;
+          return discoverableTasks(db, input).slice(offset, offset + input.limit);
+        },
         catch: persistenceError,
+      });
+    },
+    discoverPage(input: DiscoverTasksInput, fields: readonly TaskCandidateField[] = []) {
+      return Effect.try({
+        try: () => discoveryPageFromTasks(discoverableTasks(db, input), input, fields),
+        catch: persistenceError,
+      });
+    },
+    getContext(input: TaskContextInput) {
+      return Effect.try({
+        try: () => taskContextFromInput(db, input),
+        catch: commandError,
       });
     },
     create(input: CreateTaskInput, actor: Actor) {

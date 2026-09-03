@@ -6,7 +6,9 @@ import {
   compiledCreateTaskInputSchema,
   compiledCreateTaskRelationInputSchema,
   compiledDiscoverTasksInputSchema,
+  compiledFindWorkInputSchema,
   compiledListTasksInputSchema,
+  compiledTaskContextInputSchema,
   compiledPrepareTaskInputSchema,
   compiledReopenTaskInputSchema,
   compiledUpdateTaskPlanningInputSchema,
@@ -18,10 +20,15 @@ import {
   type CreateTaskInput,
   type CreateTaskRelationInput,
   type DiscoverTasksInput,
+  type FindWorkInput,
   type ListTasksInput,
   type PrepareTaskInput,
   type ReopenTaskInput,
   type Task,
+  type TaskContextInput,
+  type TaskContextPackage,
+  type TaskCandidateField,
+  type TaskDiscoveryPage,
   type TaskRelation,
   type UpdateTaskPlanningInput,
 } from "../domain/tasks";
@@ -36,6 +43,11 @@ import {
 export interface TaskStore {
   list(input: ListTasksInput): Effect.Effect<readonly Task[], TaskPersistenceError>;
   discover(input: DiscoverTasksInput): Effect.Effect<readonly Task[], TaskPersistenceError>;
+  discoverPage(
+    input: DiscoverTasksInput,
+    fields?: readonly TaskCandidateField[],
+  ): Effect.Effect<TaskDiscoveryPage, TaskPersistenceError>;
+  getContext(input: TaskContextInput): Effect.Effect<TaskContextPackage, TaskCommandError>;
   create(input: CreateTaskInput, actor: Actor): Effect.Effect<Task, TaskCommandError>;
   prepare(input: PrepareTaskInput, actor: Actor): Effect.Effect<Task, TaskCommandError>;
   complete(input: CompleteTaskInput, actor: Actor): Effect.Effect<Task, TaskCommandError>;
@@ -164,5 +176,33 @@ export function discoverTasks(input: unknown, services: TaskServices) {
   return Effect.flatMap(
     parseInput(() => compiledDiscoverTasksInputSchema.parse(input)),
     (parsed) => services.store.discover(parsed),
+  );
+}
+
+export function findWork(
+  input: unknown,
+  agentCapabilities: readonly string[],
+  services: TaskServices,
+) {
+  return Effect.flatMap(
+    parseInput(() => compiledFindWorkInputSchema.parse(input)),
+    (parsed: FindWorkInput) =>
+      services.store.discoverPage(
+        {
+          projectId: parsed.projectId,
+          agentCapabilities: [...agentCapabilities],
+          now: parsed.now,
+          limit: parsed.limit,
+          cursor: parsed.cursor,
+        },
+        parsed.fields,
+      ),
+  );
+}
+
+export function getTaskContext(input: unknown, services: TaskServices) {
+  return Effect.flatMap(
+    parseInput(() => compiledTaskContextInputSchema.parse(input)),
+    (parsed) => services.store.getContext(parsed),
   );
 }

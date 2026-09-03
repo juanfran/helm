@@ -145,6 +145,57 @@ export const taskCapabilityRequirements = sqliteTable(
   ],
 );
 
+export const agentProfiles = sqliteTable(
+  "agent_profiles",
+  {
+    id: text("id").primaryKey(),
+    profileKey: text("profile_key").notNull(),
+    displayName: text("display_name").notNull(),
+    capabilitiesJson: text("capabilities_json").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [uniqueIndex("agent_profiles_profile_key_unique").on(table.profileKey)],
+);
+
+export const agentRuns = sqliteTable(
+  "agent_runs",
+  {
+    id: text("id").primaryKey(),
+    profileId: text("profile_id")
+      .notNull()
+      .references(() => agentProfiles.id),
+    mcpSessionId: text("mcp_session_id").notNull(),
+    status: text("status", { enum: ["active", "closed"] }).notNull(),
+    clientName: text("client_name"),
+    clientVersion: text("client_version"),
+    createdAt: text("created_at").notNull(),
+    lastSeenAt: text("last_seen_at").notNull(),
+    endedAt: text("ended_at"),
+  },
+  (table) => [
+    uniqueIndex("agent_runs_mcp_session_unique").on(table.mcpSessionId),
+    index("agent_runs_profile_index").on(table.profileId),
+  ],
+);
+
+export const attempts = sqliteTable(
+  "attempts",
+  {
+    id: text("id").primaryKey(),
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id),
+    agentRunId: text("agent_run_id").references(() => agentRuns.id),
+    status: text("status", { enum: ["active", "completed", "failed", "abandoned"] }).notNull(),
+    summary: text("summary").notNull(),
+    verificationJson: text("verification_json").notNull(),
+    createdAt: text("created_at").notNull(),
+    completedAt: text("completed_at"),
+  },
+  (table) => [index("attempts_task_index").on(table.taskId, table.createdAt)],
+);
+
 export const preferences = sqliteTable("preferences", {
   id: integer("id").primaryKey(),
   activeProjectId: text("active_project_id").references(() => projects.id),
@@ -184,6 +235,9 @@ export const schema = {
   tags,
   taskTags,
   taskCapabilityRequirements,
+  agentProfiles,
+  agentRuns,
+  attempts,
   taskRelations,
   preferences,
   events,
