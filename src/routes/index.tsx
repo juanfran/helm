@@ -7,7 +7,15 @@ import { getTaskCollection } from "../features/tasks/task-collection";
 import { TaskWorkspace } from "../features/tasks/task-workspace";
 import { changeTheme, createInitialProject } from "../server/project-functions";
 import { readAppState } from "../server/project-functions";
-import { archiveHumanTask, createHumanTask, prepareHumanTask } from "../server/task-functions";
+import {
+  archiveHumanTask,
+  completeHumanTask,
+  createHumanTask,
+  createHumanTaskRelation,
+  prepareHumanTask,
+  reopenHumanTask,
+  updateHumanTaskPlanning,
+} from "../server/task-functions";
 import { applyThemeToDocument } from "../styles/theme";
 import type { Project, Theme } from "../domain/projects";
 
@@ -68,6 +76,15 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
       tasks={tasks}
       onCreateTask={(input) => createHumanTask({ data: input }).then(refresh)}
       onPrepareTask={(input) => prepareHumanTask({ data: input }).then(refresh)}
+      onUpdateTaskPlanning={(input) => updateHumanTaskPlanning({ data: input }).then(refresh)}
+      onCompleteTask={(input) => completeHumanTask({ data: input }).then(refresh)}
+      onReopenTask={(input) => reopenHumanTask({ data: input }).then(refresh)}
+      onCreateTaskRelation={(input) =>
+        createHumanTaskRelation({ data: input }).then(async (response) => {
+          if (response.ok) await collection.utils.refetch({ throwOnError: true });
+          return response;
+        })
+      }
       onArchiveTask={(input) => archiveHumanTask({ data: input }).then(refresh)}
       onChangeTheme={async (nextTheme) => {
         const previous = theme;

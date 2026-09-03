@@ -13,7 +13,12 @@ import {
   type SqliteProjectStore,
 } from "../infrastructure/sqlite-project-store.server";
 import { createSqliteTaskStore } from "../infrastructure/sqlite-task-store.server";
-import { executeArchiveTask, executeCreateTask } from "./task-adapter";
+import {
+  executeArchiveTask,
+  executeCreateTask,
+  executeCreateTaskRelation,
+  executeUpdateTaskPlanning,
+} from "./task-adapter";
 
 let temporaryRoot: string;
 let projectStore: SqliteProjectStore;
@@ -46,6 +51,7 @@ describe("task server adapter", () => {
     const created = await executeCreateTask(
       {
         projectId,
+        parentTaskId: null,
         lifecycle: "backlog",
         title: "Captured work",
         description: emptyRichTextDocument,
@@ -62,6 +68,7 @@ describe("task server adapter", () => {
     const invalidReady = await executeCreateTask(
       {
         projectId,
+        parentTaskId: null,
         lifecycle: "ready",
         title: "Not prepared",
         description: emptyRichTextDocument,
@@ -105,6 +112,111 @@ describe("task server adapter", () => {
     expect(conflict).toMatchObject({
       ok: false,
       error: { type: "TaskVersionConflictError", expectedVersion: 1, currentVersion: 2 },
+    });
+  });
+
+  it("serializes task planning updates and exclusive tag errors", async () => {
+    const created = await executeCreateTask(
+      {
+        projectId,
+        parentTaskId: null,
+        lifecycle: "ready",
+        title: "Routable work",
+        description: emptyRichTextDocument,
+        expectedOutcome: "Planning can be changed.",
+        acceptanceCriteria: "The adapter returns a compact response.",
+        agentContext: "",
+        checklist: [{ id: "verify", text: "Verify routing", checked: false }],
+        expectedVersion: 0,
+        idempotencyKey: "create-routable",
+      },
+      actor,
+      taskServices,
+    );
+    if (!created.ok) throw new Error("Expected ready task creation to succeed");
+
+    const invalid = await executeUpdateTaskPlanning(
+      {
+        taskId: created.task.id,
+        priority: "high",
+        position: 1,
+        notBefore: null,
+        dueAt: null,
+        size: null,
+        tags: [
+          {
+            name: "frontend",
+            description: "Browser work",
+            color: "#2563eb",
+            exclusiveGroup: "area",
+          },
+          {
+            name: "backend",
+            description: "Server work",
+            color: "#16a34a",
+            exclusiveGroup: "area",
+          },
+        ],
+        requiredCapabilities: [],
+        expectedVersion: created.task.version,
+        idempotencyKey: "invalid-routing",
+      },
+      actor,
+      taskServices,
+    );
+
+    expect(invalid).toMatchObject({
+      ok: false,
+      error: {
+        type: "TaskTagConstraintError",
+        group: "area",
+        tagNames: ["frontend", "backend"],
+      },
+    });
+  });
+
+  it("serializes relation validation errors", async () => {
+    const created = await executeCreateTask(
+      {
+        projectId,
+        parentTaskId: null,
+        lifecycle: "ready",
+        title: "Self link candidate",
+        description: emptyRichTextDocument,
+        expectedOutcome: "Relations can be validated.",
+        acceptanceCriteria: "The adapter returns relation errors.",
+        agentContext: "",
+        checklist: [{ id: "verify", text: "Verify relation errors", checked: false }],
+        expectedVersion: 0,
+        idempotencyKey: "self-link-candidate",
+      },
+      actor,
+      taskServices,
+    );
+    if (!created.ok) throw new Error("Expected ready task creation to succeed");
+
+    const invalid = await executeCreateTaskRelation(
+      {
+        projectId,
+        sourceTaskId: created.task.id,
+        targetTaskId: created.task.id,
+        type: "blocks",
+        expectedSourceVersion: created.task.version,
+        expectedTargetVersion: created.task.version,
+        idempotencyKey: "adapter-self-link",
+      },
+      actor,
+      taskServices,
+    );
+
+    expect(invalid).toMatchObject({
+      ok: false,
+      error: {
+        type: "TaskRelationError",
+        sourceTaskId: created.task.id,
+        targetTaskId: created.task.id,
+        relationPath: [`#${created.task.sequence}`],
+      },
     });
   });
 });

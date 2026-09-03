@@ -1,4 +1,12 @@
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import {
+  index,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+  uniqueIndex,
+  type AnySQLiteColumn,
+} from "drizzle-orm/sqlite-core";
 
 export const projects = sqliteTable(
   "projects",
@@ -25,8 +33,16 @@ export const tasks = sqliteTable(
       .notNull()
       .references(() => projects.id),
     sequence: integer("sequence").notNull(),
+    parentTaskId: text("parent_task_id").references((): AnySQLiteColumn => tasks.id),
     title: text("title").notNull(),
-    lifecycle: text("lifecycle", { enum: ["backlog", "ready"] }).notNull(),
+    lifecycle: text("lifecycle", { enum: ["backlog", "ready", "done", "cancelled"] }).notNull(),
+    priority: text("priority", { enum: ["urgent", "high", "normal", "low"] })
+      .notNull()
+      .default("normal"),
+    position: integer("position").notNull().default(0),
+    notBefore: text("not_before"),
+    dueAt: text("due_at"),
+    size: text("size", { enum: ["xs", "s", "m", "l", "xl"] }),
     descriptionJson: text("description_json").notNull(),
     descriptionText: text("description_text").notNull(),
     expectedOutcome: text("expected_outcome").notNull(),
@@ -41,6 +57,91 @@ export const tasks = sqliteTable(
   (table) => [
     uniqueIndex("tasks_project_sequence_unique").on(table.projectId, table.sequence),
     index("tasks_project_queue_index").on(table.projectId, table.archivedAt, table.lifecycle),
+    index("tasks_parent_index").on(table.parentTaskId),
+    index("tasks_project_order_index").on(
+      table.projectId,
+      table.archivedAt,
+      table.lifecycle,
+      table.priority,
+      table.position,
+      table.dueAt,
+      table.sequence,
+    ),
+  ],
+);
+
+export const taskRelations = sqliteTable(
+  "task_relations",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id),
+    sourceTaskId: text("source_task_id")
+      .notNull()
+      .references(() => tasks.id),
+    targetTaskId: text("target_task_id")
+      .notNull()
+      .references(() => tasks.id),
+    type: text("type", {
+      enum: ["blocks", "related_to", "duplicates", "discovered_from"],
+    }).notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("task_relations_unique").on(table.sourceTaskId, table.targetTaskId, table.type),
+    index("task_relations_source_index").on(table.sourceTaskId),
+    index("task_relations_target_index").on(table.targetTaskId),
+  ],
+);
+
+export const tags = sqliteTable(
+  "tags",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    color: text("color").notNull(),
+    exclusiveGroup: text("exclusive_group"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("tags_project_name_unique").on(table.projectId, table.name),
+    index("tags_project_group_index").on(table.projectId, table.exclusiveGroup),
+  ],
+);
+
+export const taskTags = sqliteTable(
+  "task_tags",
+  {
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id),
+    tagId: text("tag_id")
+      .notNull()
+      .references(() => tags.id),
+  },
+  (table) => [
+    primaryKey({ columns: [table.taskId, table.tagId] }),
+    index("task_tags_tag_index").on(table.tagId),
+  ],
+);
+
+export const taskCapabilityRequirements = sqliteTable(
+  "task_capability_requirements",
+  {
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id),
+    capability: text("capability").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.taskId, table.capability] }),
+    index("task_capability_requirement_index").on(table.capability),
   ],
 );
 
@@ -77,4 +178,14 @@ export const idempotencyRecords = sqliteTable("idempotency_records", {
   createdAt: text("created_at").notNull(),
 });
 
-export const schema = { projects, tasks, preferences, events, idempotencyRecords };
+export const schema = {
+  projects,
+  tasks,
+  tags,
+  taskTags,
+  taskCapabilityRequirements,
+  taskRelations,
+  preferences,
+  events,
+  idempotencyRecords,
+};

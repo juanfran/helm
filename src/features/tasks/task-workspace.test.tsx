@@ -22,8 +22,19 @@ const backlog: Task = {
   id: "task-1",
   projectId: project.id,
   sequence: 1,
+  parentTaskId: null,
+  childTaskIds: [],
   title: "Captured task",
   lifecycle: "backlog",
+  priority: "normal",
+  position: 1,
+  notBefore: null,
+  dueAt: null,
+  size: null,
+  tags: [],
+  requiredCapabilities: [],
+  upstreamRelations: [],
+  downstreamRelations: [],
   description: emptyRichTextDocument,
   descriptionText: "",
   expectedOutcome: "",
@@ -45,6 +56,10 @@ function props(tasks: readonly Task[] = [backlog]) {
     tasks,
     onCreateTask: vi.fn(),
     onPrepareTask: vi.fn(),
+    onUpdateTaskPlanning: vi.fn(),
+    onCompleteTask: vi.fn(),
+    onReopenTask: vi.fn(),
+    onCreateTaskRelation: vi.fn(),
     onArchiveTask: vi.fn(),
     onChangeTheme: vi.fn(),
   };
@@ -62,6 +77,7 @@ describe("task workspace", () => {
 
     expect(workspace.onCreateTask).toHaveBeenCalledWith({
       projectId: project.id,
+      parentTaskId: null,
       lifecycle: "backlog",
       title: "Captured task",
       description: emptyRichTextDocument,
@@ -97,7 +113,119 @@ describe("task workspace", () => {
       acceptanceCriteria: "The test passes.",
       agentContext: "Keep the seam shared.",
       checklist: [{ id: "item-1", text: "Run pnpm check", checked: false }],
+      priority: "normal",
+      position: 1,
+      notBefore: null,
+      dueAt: null,
+      size: null,
+      tags: [],
+      requiredCapabilities: [],
       expectedVersion: 1,
+      idempotencyKey: expect.any(String),
+    });
+  });
+
+  it("updates planning metadata without changing preparation text", async () => {
+    const user = userEvent.setup();
+    const workspace = props();
+    workspace.onUpdateTaskPlanning.mockResolvedValue({
+      ok: true,
+      task: { ...backlog, priority: "urgent", version: 2 },
+    });
+    render(<TaskWorkspace {...workspace} />);
+
+    await user.selectOptions(screen.getByLabelText("Priority"), "urgent");
+    await user.clear(screen.getByLabelText("Position"));
+    await user.type(screen.getByLabelText("Position"), "4");
+    await user.type(screen.getByLabelText("Start date"), "2026-09-10");
+    await user.type(screen.getByLabelText("Due date"), "2026-09-12");
+    await user.selectOptions(screen.getByLabelText("Size"), "m");
+    await user.type(screen.getByLabelText("Tags"), "frontend");
+    await user.type(screen.getByLabelText("Required capabilities"), "react");
+    await user.click(screen.getByRole("button", { name: "Save planning" }));
+
+    expect(workspace.onUpdateTaskPlanning).toHaveBeenCalledWith({
+      taskId: backlog.id,
+      priority: "urgent",
+      position: 4,
+      notBefore: "2026-09-10",
+      dueAt: "2026-09-12",
+      size: "m",
+      tags: [{ name: "frontend", description: "", color: "#2563eb", exclusiveGroup: null }],
+      requiredCapabilities: ["react"],
+      expectedVersion: 1,
+      idempotencyKey: expect.any(String),
+    });
+  });
+
+  it("shows task relations and submits child and relation commands", async () => {
+    const user = userEvent.setup();
+    const dependent: Task = {
+      ...backlog,
+      id: "task-2",
+      sequence: 2,
+      title: "Dependent task",
+      version: 3,
+      upstreamRelations: [
+        {
+          id: "relation-1",
+          projectId: project.id,
+          sourceTaskId: backlog.id,
+          sourceSequence: backlog.sequence,
+          sourceTitle: backlog.title,
+          targetTaskId: "task-2",
+          targetSequence: 2,
+          targetTitle: "Dependent task",
+          type: "blocks",
+          createdAt: "2026-09-03T10:20:00.000Z",
+        },
+      ],
+    };
+    const parent: Task = {
+      ...backlog,
+      childTaskIds: [dependent.id],
+      downstreamRelations: dependent.upstreamRelations,
+    };
+    const workspace = props([parent, dependent]);
+    workspace.onCreateTask.mockResolvedValue({ ok: true, task: { ...backlog, id: "task-child" } });
+    workspace.onCreateTaskRelation.mockResolvedValue({
+      ok: true,
+      relation: dependent.upstreamRelations[0],
+    });
+    workspace.onCompleteTask.mockResolvedValue({
+      ok: true,
+      task: { ...parent, lifecycle: "done" },
+    });
+    render(<TaskWorkspace {...workspace} />);
+
+    expect(screen.getByText(/Children:/).textContent).toContain("#2 Dependent task");
+    expect(screen.getByText(/blocks to #2 Dependent task/)).toBeTruthy();
+
+    await user.type(screen.getByLabelText("Child task title"), "New child");
+    await user.click(screen.getByRole("button", { name: "Add child" }));
+    await user.click(screen.getByRole("button", { name: "Add relation" }));
+    await user.click(screen.getByRole("button", { name: "Done" }));
+
+    expect(workspace.onCreateTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: project.id,
+        parentTaskId: parent.id,
+        lifecycle: "backlog",
+        title: "New child",
+      }),
+    );
+    expect(workspace.onCreateTaskRelation).toHaveBeenCalledWith({
+      projectId: project.id,
+      sourceTaskId: parent.id,
+      targetTaskId: dependent.id,
+      type: "blocks",
+      expectedSourceVersion: parent.version,
+      expectedTargetVersion: dependent.version,
+      idempotencyKey: expect.any(String),
+    });
+    expect(workspace.onCompleteTask).toHaveBeenCalledWith({
+      taskId: parent.id,
+      expectedVersion: parent.version,
       idempotencyKey: expect.any(String),
     });
   });

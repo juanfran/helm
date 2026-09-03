@@ -15,6 +15,20 @@
       "when": 1788444681181,
       "tag": "0001_ambitious_maggott",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788451852131,
+      "tag": "0002_oval_namor",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1788453415870,
+      "tag": "0003_free_firelord",
+      "breakpoints": true
     }
   ]
 }

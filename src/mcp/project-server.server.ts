@@ -3,10 +3,24 @@ import { Effect } from "effect";
 import { z } from "zod";
 
 import { getAppState, listProjects, type ProjectServices } from "../application/projects";
-import type { TaskServices } from "../application/tasks";
+import { discoverTasks, type TaskServices } from "../application/tasks";
 import { appStateSchema, projectSchema } from "../domain/projects";
-import { createTaskInputSchema, taskSchema, type Actor } from "../domain/tasks";
-import { executeCreateTask } from "../server/task-adapter";
+import {
+  completeTaskInputSchema,
+  createTaskInputSchema,
+  createTaskRelationInputSchema,
+  discoverTasksInputSchema,
+  reopenTaskInputSchema,
+  taskRelationSchema,
+  taskSchema,
+  type Actor,
+} from "../domain/tasks";
+import {
+  executeCompleteTask,
+  executeCreateTask,
+  executeCreateTaskRelation,
+  executeReopenTask,
+} from "../server/task-adapter";
 
 const DEFAULT_MCP_ACTOR: Actor = { type: "agent", id: "local-mcp-client" };
 
@@ -63,6 +77,13 @@ export function createHelmMcpServer(
             expectedVersion: z.number().optional(),
             currentVersion: z.number().optional(),
             changeSummary: z.string().optional(),
+            group: z.string().optional(),
+            tagNames: z.array(z.string()).optional(),
+            lifecycle: z.string().optional(),
+            parentTaskId: z.string().optional(),
+            sourceTaskId: z.string().optional(),
+            targetTaskId: z.string().optional(),
+            relationPath: z.array(z.string()).optional(),
           })
           .optional(),
       },
@@ -77,6 +98,121 @@ export function createHelmMcpServer(
         content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }],
         structuredContent,
         isError: !response.ok,
+      };
+    },
+  );
+
+  server.registerTool(
+    "create_task_relation",
+    {
+      title: "Create a Helm task relation",
+      description:
+        "Create a typed relation between two tasks through Helm's shared relation command.",
+      inputSchema: createTaskRelationInputSchema,
+      outputSchema: {
+        ok: z.boolean(),
+        relation: taskRelationSchema.optional(),
+        error: z
+          .object({
+            type: z.string(),
+            message: z.string(),
+            taskId: z.string().optional(),
+            expectedVersion: z.number().optional(),
+            currentVersion: z.number().optional(),
+            changeSummary: z.string().optional(),
+            sourceTaskId: z.string().optional(),
+            targetTaskId: z.string().optional(),
+            relationPath: z.array(z.string()).optional(),
+          })
+          .optional(),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input) => {
+      const response = await executeCreateTaskRelation(input, actor, taskServices);
+      const structuredContent = response.ok
+        ? { ok: true, relation: response.relation }
+        : { ok: false, error: response.error };
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }],
+        structuredContent,
+        isError: !response.ok,
+      };
+    },
+  );
+
+  server.registerTool(
+    "complete_task",
+    {
+      title: "Complete a Helm task",
+      description:
+        "Mark a task complete through the shared lifecycle command so dependent eligibility updates.",
+      inputSchema: completeTaskInputSchema,
+      outputSchema: {
+        ok: z.boolean(),
+        task: taskSchema.optional(),
+        error: z.object({ type: z.string(), message: z.string() }).optional(),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input) => {
+      const response = await executeCompleteTask(input, actor, taskServices);
+      const structuredContent = response.ok
+        ? { ok: true, task: response.task }
+        : { ok: false, error: response.error };
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }],
+        structuredContent,
+        isError: !response.ok,
+      };
+    },
+  );
+
+  server.registerTool(
+    "reopen_task",
+    {
+      title: "Reopen a Helm task",
+      description:
+        "Reopen a complete task through the shared lifecycle command so dependent eligibility updates.",
+      inputSchema: reopenTaskInputSchema,
+      outputSchema: {
+        ok: z.boolean(),
+        task: taskSchema.optional(),
+        error: z.object({ type: z.string(), message: z.string() }).optional(),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input) => {
+      const response = await executeReopenTask(input, actor, taskServices);
+      const structuredContent = response.ok
+        ? { ok: true, task: response.task }
+        : { ok: false, error: response.error };
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }],
+        structuredContent,
+        isError: !response.ok,
+      };
+    },
+  );
+
+  server.registerTool(
+    "discover_tasks",
+    {
+      title: "Discover claimable Helm tasks",
+      description:
+        "Return claimable ready work in the same deterministic order and with the same eligibility explanation used by Helm task lists.",
+      inputSchema: discoverTasksInputSchema,
+      outputSchema: {
+        tasks: z.array(taskSchema),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async (input) => {
+      const tasks = await Effect.runPromise(discoverTasks(input, taskServices));
+      const structuredContent = { tasks: [...tasks] };
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }],
+        structuredContent,
       };
     },
   );
