@@ -4,6 +4,8 @@ import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
 import { TanStackDevtools } from "@tanstack/react-devtools";
 
 import TanStackQueryDevtools from "../integrations/tanstack-query/devtools";
+import { readAppState } from "../server/project-functions";
+import { getThemeProps } from "../styles/theme";
 import { tokens } from "../styles/tokens.stylex";
 
 import appCss from "../styles.css?url";
@@ -15,6 +17,7 @@ interface MyRouterContext {
 }
 
 export const Route = createRootRouteWithContext<MyRouterContext>()({
+  loader: () => readAppState(),
   head: () => ({
     meta: [
       {
@@ -51,8 +54,9 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 });
 
 function RootDocument({ children }: { children: React.ReactNode }) {
+  const { theme } = Route.useLoaderData();
   return (
-    <html lang="en">
+    <html lang="en" data-theme={theme} {...getThemeProps(theme)}>
       <head>
         <HeadContent />
       </head>

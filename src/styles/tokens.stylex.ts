@@ -23,6 +23,14 @@ export const tokens = stylex.defineVars({
     default: "#59635a",
     [DARK]: "#aeb7ac",
   },
+  danger: {
+    default: "#9f2d24",
+    [DARK]: "#ff9b91",
+  },
+  surfaceMuted: {
+    default: "#eef0eb",
+    [DARK]: "#222822",
+  },
   surface: {
     default: "#ffffff",
     [DARK]: "#191d19",
@@ -41,4 +49,28 @@ export const tokens = stylex.defineVars({
   space6: "24px",
   space7: "32px",
   space8: "40px",
+});
+
+export const lightTheme = stylex.createTheme(tokens, {
+  accent: "#386641",
+  background: "#f4f5f1",
+  border: "#d8ddd4",
+  danger: "#9f2d24",
+  foreground: "#172019",
+  foregroundMuted: "#59635a",
+  surface: "#ffffff",
+  surfaceMuted: "#eef0eb",
+  shadow: "0 16px 48px rgb(23 32 25 / 8%)",
+});
+
+export const darkTheme = stylex.createTheme(tokens, {
+  accent: "#91c69a",
+  background: "#101310",
+  border: "#30372f",
+  danger: "#ff9b91",
+  foreground: "#edf2eb",
+  foregroundMuted: "#aeb7ac",
+  surface: "#191d19",
+  surfaceMuted: "#222822",
+  shadow: "0 16px 48px rgb(0 0 0 / 24%)",
 });
