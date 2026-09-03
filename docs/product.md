@@ -81,6 +81,7 @@ Helm does not execute agents. External agents connect to the local server and de
 - Corrections are new commands and events. Tasks are archived, and withdrawn comments retain audit metadata.
 - Human, agent profile, and agent run are distinct actor concepts. MCP sessions are associated with registered runs.
 - Rich text is edited with TipTap, stored as a versioned structured document, and projected to stable plain text for search and MCP.
+- A ready task requires a title, expected outcome, acceptance criteria, and at least one checklist item. Description and agent context remain optional; backlog capture requires only a title.
 - The UI is list-first. Inbox, Ready, Scheduled, Active, Review, Activity, saved views, task detail, and an operational dashboard form the primary information architecture.
 - Realtime UI updates use a local ordered event stream. Toasts are reserved for failures, blockers, expired claims, and requested reviews.
 - UI and MCP call the same semantic command and query modules. Generic read operations never mutate state.

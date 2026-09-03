@@ -2,11 +2,11 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { createFileRoute } from "@tanstack/react-router";
 
 import { createHelmMcpServer } from "../../mcp/project-server.server";
-import { projectServices } from "../../server/project-runtime.server";
+import { projectServices, taskServices } from "../../server/project-runtime.server";
 
 async function handleMcpRequest(request: Request) {
   const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
-  const server = createHelmMcpServer(projectServices);
+  const server = createHelmMcpServer(projectServices, taskServices);
   await server.connect(transport);
   return transport.handleRequest(request);
 }

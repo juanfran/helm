@@ -17,6 +17,33 @@ export const projects = sqliteTable(
   ],
 );
 
+export const tasks = sqliteTable(
+  "tasks",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id),
+    sequence: integer("sequence").notNull(),
+    title: text("title").notNull(),
+    lifecycle: text("lifecycle", { enum: ["backlog", "ready"] }).notNull(),
+    descriptionJson: text("description_json").notNull(),
+    descriptionText: text("description_text").notNull(),
+    expectedOutcome: text("expected_outcome").notNull(),
+    acceptanceCriteria: text("acceptance_criteria").notNull(),
+    agentContext: text("agent_context").notNull(),
+    checklistJson: text("checklist_json").notNull(),
+    version: integer("version").notNull().default(1),
+    archivedAt: text("archived_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("tasks_project_sequence_unique").on(table.projectId, table.sequence),
+    index("tasks_project_queue_index").on(table.projectId, table.archivedAt, table.lifecycle),
+  ],
+);
+
 export const preferences = sqliteTable("preferences", {
   id: integer("id").primaryKey(),
   activeProjectId: text("active_project_id").references(() => projects.id),
@@ -50,4 +77,4 @@ export const idempotencyRecords = sqliteTable("idempotency_records", {
   createdAt: text("created_at").notNull(),
 });
 
-export const schema = { projects, preferences, events, idempotencyRecords };
+export const schema = { projects, tasks, preferences, events, idempotencyRecords };
