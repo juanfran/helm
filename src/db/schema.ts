@@ -1,12 +1,3 @@
-import { sqliteTable, integer, text } from 'drizzle-orm/sqlite-core'
-import { sql } from 'drizzle-orm'
-
-export const todos = sqliteTable('todos', {
-  id: integer({ mode: 'number' }).primaryKey({
-    autoIncrement: true,
-  }),
-  title: text().notNull(),
-  createdAt: integer('created_at', { mode: 'timestamp' }).default(
-    sql`(unixepoch())`,
-  ),
-})
+// Domain tables are introduced by reviewed vertical slices. Keeping the schema
+// module in place lets Drizzle Kit remain configured without preserving demo data.
+export const schema = {};

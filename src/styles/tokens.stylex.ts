@@ -1,0 +1,44 @@
+import * as stylex from "@stylexjs/stylex";
+
+const DARK = "@media (prefers-color-scheme: dark)";
+
+export const tokens = stylex.defineVars({
+  accent: {
+    default: "#386641",
+    [DARK]: "#91c69a",
+  },
+  background: {
+    default: "#f4f5f1",
+    [DARK]: "#101310",
+  },
+  border: {
+    default: "#d8ddd4",
+    [DARK]: "#30372f",
+  },
+  foreground: {
+    default: "#172019",
+    [DARK]: "#edf2eb",
+  },
+  foregroundMuted: {
+    default: "#59635a",
+    [DARK]: "#aeb7ac",
+  },
+  surface: {
+    default: "#ffffff",
+    [DARK]: "#191d19",
+  },
+  radius2: "8px",
+  radius3: "12px",
+  shadow: {
+    default: "0 16px 48px rgb(23 32 25 / 8%)",
+    [DARK]: "0 16px 48px rgb(0 0 0 / 24%)",
+  },
+  space1: "4px",
+  space2: "8px",
+  space3: "12px",
+  space4: "16px",
+  space5: "20px",
+  space6: "24px",
+  space7: "32px",
+  space8: "40px",
+});

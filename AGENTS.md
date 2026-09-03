@@ -1,10 +1,16 @@
-<!-- intent-skills:start -->
-## Skill Loading
+# Helm agent guide
 
-Before editing files for a substantial task:
-- Run `npx @tanstack/intent@latest list` from the workspace root to see available local skills.
-- If a listed skill matches the task, run `npx @tanstack/intent@latest load <package>#<skill>` before changing files.
-- Use the loaded `SKILL.md` guidance while making the change.
-- Monorepos: when working across packages, run the skill check from the workspace root and prefer the local skill for the package being changed.
-- Multiple matches: prefer the most specific local skill for the package or concern you are changing; load additional skills only when the task spans multiple packages or concerns.
+Read [docs/product.md](docs/product.md) for product intent and [docs/architecture.md](docs/architecture.md) for system boundaries. Work from an approved GitHub issue and update it with verified progress.
+
+- Task lifecycle, eligibility, priority, leases, attempts, or audit history: read [.agents/skills/helm-domain/SKILL.md](.agents/skills/helm-domain/SKILL.md).
+- End-to-end behavior spanning UI, commands, persistence, realtime, or MCP: read [.agents/skills/helm-slice/SKILL.md](.agents/skills/helm-slice/SKILL.md).
+- Components, themes, responsive behavior, or visual changes: read [.agents/skills/helm-ui/SKILL.md](.agents/skills/helm-ui/SKILL.md).
+
+Keep every repository artifact in English. Use Helm terminology and generic names for integrations and coding agents.
+
+<!-- intent-skills:start -->
+
+## Skill loading
+
+Before substantial edits, run `npx @tanstack/intent@latest list` from the workspace root. Load the most specific matching local skill with `npx @tanstack/intent@latest load <package>#<skill>` and follow its `SKILL.md`.
 <!-- intent-skills:end -->
