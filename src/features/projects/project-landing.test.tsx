@@ -55,6 +55,7 @@ describe("project setup UI", () => {
             sequence: 1,
             name: "helm",
             repositoryRoot: "/projects/helm",
+            reviewMode: "required",
             version: 1,
             createdAt: "2026-09-03T10:00:00.000Z",
             updatedAt: "2026-09-03T10:00:00.000Z",

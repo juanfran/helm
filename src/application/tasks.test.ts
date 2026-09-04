@@ -9,7 +9,7 @@ import { Effect, Either } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { registerAgentRun } from "./agents";
-import { createProject } from "./projects";
+import { createProject, setProjectReviewMode } from "./projects";
 import {
   archiveTask,
   claimNextTask,
@@ -49,6 +49,7 @@ import {
   updateTaskPlanningInputSchema,
   type Actor,
   type CreateTaskInput,
+  type Task,
 } from "../domain/tasks";
 import type { RegisteredAgentRun } from "../domain/agents";
 import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
@@ -74,6 +75,9 @@ type ConcurrentTaskOperation = {
     | "claimNextTask"
     | "renewTaskLease"
     | "releaseTaskLease"
+    | "completeTask"
+    | "failTask"
+    | "cancelTask"
     | "invalidateTaskClaim"
     | "reconcileTaskLeases";
   readonly input?: unknown;
@@ -181,6 +185,70 @@ async function claimedTaskFixture(
   return { command, grant, task };
 }
 
+function completionReport(label: string) {
+  return {
+    resultSummary: `${label} completed.`,
+    changedAreas: [`src/${label}.ts`],
+    verificationResults: [
+      { name: "Application tests", status: "passed" as const, details: "Passed." },
+    ],
+    references: [],
+    risks: [],
+    followUpWork: [],
+  };
+}
+
+async function enableDirectCompletion(key: string) {
+  const project = projectStore.database
+    .prepare<[string], { version: number }>("select version from projects where id = ?")
+    .get(projectId);
+  if (!project) throw new Error("Expected the project fixture");
+  await Effect.runPromise(
+    setProjectReviewMode(
+      {
+        projectId,
+        reviewMode: "direct",
+        expectedVersion: project.version,
+        idempotencyKey: `direct-${key}`,
+      },
+      human,
+      { store: projectStore, inspector: localRepositoryInspector },
+    ),
+  );
+}
+
+async function completeReadyTask(task: Pick<Task, "id" | "version">, key: string) {
+  await enableDirectCompletion(key);
+  const registration = await registerAgent(`complete-${key}`, `Completer ${key}`);
+  const grant = await Effect.runPromise(
+    claimTask(
+      {
+        projectId,
+        taskId: task.id,
+        expectedVersion: task.version,
+        idempotencyKey: `claim-complete-${key}`,
+      },
+      registration,
+      taskServices,
+    ),
+  );
+  const result = await Effect.runPromise(
+    completeTask(
+      {
+        projectId,
+        taskId: task.id,
+        leaseToken: grant.leaseToken,
+        expectedVersion: grant.task.version,
+        report: completionReport(key),
+        idempotencyKey: `complete-${key}`,
+      },
+      registration,
+      taskServices,
+    ),
+  );
+  return result.task;
+}
+
 function taskCommandWorkerSource() {
   const effectUrl = pathToFileURL(resolve("node_modules/effect/dist/esm/index.js")).href;
   const sqliteUrl = pathToFileURL(resolve("node_modules/better-sqlite3/lib/index.js")).href;
@@ -194,6 +262,9 @@ function taskCommandWorkerSource() {
     import {
       claimNextTask,
       claimTask,
+      completeTask,
+      failTask,
+      cancelTask,
       invalidateTaskClaim,
       reconcileTaskLeases,
       releaseTaskLease,
@@ -240,6 +311,15 @@ function taskCommandWorkerSource() {
           break;
         case "releaseTaskLease":
           effect = releaseTaskLease(operation.input, operation.registration, services);
+          break;
+        case "completeTask":
+          effect = completeTask(operation.input, operation.registration, services);
+          break;
+        case "failTask":
+          effect = failTask(operation.input, operation.registration, services);
+          break;
+        case "cancelTask":
+          effect = cancelTask(operation.input, operation.actor, services);
           break;
         case "invalidateTaskClaim":
           effect = invalidateTaskClaim(operation.input, operation.actor, services);
@@ -683,17 +763,7 @@ describe("task application commands", () => {
     const ready = await Effect.runPromise(
       createTask(readyInput({ idempotencyKey: "ready-before-complete" }), human, taskServices),
     );
-    const completed = await Effect.runPromise(
-      completeTask(
-        {
-          taskId: ready.id,
-          expectedVersion: ready.version,
-          idempotencyKey: "complete-before-prepare",
-        },
-        human,
-        taskServices,
-      ),
-    );
+    const completed = await completeReadyTask(ready, "before-prepare");
     const eventCount = projectStore.database.prepare("select count(*) from events").pluck().get();
 
     const result = await Effect.runPromise(
@@ -972,17 +1042,7 @@ describe("task application commands", () => {
     const firstPage = await Effect.runPromise(findWork({ projectId, limit: 1 }, [], taskServices));
     if (!firstPage.nextCursor) throw new Error("Expected another discovery page");
 
-    await Effect.runPromise(
-      completeTask(
-        {
-          taskId: first.id,
-          expectedVersion: first.version,
-          idempotencyKey: "complete-page-first",
-        },
-        human,
-        taskServices,
-      ),
-    );
+    await completeReadyTask(first, "page-first");
     const stalePage = await Effect.runPromise(
       Effect.either(
         findWork({ projectId, limit: 1, cursor: firstPage.nextCursor }, [], taskServices),
@@ -1585,30 +1645,22 @@ describe("task application commands", () => {
     const blockedCandidates = (
       await Effect.runPromise(findWork({ projectId, limit: 100 }, [], taskServices))
     ).candidates;
-    const completedBlocker = await Effect.runPromise(
-      completeTask(
-        {
-          taskId: blocker.id,
-          expectedVersion: blockerAfterRelation.version,
-          idempotencyKey: "complete-blocker",
-        },
-        human,
-        taskServices,
-      ),
-    );
+    const completedBlocker = await completeReadyTask(blockerAfterRelation, "blocker");
     const unblocked = await Effect.runPromise(listTasks({ projectId }, taskServices));
-    const reopenedBlocker = await Effect.runPromise(
-      reopenTask(
-        {
-          taskId: blocker.id,
-          expectedVersion: completedBlocker.version,
-          reason: "Need more work",
-          idempotencyKey: "reopen-blocker",
-        },
-        human,
-        taskServices,
-      ),
-    );
+    const reopenedBlocker = (
+      await Effect.runPromise(
+        reopenTask(
+          {
+            taskId: blocker.id,
+            expectedVersion: completedBlocker.version,
+            reason: "Need more work",
+            idempotencyKey: "reopen-blocker",
+          },
+          human,
+          taskServices,
+        ),
+      )
+    ).task;
     const reblocked = await Effect.runPromise(listTasks({ projectId }, taskServices));
     const lifecycleEventHints = projectStore.database
       .prepare<[string], { kind: string; changesJson: string }>(
@@ -1660,7 +1712,7 @@ describe("task application commands", () => {
     for (const event of lifecycleEventHints) {
       expect(JSON.parse(event.changesJson)).toMatchObject({
         taskIds: [blocker.id, dependent.id].toSorted(),
-        scopes: ["tasks"],
+        scopes: expect.arrayContaining(["tasks"]),
       });
     }
   });
@@ -2743,11 +2795,14 @@ describe("task application commands", () => {
       Effect.either(
         completeTask(
           {
+            projectId,
             taskId: grant.task.id,
+            leaseToken: grant.leaseToken,
             expectedVersion: released.task.version,
+            report: completionReport("late-agent-completion"),
             idempotencyKey: "late-agent-completion",
           },
-          { type: "agent", id: registration.run.id },
+          registration,
           taskServices,
         ),
       ),
@@ -2785,7 +2840,7 @@ describe("task application commands", () => {
     });
     expect(Either.isLeft(lateCompletion) && lateCompletion.left).toMatchObject({
       _tag: "TaskLeaseError",
-      reason: "required",
+      reason: "inactive",
     });
     expect(
       projectStore.database
@@ -3046,6 +3101,125 @@ describe("task application commands", () => {
         .get(task.id),
     ).toBe(0);
   });
+
+  it("serializes completion, failure, and human cancellation races", async () => {
+    const registration = await registerAgent("result-race", "Result Racer");
+    const scenarios = [
+      ["completeTask", "failTask"],
+      ["completeTask", "cancelTask"],
+      ["failTask", "cancelTask"],
+    ] as const;
+
+    for (const [scenarioIndex, commands] of scenarios.entries()) {
+      const key = `result-race-${scenarioIndex}`;
+      // Each scenario owns the database exclusively so only its two commands contend.
+      // oxlint-disable-next-line no-await-in-loop
+      const { grant } = await claimedTaskFixture(registration, key);
+      const inputs = {
+        completeTask: {
+          projectId,
+          taskId: grant.task.id,
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          report: completionReport(key),
+          idempotencyKey: `complete-${key}`,
+        },
+        failTask: {
+          projectId,
+          taskId: grant.task.id,
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          report: {
+            classification: "verification" as const,
+            reason: "The race fixture failed verification.",
+            changedAreas: ["src/race.ts"],
+            verificationResults: [
+              {
+                name: "Race verification",
+                status: "failed" as const,
+                details: "The competing result won.",
+              },
+            ],
+            references: [],
+            risks: [],
+            followUpWork: [],
+          },
+          idempotencyKey: `fail-${key}`,
+        },
+        cancelTask: {
+          taskId: grant.task.id,
+          expectedVersion: grant.task.version,
+          reason: "The human stopped this contending execution.",
+          idempotencyKey: `cancel-${key}`,
+        },
+      };
+      // oxlint-disable-next-line no-await-in-loop
+      const outcomes = await runContendingTaskOperations(
+        commands.map((command) => ({
+          command,
+          input: inputs[command],
+          registration: command === "cancelTask" ? undefined : registration,
+          actor: command === "cancelTask" ? human : undefined,
+          now,
+        })),
+      );
+      const winnerIndex = outcomes.findIndex((outcome) => outcome.ok);
+      const winner = commands[winnerIndex];
+      if (!winner) throw new Error("Expected one result command to win");
+      const expected = {
+        completeTask: {
+          lifecycle: "review",
+          attemptStatus: "completed",
+          eventKind: "task.review.requested",
+        },
+        failTask: {
+          lifecycle: "ready",
+          attemptStatus: "failed",
+          eventKind: "task.attempt.failed",
+        },
+        cancelTask: {
+          lifecycle: "cancelled",
+          attemptStatus: "cancelled",
+          eventKind: "task.cancelled",
+        },
+      }[winner];
+      const state = projectStore.database
+        .prepare<[string], { lifecycle: string; attemptStatus: string; leaseStatus: string }>(
+          `select tasks.lifecycle,
+                  attempts.status as attemptStatus,
+                  leases.status as leaseStatus
+           from tasks
+           join attempts on attempts.task_id = tasks.id
+           join leases on leases.attempt_id = attempts.id
+           where tasks.id = ?`,
+        )
+        .get(grant.task.id);
+      const resultEvents = projectStore.database
+        .prepare<[string], string>(
+          `select kind from events
+           where entity_id = ?
+             and kind in ('task.review.requested', 'task.attempt.failed', 'task.cancelled')`,
+        )
+        .pluck()
+        .all(grant.task.id);
+      const resultRecords = projectStore.database
+        .prepare<[string, string, string], number>(
+          "select count(*) from idempotency_records where key in (?, ?, ?)",
+        )
+        .pluck()
+        .get(`complete-${key}`, `fail-${key}`, `cancel-${key}`);
+
+      expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
+      expect(outcomes.filter((outcome) => !outcome.ok)).toHaveLength(1);
+      expect(state).toEqual({
+        lifecycle: expected.lifecycle,
+        attemptStatus: expected.attemptStatus,
+        leaseStatus: expected.attemptStatus === "cancelled" ? "cancelled" : "released",
+      });
+      expect(resultEvents).toEqual([expected.eventKind]);
+      expect(resultRecords).toBe(1);
+    }
+  }, 20_000);
 
   it("accepts representative input through normal and compiled task schemas", () => {
     const valid = backlogInput();

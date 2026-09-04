@@ -98,6 +98,7 @@ const attentionEventKinds = new Set([
   "task.blocker.created",
   "task.lease.expired",
   "task.review.requested",
+  "task.review.changes_requested",
   "task.entry.change_request.created",
 ]);
 

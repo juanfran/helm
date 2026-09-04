@@ -10,7 +10,6 @@ import {
   Inbox,
   Link2,
   Plus,
-  RotateCcw,
   ShipWheel,
   SlidersHorizontal,
   X,
@@ -26,7 +25,12 @@ import type {
   ResolveManualBlockerInput,
   WithdrawActivityEntryInput,
 } from "../../domain/activity";
-import { themeSchema, type Project, type Theme } from "../../domain/projects";
+import {
+  themeSchema,
+  type Project,
+  type SetProjectReviewModeInput,
+  type Theme,
+} from "../../domain/projects";
 import {
   emptyRichTextDocument,
   compareTaskOrder,
@@ -34,21 +38,26 @@ import {
   taskRelationTypeSchema,
   taskSizeSchema,
   tagInputSchema,
+  type ApproveTaskReviewInput,
   type ArchiveTaskInput,
-  type CompleteTaskInput,
+  type CancelTaskInput,
   type CreateTaskInput,
   type CreateTaskRelationInput,
   type InvalidateTaskClaimInput,
   type PrepareTaskInput,
   type ReopenTaskInput,
+  type RequestTaskChangesInput,
+  type RestoreCancelledTaskInput,
   type RichTextDocument,
   type Task,
+  type TaskAttemptSummary,
   type TaskClaim,
   type TaskLifecycle,
   type TagInput,
   type TaskTag,
   type UpdateTaskPlanningInput,
 } from "../../domain/tasks";
+import type { ProjectCommandResponse } from "../../server/project-adapter";
 import type {
   ActivityEntryCommandResponse,
   ManualBlockerCommandResponse,
@@ -57,16 +66,20 @@ import type {
   TaskCommandResponse,
   TaskLeaseCommandResponse,
   TaskRelationCommandResponse,
+  TaskTransitionCommandResponse,
 } from "../../server/task-adapter";
 import { tokens } from "../../styles/tokens.stylex";
 import { ProjectActivityFeed } from "../activity/project-activity-feed";
 import { TaskCollaboration } from "../activity/task-collaboration";
+import { ProjectReviewModeControl } from "../projects/project-review-mode-control";
 import { RichTextEditor } from "./rich-text-editor";
+import { TaskExecutionPanel } from "./task-execution-panel";
 
 type TaskWorkspaceProps = {
   project: Project;
   theme: Theme;
   tasks: readonly Task[];
+  attempts: readonly TaskAttemptSummary[];
   tagDefinitions: readonly TaskTag[];
   activityEntries: readonly ActivityEntry[];
   manualBlockers: readonly ManualBlocker[];
@@ -75,8 +88,13 @@ type TaskWorkspaceProps = {
   onCreateTask: (input: CreateTaskInput) => Promise<TaskCommandResponse>;
   onPrepareTask: (input: PrepareTaskInput) => Promise<TaskCommandResponse>;
   onUpdateTaskPlanning: (input: UpdateTaskPlanningInput) => Promise<TaskCommandResponse>;
-  onCompleteTask: (input: CompleteTaskInput) => Promise<TaskCommandResponse>;
-  onReopenTask: (input: ReopenTaskInput) => Promise<TaskCommandResponse>;
+  onApproveTaskReview: (input: ApproveTaskReviewInput) => Promise<TaskTransitionCommandResponse>;
+  onRequestTaskChanges: (input: RequestTaskChangesInput) => Promise<TaskTransitionCommandResponse>;
+  onCancelTask: (input: CancelTaskInput) => Promise<TaskTransitionCommandResponse>;
+  onRestoreCancelledTask: (
+    input: RestoreCancelledTaskInput,
+  ) => Promise<TaskTransitionCommandResponse>;
+  onReopenTask: (input: ReopenTaskInput) => Promise<TaskTransitionCommandResponse>;
   onCreateTaskRelation: (input: CreateTaskRelationInput) => Promise<TaskRelationCommandResponse>;
   onArchiveTask: (input: ArchiveTaskInput) => Promise<TaskCommandResponse>;
   onInvalidateClaim: (input: InvalidateTaskClaimInput) => Promise<TaskLeaseCommandResponse>;
@@ -91,6 +109,7 @@ type TaskWorkspaceProps = {
     input: ResolveManualBlockerInput,
   ) => Promise<ManualBlockerCommandResponse>;
   onChangeTheme: (theme: Theme) => Promise<void>;
+  onChangeProjectReviewMode: (input: SetProjectReviewModeInput) => Promise<ProjectCommandResponse>;
 };
 
 type TagDraft = TagInput & { draftId: string };
@@ -99,6 +118,7 @@ export function TaskWorkspace({
   project,
   theme,
   tasks,
+  attempts,
   tagDefinitions,
   activityEntries,
   manualBlockers,
@@ -107,7 +127,10 @@ export function TaskWorkspace({
   onCreateTask,
   onPrepareTask,
   onUpdateTaskPlanning,
-  onCompleteTask,
+  onApproveTaskReview,
+  onRequestTaskChanges,
+  onCancelTask,
+  onRestoreCancelledTask,
   onReopenTask,
   onCreateTaskRelation,
   onArchiveTask,
@@ -117,6 +140,7 @@ export function TaskWorkspace({
   onCreateManualBlocker,
   onResolveManualBlocker,
   onChangeTheme,
+  onChangeProjectReviewMode,
 }: TaskWorkspaceProps) {
   const orderedTasks = useMemo(() => tasks.toSorted(compareTaskOrder), [tasks]);
   const [captureTitle, setCaptureTitle] = useState("");
@@ -131,6 +155,7 @@ export function TaskWorkspace({
       backlog: tasks.filter((task) => task.lifecycle === "backlog").length,
       ready: tasks.filter((task) => task.lifecycle === "ready").length,
       active: tasks.filter((task) => task.lifecycle === "in_progress").length,
+      review: tasks.filter((task) => task.lifecycle === "review").length,
       done: tasks.filter((task) => task.lifecycle === "done").length,
       claimable: tasks.filter((task) => task.eligibility?.claimable).length,
     }),
@@ -251,12 +276,20 @@ export function TaskWorkspace({
               <Activity size={14} aria-hidden="true" /> {counts.active} active
             </span>
             <span>
+              <Clock3 size={14} aria-hidden="true" /> {counts.review} review
+            </span>
+            <span>
               <CheckCircle2 size={14} aria-hidden="true" /> {counts.done} done
             </span>
             <span>
               <SlidersHorizontal size={14} aria-hidden="true" /> {counts.claimable} claimable
             </span>
           </section>
+          <ProjectReviewModeControl
+            key={`${project.id}:${project.version}`}
+            project={project}
+            onChange={onChangeProjectReviewMode}
+          />
           <form onSubmit={capture} {...stylex.props(styles.capture)} aria-label="Quick capture">
             <label htmlFor="capture-title" {...stylex.props(styles.srOnly)}>
               Task title
@@ -329,28 +362,39 @@ export function TaskWorkspace({
               events={projectEvents}
               tasks={orderedTasks}
               entries={activityEntries}
+              attempts={attempts}
             />
           ) : selectedTask ? (
-            <PreparationPanel
-              key={`${selectedTask.id}:${selectedTask.version}`}
-              task={selectedTask}
-              tasks={orderedTasks}
-              tagDefinitions={tagDefinitions}
-              activityEntries={activityEntries}
-              manualBlockers={manualBlockers}
-              onCreateTask={onCreateTask}
-              onPrepare={onPrepareTask}
-              onUpdatePlanning={onUpdateTaskPlanning}
-              onComplete={onCompleteTask}
-              onReopen={onReopenTask}
-              onCreateRelation={onCreateTaskRelation}
-              onArchive={onArchiveTask}
-              onInvalidateClaim={onInvalidateClaim}
-              onCreateActivityEntry={onCreateActivityEntry}
-              onWithdrawActivityEntry={onWithdrawActivityEntry}
-              onCreateManualBlocker={onCreateManualBlocker}
-              onResolveManualBlocker={onResolveManualBlocker}
-            />
+            <div {...stylex.props(styles.detailStack)}>
+              <TaskExecutionPanel
+                key={selectedTask.id}
+                task={selectedTask}
+                attempts={attempts}
+                onApproveReview={onApproveTaskReview}
+                onRequestChanges={onRequestTaskChanges}
+                onCancelTask={onCancelTask}
+                onRestoreTask={onRestoreCancelledTask}
+                onReopenTask={onReopenTask}
+              />
+              <PreparationPanel
+                key={`${selectedTask.id}:${selectedTask.version}`}
+                task={selectedTask}
+                tasks={orderedTasks}
+                tagDefinitions={tagDefinitions}
+                activityEntries={activityEntries}
+                manualBlockers={manualBlockers}
+                onCreateTask={onCreateTask}
+                onPrepare={onPrepareTask}
+                onUpdatePlanning={onUpdateTaskPlanning}
+                onCreateRelation={onCreateTaskRelation}
+                onArchive={onArchiveTask}
+                onInvalidateClaim={onInvalidateClaim}
+                onCreateActivityEntry={onCreateActivityEntry}
+                onWithdrawActivityEntry={onWithdrawActivityEntry}
+                onCreateManualBlocker={onCreateManualBlocker}
+                onResolveManualBlocker={onResolveManualBlocker}
+              />
+            </div>
           ) : (
             <div {...stylex.props(styles.empty)}>
               <Inbox size={32} aria-hidden="true" />
@@ -373,8 +417,6 @@ function PreparationPanel({
   onCreateTask,
   onPrepare,
   onUpdatePlanning,
-  onComplete,
-  onReopen,
   onCreateRelation,
   onArchive,
   onInvalidateClaim,
@@ -391,8 +433,6 @@ function PreparationPanel({
   onCreateTask: TaskWorkspaceProps["onCreateTask"];
   onPrepare: TaskWorkspaceProps["onPrepareTask"];
   onUpdatePlanning: TaskWorkspaceProps["onUpdateTaskPlanning"];
-  onComplete: TaskWorkspaceProps["onCompleteTask"];
-  onReopen: TaskWorkspaceProps["onReopenTask"];
   onCreateRelation: TaskWorkspaceProps["onCreateTaskRelation"];
   onArchive: TaskWorkspaceProps["onArchiveTask"];
   onInvalidateClaim: TaskWorkspaceProps["onInvalidateClaim"];
@@ -448,7 +488,10 @@ function PreparationPanel({
     .filter((child) => child !== undefined);
   const relationTarget = tasks.find((candidate) => candidate.id === relationTargetId);
   const editable = task.lifecycle === "backlog" || task.lifecycle === "ready";
-  const executionReadOnly = task.lifecycle === "in_progress" || task.lifecycle === "review";
+  const executionReadOnly =
+    task.lifecycle === "in_progress" ||
+    task.lifecycle === "review" ||
+    task.lifecycle === "cancelled";
 
   function currentPlanningFields() {
     return {
@@ -533,41 +576,6 @@ function PreparationPanel({
     }
   }
 
-  async function complete() {
-    setPending(true);
-    setError(null);
-    try {
-      const response = await onComplete({
-        taskId: task.id,
-        expectedVersion: task.version,
-        idempotencyKey: crypto.randomUUID(),
-      });
-      if (!response.ok) setError(response.error.message);
-    } catch {
-      setError("Helm could not complete the task.");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function reopen() {
-    setPending(true);
-    setError(null);
-    try {
-      const response = await onReopen({
-        taskId: task.id,
-        expectedVersion: task.version,
-        reason: "Reopened from the task workspace",
-        idempotencyKey: crypto.randomUUID(),
-      });
-      if (!response.ok) setError(response.error.message);
-    } catch {
-      setError("Helm could not reopen the task.");
-    } finally {
-      setPending(false);
-    }
-  }
-
   async function createChild() {
     if (executionReadOnly) return;
     setPending(true);
@@ -622,7 +630,7 @@ function PreparationPanel({
     if (!task.claim || claimReason.trim().length === 0) return;
     const confirmed = window.confirm(
       disposition === "cancelled"
-        ? `Cancel ${task.claim.agentDisplayName}'s claim? Their lease will stop immediately and the current attempt will be marked abandoned.`
+        ? `Stop ${task.claim.agentDisplayName}'s claim? Their lease will stop immediately and the current attempt will be marked abandoned.`
         : `Make this task available for reassignment? ${task.claim.agentDisplayName}'s lease will stop immediately and the current attempt will be marked abandoned.`,
     );
     if (!confirmed) return;
@@ -694,25 +702,6 @@ function PreparationPanel({
             <p {...stylex.props(styles.version)}>Version {task.version}</p>
           </div>
           <span {...stylex.props(styles.headerActions)}>
-            {task.lifecycle === "done" ? (
-              <Button
-                type="button"
-                variant="quiet"
-                disabled={pending}
-                onClick={() => void reopen()}
-              >
-                <RotateCcw size={15} aria-hidden="true" /> Reopen
-              </Button>
-            ) : task.lifecycle === "ready" ? (
-              <Button
-                type="button"
-                variant="quiet"
-                disabled={pending}
-                onClick={() => void complete()}
-              >
-                <CheckCircle2 size={15} aria-hidden="true" /> Done
-              </Button>
-            ) : null}
             <Button
               type="button"
               variant="quiet"
@@ -747,8 +736,8 @@ function PreparationPanel({
                 {...stylex.props(styles.textarea)}
               />
               <p id={`claim-warning-${task.id}`} {...stylex.props(styles.hint)}>
-                Both actions immediately invalidate the agent lease and mark its current attempt
-                abandoned. The task returns to Ready.
+                These claim controls return the task to Ready. Cancelling the task itself uses the
+                separate lifecycle action above.
               </p>
               <div {...stylex.props(styles.claimActionButtons)}>
                 <Button
@@ -757,7 +746,7 @@ function PreparationPanel({
                   disabled={pending || claimReason.trim().length === 0}
                   onClick={() => void invalidateClaim("cancelled")}
                 >
-                  {claimPendingDisposition === "cancelled" ? "Cancelling claim…" : "Cancel claim"}
+                  {claimPendingDisposition === "cancelled" ? "Stopping claim…" : "Stop claim"}
                 </Button>
                 <Button
                   type="button"

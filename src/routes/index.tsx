@@ -16,6 +16,7 @@ import {
 } from "../features/activity/project-sync-coordinator";
 import { reconcileOptimisticCommand } from "../features/activity/optimistic-reconciliation";
 import { ProjectLanding } from "../features/projects/project-landing";
+import { getTaskAttemptCollection } from "../features/tasks/task-attempt-collection";
 import { getTaskCollection } from "../features/tasks/task-collection";
 import { TaskWorkspace } from "../features/tasks/task-workspace";
 import {
@@ -27,18 +28,26 @@ import {
   resolveHumanManualBlocker,
   withdrawHumanActivity,
 } from "../server/activity-functions";
-import { changeTheme, createInitialProject } from "../server/project-functions";
+import {
+  changeProjectReviewMode,
+  changeTheme,
+  createInitialProject,
+} from "../server/project-functions";
 import { readAppState } from "../server/project-functions";
 import {
   archiveHumanTask,
-  completeHumanTask,
+  approveHumanTaskReview,
+  cancelHumanTask,
   createHumanTask,
   createHumanTaskRelation,
   invalidateHumanTaskClaim,
   prepareHumanTask,
+  readTaskAttempts,
   readTaskTags,
   readTasks,
   reopenHumanTask,
+  requestHumanTaskChanges,
+  restoreCancelledHumanTask,
   updateHumanTaskPlanning,
 } from "../server/task-functions";
 import { applyThemeToDocument } from "../styles/theme";
@@ -74,6 +83,7 @@ export const Route = createFileRoute("/")({
       eventCursor = eventPage.latestCursor;
       const syncCoordinator = getProjectSyncCoordinator(context.queryClient, projectId);
       const taskCollection = getTaskCollection(context.queryClient, projectId);
+      const attemptCollection = getTaskAttemptCollection(context.queryClient, projectId);
       const activityCollection = getActivityEntryCollection(context.queryClient, projectId);
       const blockerCollection = getManualBlockerCollection(context.queryClient, projectId);
       const eventCollection = getProjectEventCollection(context.queryClient, projectId);
@@ -82,6 +92,9 @@ export const Route = createFileRoute("/")({
           taskCollection.isReady()
             ? taskCollection.utils.refetch({ throwOnError: true })
             : taskCollection.preload(),
+          attemptCollection.isReady()
+            ? attemptCollection.utils.refetch({ throwOnError: true })
+            : attemptCollection.preload(),
           activityCollection.isReady()
             ? activityCollection.utils.refetch({ throwOnError: true })
             : activityCollection.preload(),
@@ -137,6 +150,7 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
   const router = useRouter();
   const queryClient = useQueryClient();
   const taskCollection = getTaskCollection(queryClient, project.id);
+  const attemptCollection = getTaskAttemptCollection(queryClient, project.id);
   const activityCollection = getActivityEntryCollection(queryClient, project.id);
   const blockerCollection = getManualBlockerCollection(queryClient, project.id);
   const eventCollection = getProjectEventCollection(queryClient, project.id);
@@ -144,6 +158,9 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
   const [liveStatus, setLiveStatus] = useState<"connecting" | "live" | "retrying">("connecting");
   const { data: tasks } = useLiveSuspenseQuery({
     query: (query) => query.from({ task: taskCollection }),
+  });
+  const { data: attempts } = useLiveSuspenseQuery({
+    query: (query) => query.from({ attempt: attemptCollection }),
   });
   const { data: activityEntries } = useLiveSuspenseQuery({
     query: (query) => query.from({ entry: activityCollection }),
@@ -160,11 +177,12 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
     () =>
       waitForAllProjectSync([
         taskCollection.utils.refetch({ throwOnError: true }),
+        attemptCollection.utils.refetch({ throwOnError: true }),
         activityCollection.utils.refetch({ throwOnError: true }),
         blockerCollection.utils.refetch({ throwOnError: true }),
         eventCollection.utils.refetch({ throwOnError: true }),
       ]),
-    [activityCollection, blockerCollection, eventCollection, taskCollection],
+    [activityCollection, attemptCollection, blockerCollection, eventCollection, taskCollection],
   );
 
   const readTaskDelta = useCallback(
@@ -184,13 +202,25 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
     [project.id],
   );
 
+  const readAttemptDelta = useCallback(
+    async (taskIds: readonly string[]) => ({
+      upserts: await readTaskAttempts({
+        data: { projectId: project.id, taskIds: [...taskIds] },
+      }),
+      deleteIds: [],
+    }),
+    [project.id],
+  );
+
   const eventProjector = useMemo(
     () => ({
       taskCollection,
+      attemptCollection,
       activityCollection,
       blockerCollection,
       eventCollection,
       readTaskDelta,
+      readAttemptDelta,
       async readActivityDelta(entryIds: readonly string[]) {
         const rows = await readActivityEntries({
           data: { projectId: project.id, entryIds: [...entryIds], limit: entryIds.length },
@@ -218,9 +248,11 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
     }),
     [
       activityCollection,
+      attemptCollection,
       blockerCollection,
       eventCollection,
       project.id,
+      readAttemptDelta,
       readTaskDelta,
       taskCollection,
     ],
@@ -233,8 +265,8 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
         afterCursor: eventCursor,
         onOpen: () => setLiveStatus("live"),
         onError: () => setLiveStatus("retrying"),
-        onEvent: (event) =>
-          syncCoordinator.run(async () => {
+        onEvent: async (event) => {
+          await syncCoordinator.run(async () => {
             try {
               await projectEvent(event, eventProjector);
               setLiveStatus("live");
@@ -250,16 +282,24 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
               }
               throw error;
             }
-          }),
+          });
+          if (event.changes.scopes.includes("projects")) {
+            await router.invalidate({ sync: true });
+          }
+        },
       }),
-    [eventCursor, eventProjector, project.id, refetchProjectCollections, syncCoordinator],
+    [eventCursor, eventProjector, project.id, refetchProjectCollections, router, syncCoordinator],
   );
 
   async function refreshTaskRows(taskIds: readonly string[]) {
     await syncCoordinator.run(async () => {
       const uniqueTaskIds = [...new Set(taskIds)];
-      const delta = await readTaskDelta(uniqueTaskIds);
-      applyProjectionDelta(taskCollection, delta);
+      const [taskDelta, attemptDelta] = await Promise.all([
+        readTaskDelta(uniqueTaskIds),
+        readAttemptDelta(uniqueTaskIds),
+      ]);
+      applyProjectionDelta(taskCollection, taskDelta);
+      applyProjectionDelta(attemptCollection, attemptDelta);
     });
   }
 
@@ -281,6 +321,13 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
         await refetchProjectCollections().catch(() => undefined);
       }
     });
+  }
+
+  async function applyTransitionResponse(
+    response: Awaited<ReturnType<typeof approveHumanTaskReview>>,
+  ) {
+    if (response.ok) await projectCommittedEvent(response.result.event);
+    return response;
   }
 
   async function createActivityEntry(input: CreateHumanActivityEntryInput) {
@@ -406,6 +453,7 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
       project={project}
       theme={theme}
       tasks={tasks}
+      attempts={attempts}
       tagDefinitions={tagDefinitions}
       activityEntries={activityEntries}
       manualBlockers={manualBlockers}
@@ -416,8 +464,17 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
       onUpdateTaskPlanning={(input) =>
         updateHumanTaskPlanning({ data: input }).then(applyTaskResponse)
       }
-      onCompleteTask={(input) => completeHumanTask({ data: input }).then(applyTaskResponse)}
-      onReopenTask={(input) => reopenHumanTask({ data: input }).then(applyTaskResponse)}
+      onApproveTaskReview={(input) =>
+        approveHumanTaskReview({ data: input }).then(applyTransitionResponse)
+      }
+      onRequestTaskChanges={(input) =>
+        requestHumanTaskChanges({ data: input }).then(applyTransitionResponse)
+      }
+      onCancelTask={(input) => cancelHumanTask({ data: input }).then(applyTransitionResponse)}
+      onRestoreCancelledTask={(input) =>
+        restoreCancelledHumanTask({ data: input }).then(applyTransitionResponse)
+      }
+      onReopenTask={(input) => reopenHumanTask({ data: input }).then(applyTransitionResponse)}
       onCreateTaskRelation={(input) =>
         createHumanTaskRelation({ data: input }).then(async (response) => {
           if (response.ok) {
@@ -450,6 +507,11 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
           throw new Error(response.error.message);
         }
         await router.invalidate({ sync: true });
+      }}
+      onChangeProjectReviewMode={async (input) => {
+        const response = await changeProjectReviewMode({ data: input });
+        if (response.ok) await router.invalidate({ sync: true });
+        return response;
       }}
     />
   );

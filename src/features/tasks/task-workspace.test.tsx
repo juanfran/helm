@@ -14,6 +14,7 @@ const project: Project = {
   sequence: 1,
   name: "helm",
   repositoryRoot: "/projects/helm",
+  reviewMode: "required",
   version: 1,
   createdAt: "2026-09-03T10:00:00.000Z",
   updatedAt: "2026-09-03T10:00:00.000Z",
@@ -44,6 +45,8 @@ const backlog: Task = {
   acceptanceCriteria: "",
   agentContext: "",
   checklist: [],
+  reviewAttemptId: null,
+  cancelledFromLifecycle: null,
   version: 1,
   archivedAt: null,
   createdAt: "2026-09-03T10:10:00.000Z",
@@ -90,6 +93,7 @@ function props(tasks: readonly Task[] = [backlog]) {
     project,
     theme: "system" as const,
     tasks,
+    attempts: [],
     tagDefinitions: tasks.flatMap((task) => task.tags),
     activityEntries: [],
     manualBlockers: [],
@@ -98,7 +102,10 @@ function props(tasks: readonly Task[] = [backlog]) {
     onCreateTask: vi.fn(),
     onPrepareTask: vi.fn(),
     onUpdateTaskPlanning: vi.fn(),
-    onCompleteTask: vi.fn(),
+    onApproveTaskReview: vi.fn(),
+    onRequestTaskChanges: vi.fn(),
+    onCancelTask: vi.fn(),
+    onRestoreCancelledTask: vi.fn(),
     onReopenTask: vi.fn(),
     onCreateTaskRelation: vi.fn(),
     onArchiveTask: vi.fn(),
@@ -108,6 +115,7 @@ function props(tasks: readonly Task[] = [backlog]) {
     onCreateManualBlocker: vi.fn(),
     onResolveManualBlocker: vi.fn(),
     onChangeTheme: vi.fn(),
+    onChangeProjectReviewMode: vi.fn(),
   };
 }
 
@@ -345,10 +353,6 @@ describe("task workspace", () => {
       ok: true,
       relation: dependent.upstreamRelations[0],
     });
-    workspace.onCompleteTask.mockResolvedValue({
-      ok: true,
-      task: { ...parent, lifecycle: "done" },
-    });
     render(<TaskWorkspace {...workspace} />);
 
     expect(screen.getByText(/Children:/).textContent).toContain("#2 Dependent task");
@@ -357,7 +361,6 @@ describe("task workspace", () => {
     await user.type(screen.getByLabelText("Child task title"), "New child");
     await user.click(screen.getByRole("button", { name: "Add child" }));
     await user.click(screen.getByRole("button", { name: "Add relation" }));
-    await user.click(screen.getByRole("button", { name: "Done" }));
 
     expect(workspace.onCreateTask).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -374,11 +377,6 @@ describe("task workspace", () => {
       type: "blocks",
       expectedSourceVersion: parent.version,
       expectedTargetVersion: dependent.version,
-      idempotencyKey: expect.any(String),
-    });
-    expect(workspace.onCompleteTask).toHaveBeenCalledWith({
-      taskId: parent.id,
-      expectedVersion: parent.version,
       idempotencyKey: expect.any(String),
     });
   });
@@ -425,7 +423,7 @@ describe("task workspace", () => {
     const workspace = props([doneTask]);
     workspace.onReopenTask.mockResolvedValue({
       ok: true,
-      task: { ...doneTask, lifecycle: "ready", version: 2 },
+      result: {},
     });
     render(<TaskWorkspace {...workspace} />);
 
@@ -439,12 +437,19 @@ describe("task workspace", () => {
     );
     expect(screen.getByLabelText("Child task title").matches(":disabled")).toBe(false);
     expect(screen.getByLabelText("Relation type").matches(":disabled")).toBe(false);
-    await user.click(screen.getByRole("button", { name: "Reopen" }));
+    const reopenForm = screen.getByRole("form", { name: "Reopen completed task" });
+    await user.selectOptions(within(reopenForm).getByLabelText("Destination"), "backlog");
+    await user.type(
+      within(reopenForm).getByLabelText("Reopen reason"),
+      "Requirements changed after completion.",
+    );
+    await user.click(within(reopenForm).getByRole("button", { name: "Reopen" }));
 
     expect(workspace.onReopenTask).toHaveBeenCalledWith({
       taskId: doneTask.id,
+      destination: "backlog",
       expectedVersion: doneTask.version,
-      reason: "Reopened from the task workspace",
+      reason: "Requirements changed after completion.",
       idempotencyKey: expect.any(String),
     });
   });
@@ -476,8 +481,8 @@ describe("task workspace", () => {
   it.each([
     {
       disposition: "cancelled",
-      buttonName: "Cancel claim",
-      pendingName: "Cancelling claim…",
+      buttonName: "Stop claim",
+      pendingName: "Stopping claim…",
       reason: "The execution is no longer needed.",
       confirmation: "Their lease will stop immediately",
     },
@@ -554,7 +559,7 @@ describe("task workspace", () => {
     render(<TaskWorkspace {...workspace} />);
 
     await user.type(screen.getByRole("textbox", { name: "Reason" }), "The owner changed.");
-    await user.click(screen.getByRole("button", { name: "Cancel claim" }));
+    await user.click(screen.getByRole("button", { name: "Stop claim" }));
 
     expect(await screen.findByRole("alert")).toHaveProperty(
       "textContent",
@@ -565,6 +570,7 @@ describe("task workspace", () => {
   it.each([
     ["in_progress", "Agent execution is active"],
     ["review", "This task is awaiting review"],
+    ["cancelled", "Cancelled tasks are read-only"],
   ] as const)("keeps %s task mutations read-only", (lifecycle, explanation) => {
     const task: Task = { ...backlog, lifecycle };
 

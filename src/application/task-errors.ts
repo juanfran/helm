@@ -33,6 +33,18 @@ export class TaskLifecycleError extends Data.TaggedError("TaskLifecycleError")<{
   readonly message: string;
 }> {}
 
+export class TaskAuthorizationError extends Data.TaggedError("TaskAuthorizationError")<{
+  readonly message: string;
+}> {}
+
+export class TaskReviewError extends Data.TaggedError("TaskReviewError")<{
+  readonly taskId: string;
+  readonly attemptId?: string;
+  readonly reviewAttemptId?: string;
+  readonly reason: "not_in_review" | "attempt_mismatch";
+  readonly message: string;
+}> {}
+
 export class TaskNestingError extends Data.TaggedError("TaskNestingError")<{
   readonly taskId: string;
   readonly parentTaskId?: string;
@@ -95,6 +107,8 @@ export class TaskLeaseError extends Data.TaggedError("TaskLeaseError")<{
     | "inactive"
     | "owner_mismatch"
     | "inactive_run";
+  readonly leaseStatus?: "active" | "released" | "expired" | "cancelled" | "reassigned";
+  readonly invalidationReason?: string;
   readonly message: string;
 }> {}
 
@@ -109,6 +123,8 @@ export type TaskCommandError =
   | TaskVersionConflictError
   | TaskAlreadyArchivedError
   | TaskLifecycleError
+  | TaskAuthorizationError
+  | TaskReviewError
   | TaskNestingError
   | TaskRelationError
   | TaskIdempotencyConflictError
@@ -137,6 +153,9 @@ export type TaskErrorDto = {
   currentRevision?: number;
   staleBecause?: "queue_changed" | "evaluation_context_changed";
   lifecycle?: string;
+  attemptId?: string;
+  reviewAttemptId?: string;
+  reviewReason?: TaskReviewError["reason"];
   parentTaskId?: string;
   sourceTaskId?: string;
   targetTaskId?: string;
@@ -145,6 +164,8 @@ export type TaskErrorDto = {
   reasons?: readonly string[];
   leaseId?: string;
   leaseReason?: TaskLeaseError["reason"];
+  leaseStatus?: TaskLeaseError["leaseStatus"];
+  invalidationReason?: string;
 };
 
 export function toTaskErrorDto(error: TaskCommandError): TaskErrorDto {
@@ -158,6 +179,15 @@ export function toTaskErrorDto(error: TaskCommandError): TaskErrorDto {
         message: error.message,
         taskId: error.taskId,
         lifecycle: error.lifecycle,
+      };
+    case "TaskReviewError":
+      return {
+        type: error["_tag"],
+        message: error.message,
+        taskId: error.taskId,
+        attemptId: error.attemptId,
+        reviewAttemptId: error.reviewAttemptId,
+        reviewReason: error.reason,
       };
     case "TaskNestingError":
       return {
@@ -225,6 +255,8 @@ export function toTaskErrorDto(error: TaskCommandError): TaskErrorDto {
         taskId: error.taskId,
         leaseId: error.leaseId,
         leaseReason: error.reason,
+        leaseStatus: error.leaseStatus,
+        invalidationReason: error.invalidationReason,
       };
     default:
       return { type: error["_tag"], message: error.message };

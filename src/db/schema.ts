@@ -16,6 +16,9 @@ export const projects = sqliteTable(
     sequence: integer("sequence").notNull(),
     name: text("name").notNull(),
     repositoryRoot: text("repository_root").notNull(),
+    reviewMode: text("review_mode", { enum: ["required", "direct"] })
+      .notNull()
+      .default("required"),
     version: integer("version").notNull().default(1),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
@@ -52,6 +55,10 @@ export const tasks = sqliteTable(
     acceptanceCriteria: text("acceptance_criteria").notNull(),
     agentContext: text("agent_context").notNull(),
     checklistJson: text("checklist_json").notNull(),
+    reviewAttemptId: text("review_attempt_id"),
+    cancelledFromLifecycle: text("cancelled_from_lifecycle", {
+      enum: ["backlog", "ready", "in_progress", "review"],
+    }),
     version: integer("version").notNull().default(1),
     archivedAt: text("archived_at"),
     createdAt: text("created_at").notNull(),
@@ -203,15 +210,28 @@ export const attempts = sqliteTable(
     taskId: text("task_id")
       .notNull()
       .references(() => tasks.id),
+    attemptNumber: integer("attempt_number").notNull().default(0),
     agentRunId: text("agent_run_id").references(() => agentRuns.id),
-    status: text("status", { enum: ["active", "completed", "failed", "abandoned"] }).notNull(),
+    agentProfileId: text("agent_profile_id").references(() => agentProfiles.id),
+    agentDisplayName: text("agent_display_name"),
+    status: text("status", {
+      enum: ["active", "completed", "failed", "abandoned", "cancelled"],
+    }).notNull(),
     summary: text("summary").notNull(),
+    changedAreasJson: text("changed_areas_json").notNull().default("[]"),
     verificationJson: text("verification_json").notNull(),
+    referencesJson: text("references_json").notNull().default("[]"),
+    risksJson: text("risks_json").notNull().default("[]"),
+    followUpWorkJson: text("follow_up_work_json").notNull().default("[]"),
+    failureClassification: text("failure_classification", {
+      enum: ["implementation", "verification", "environment", "requirements", "unknown"],
+    }),
     createdAt: text("created_at").notNull(),
     completedAt: text("completed_at"),
   },
   (table) => [
     index("attempts_task_index").on(table.taskId, table.createdAt),
+    uniqueIndex("attempts_task_number_unique").on(table.taskId, table.attemptNumber),
     uniqueIndex("attempts_one_active_per_task")
       .on(table.taskId)
       .where(sql`${table.status} = 'active'`),

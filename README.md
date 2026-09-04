@@ -36,8 +36,11 @@ resume its run by ID; after an ungraceful client exit, set `takeoverActiveRun` e
 that run from the stale session. Registered agents can discover paginated work with `find_work`, load a
 complete package with `get_task_context`, and atomically reserve work with `claim_task` or `claim_next`.
 Every claim returns a lease token that is never persisted in plaintext. Keep it private and use it with
-`renew_lease` or `release_lease`; release, expiry, human cancellation or reassignment, session closure,
-and a server restart make the token unusable.
+`renew_lease`, `release_lease`, `complete_task`, or `fail_task`. Completion requires a structured report
+covering the result, changed areas, verification, references, risks, and follow-up work. The project's
+review policy routes accepted reports either to human review or directly to done. Classified failure
+reports close the attempt and return the task to the ready queue. Release, expiry, human cancellation or
+reassignment, session closure, and a server restart make the token unusable.
 
 Registered agents can use `add_comment`, `record_decision`, and `request_change` to append attributed
 task history. `report_progress` additionally requires the active claim's lease token, which binds the
@@ -48,6 +51,10 @@ lease expiry and agent-session closure as system timeline entries. The browser's
 views use the same event log through `/api/events`; reconnects replay missed commits and update only
 affected local records. Humans can add the same semantic entries, report or resolve explicit manual
 blockers, and withdraw human or agent entries without deleting their audit metadata.
+
+The human workspace shows immutable attempt reports and supports approval, structured change requests,
+explicit task cancellation and restoration, and reasoned reopening. Reopening never rewrites an earlier
+attempt; a new attempt is created only when the reopened task is claimed again.
 
 `list_projects` and `get_active_project` remain available as read-only project queries. Discovery cursors
 are bound to the queue revision, evaluation date, project, and normalized agent capabilities. If any of

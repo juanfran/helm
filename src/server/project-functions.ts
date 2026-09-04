@@ -2,8 +2,16 @@ import { createServerFn } from "@tanstack/react-start";
 import { Effect } from "effect";
 
 import { getAppState } from "../application/projects";
-import { compiledCreateProjectInputSchema, compiledSetThemeInputSchema } from "../domain/projects";
-import { executeChangeTheme, executeCreateProject } from "./project-adapter";
+import {
+  compiledCreateProjectInputSchema,
+  compiledSetProjectReviewModeInputSchema,
+  compiledSetThemeInputSchema,
+} from "../domain/projects";
+import {
+  executeChangeTheme,
+  executeCreateProject,
+  executeSetProjectReviewMode,
+} from "./project-adapter";
 import { projectServices } from "./project-runtime.server";
 
 export const readAppState = createServerFn({ method: "GET" }).handler(() =>
@@ -17,3 +25,9 @@ export const createInitialProject = createServerFn({ method: "POST" })
 export const changeTheme = createServerFn({ method: "POST" })
   .validator(compiledSetThemeInputSchema)
   .handler(({ data }) => executeChangeTheme(data, projectServices));
+
+export const changeProjectReviewMode = createServerFn({ method: "POST" })
+  .validator(compiledSetProjectReviewModeInputSchema)
+  .handler(({ data }) =>
+    executeSetProjectReviewMode(data, { type: "human", id: "local-human" }, projectServices),
+  );

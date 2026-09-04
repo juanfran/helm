@@ -4,7 +4,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { ProjectEvent } from "../../domain/activity";
-import { emptyRichTextDocument, taskSchema } from "../../domain/tasks";
+import { emptyRichTextDocument, taskAttemptSummarySchema, taskSchema } from "../../domain/tasks";
 import { ProjectActivityFeed } from "./project-activity-feed";
 
 afterEach(cleanup);
@@ -54,6 +54,7 @@ describe("project activity feed", () => {
         events={[event(1, "routine"), event(2, "attention")]}
         tasks={[task]}
         entries={[]}
+        attempts={[]}
       />,
     );
 
@@ -97,7 +98,7 @@ describe("project activity feed", () => {
       withdrawalReason: null,
     };
     const { rerender } = render(
-      <ProjectActivityFeed events={[semanticEvent]} tasks={[]} entries={[entry]} />,
+      <ProjectActivityFeed events={[semanticEvent]} tasks={[]} entries={[entry]} attempts={[]} />,
     );
 
     expect(screen.getByText("Keep the durable cursor as the ordering authority.")).toBeTruthy();
@@ -107,6 +108,7 @@ describe("project activity feed", () => {
       <ProjectActivityFeed
         events={[semanticEvent]}
         tasks={[]}
+        attempts={[]}
         entries={[
           {
             ...entry,
@@ -122,5 +124,33 @@ describe("project activity feed", () => {
 
     expect(screen.queryByText("Keep the durable cursor as the ordering authority.")).toBeNull();
     expect(screen.getByText("Content withdrawn — Superseded by the final decision.")).toBeTruthy();
+  });
+
+  it("uses attempt attribution without exposing the agent run identifier", () => {
+    const attemptEvent: ProjectEvent = {
+      ...event(4, "attention"),
+      kind: "task.review.requested",
+      actor: { type: "agent", id: "run-secret-1" },
+      payload: { attemptId: "attempt-1", summary: "Ready for review" },
+    };
+    const attempt = taskAttemptSummarySchema.parse({
+      id: "attempt-1",
+      taskId: "task-1",
+      attemptNumber: 1,
+      agentRunId: "run-secret-1",
+      agentProfileId: "profile-1",
+      agentDisplayName: "Implementation agent",
+      status: "completed",
+      summary: "Ready for review",
+      createdAt: "2026-09-04T10:00:00.000Z",
+      completedAt: "2026-09-04T10:05:00.000Z",
+    });
+
+    render(
+      <ProjectActivityFeed events={[attemptEvent]} tasks={[]} entries={[]} attempts={[attempt]} />,
+    );
+
+    expect(screen.getByText("Implementation agent")).toBeTruthy();
+    expect(screen.queryByText(/run-secret-1/)).toBeNull();
   });
 });

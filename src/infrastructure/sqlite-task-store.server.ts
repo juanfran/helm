@@ -1,12 +1,13 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import Database from "better-sqlite3";
-import { and, asc, eq, inArray, isNull, max } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, max } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Effect } from "effect";
 
 import {
   TaskAlreadyArchivedError,
+  TaskAuthorizationError,
   TaskClaimUnavailableError,
   TaskDiscoveryCursorStaleError,
   TaskIdempotencyConflictError,
@@ -17,6 +18,7 @@ import {
   TaskPathError,
   TaskPersistenceError,
   TaskRelationError,
+  TaskReviewError,
   TaskTagConstraintError,
   TaskTagDefinitionConflictError,
   TaskVersionConflictError,
@@ -52,8 +54,16 @@ import {
   importanceForEventKind,
   manualBlockerSchema,
   normalizeEventChangeHints,
+  projectEventSchema,
+  type ActivityEntry,
+  type EventChangeHints,
+  type ProjectEvent,
 } from "../domain/activity";
 import {
+  taskAttemptSummarySchema,
+  taskCompletionResultSchema,
+  taskFailureResultSchema,
+  taskTransitionResultSchema,
   compareTaskOrder,
   decodeTaskDiscoveryCursor,
   duplicateExclusiveTagGroups,
@@ -71,15 +81,20 @@ import {
   taskLeaseMutationResultSchema,
   taskSchema,
   taskParentViolation,
+  type ApproveTaskReviewInput,
   type Actor,
   type ArchiveTaskInput,
+  type CancelTaskInput,
   type ClaimNextTaskInput,
   type ClaimTaskInput,
   type CompleteTaskInput,
   type CreateTaskInput,
   type CreateTaskRelationInput,
+  type FailTaskInput,
   type PrepareTaskInput,
   type ReopenTaskInput,
+  type RequestTaskChangesInput,
+  type RestoreCancelledTaskInput,
   type TagInput,
   type Task,
   type TaskCandidate,
@@ -93,6 +108,8 @@ import {
   type TaskRelation,
   type UpdateTaskPlanningInput,
 } from "../domain/tasks";
+import type { JsonValue } from "../domain/rich-text";
+import { projectReviewModeSchema } from "../domain/projects";
 import {
   ProjectContextLimitError,
   ProjectInstructionTooLargeError,
@@ -158,17 +175,52 @@ function leaseExpiration(now: string, durationSeconds: number) {
   return new Date(Date.parse(now) + durationSeconds * 1_000).toISOString();
 }
 
-function attemptSummaryFromRow(row: AttemptRow) {
-  return {
+function refreshEvaluationTime(context: TaskEvaluationContext): TaskEvaluationContext {
+  const now = context.currentTime?.() ?? context.now;
+  return now === context.now ? context : { ...context, now };
+}
+
+function attemptSummaryFromRow(db: DatabaseSession, row: AttemptRow) {
+  const needsLegacyIdentity = !row.agentProfileId || !row.agentDisplayName;
+  const run =
+    needsLegacyIdentity && row.agentRunId
+      ? db.select().from(agentRuns).where(eq(agentRuns.id, row.agentRunId)).limit(1).get()
+      : null;
+  const profileId = row.agentProfileId ?? run?.profileId ?? null;
+  const profile =
+    !row.agentDisplayName && profileId
+      ? db.select().from(agentProfiles).where(eq(agentProfiles.id, profileId)).limit(1).get()
+      : null;
+  const legacyVerification = JSON.parse(row.verificationJson) as unknown;
+  const verificationResults = Array.isArray(legacyVerification)
+    ? legacyVerification.map((result) =>
+        typeof result === "string"
+          ? {
+              name: result,
+              status: "not_run" as const,
+              details: "Imported from a legacy verification note.",
+            }
+          : result,
+      )
+    : [];
+  return taskAttemptSummarySchema.parse({
     id: row.id,
     taskId: row.taskId,
+    attemptNumber: row.attemptNumber,
     agentRunId: row.agentRunId,
+    agentProfileId: profileId,
+    agentDisplayName: row.agentDisplayName ?? profile?.displayName ?? null,
     status: row.status,
     summary: row.summary,
-    verification: JSON.parse(row.verificationJson),
+    changedAreas: JSON.parse(row.changedAreasJson),
+    verificationResults,
+    references: JSON.parse(row.referencesJson),
+    risks: JSON.parse(row.risksJson),
+    followUpWork: JSON.parse(row.followUpWorkJson),
+    failureClassification: row.failureClassification,
     createdAt: row.createdAt,
     completedAt: row.completedAt,
-  };
+  });
 }
 
 function claimFromLeaseRow(db: DatabaseSession, row: LeaseRow): TaskClaim {
@@ -506,6 +558,8 @@ function taskFromRow(db: DatabaseSession, row: TaskRow, context?: TaskEvaluation
     acceptanceCriteria: row.acceptanceCriteria,
     agentContext: row.agentContext,
     checklist: JSON.parse(row.checklistJson),
+    reviewAttemptId: row.reviewAttemptId,
+    cancelledFromLifecycle: row.cancelledFromLifecycle,
     version: row.version,
     archivedAt: row.archivedAt,
     createdAt: row.createdAt,
@@ -836,6 +890,93 @@ function recordLeaseMutation(
     .run();
 }
 
+function findIdempotentSnapshot<T>(
+  db: DatabaseSession,
+  command: string,
+  key: string,
+  hash: string,
+  parse: (value: unknown) => T,
+) {
+  const existing = db
+    .select()
+    .from(idempotencyRecords)
+    .where(eq(idempotencyRecords.key, key))
+    .limit(1)
+    .get();
+  if (!existing) return null;
+  if (existing.command !== command || existing.inputHash !== hash) {
+    throw new TaskIdempotencyConflictError({
+      key,
+      message: "That idempotency key was already used for a different command.",
+    });
+  }
+  return parse(JSON.parse(existing.resultJson));
+}
+
+function recordResultSnapshot(
+  db: DatabaseSession,
+  input: { idempotencyKey: string },
+  command: string,
+  hash: string,
+  result: unknown,
+  occurredAt: string,
+) {
+  db.insert(idempotencyRecords)
+    .values({
+      key: input.idempotencyKey,
+      command,
+      inputHash: hash,
+      resultJson: JSON.stringify(result),
+      createdAt: occurredAt,
+    })
+    .run();
+}
+
+function appendTaskEvent(
+  db: DatabaseSession,
+  task: Task,
+  actor: Actor,
+  kind: string,
+  payload: Record<string, JsonValue>,
+  changes: Partial<EventChangeHints> = {},
+): ProjectEvent {
+  const row = db
+    .insert(events)
+    .values({
+      projectId: task.projectId,
+      kind,
+      importance: importanceForEventKind(kind),
+      actorType: actor.type,
+      actorId: actor.id,
+      entityType: "task",
+      entityId: task.id,
+      payloadJson: JSON.stringify(payload),
+      changesJson: JSON.stringify(
+        normalizeEventChangeHints({
+          ...changes,
+          projectIds: [task.projectId, ...(changes.projectIds ?? [])],
+          taskIds: [task.id, ...(changes.taskIds ?? [])],
+          scopes: ["tasks", ...(changes.scopes ?? [])],
+        }),
+      ),
+      occurredAt: task.updatedAt,
+    })
+    .returning()
+    .get();
+  return projectEventSchema.parse({
+    id: String(row.cursor),
+    cursor: row.cursor,
+    projectId: row.projectId,
+    kind: row.kind,
+    importance: row.importance,
+    actor: { type: row.actorType, id: row.actorId },
+    entity: { type: row.entityType, id: row.entityId },
+    payload: JSON.parse(row.payloadJson),
+    changes: JSON.parse(row.changesJson),
+    occurredAt: row.occurredAt,
+  });
+}
+
 function recordMutation(
   db: DatabaseSession,
   input: { idempotencyKey: string },
@@ -952,9 +1093,9 @@ function attemptSummariesForTask(db: DatabaseSession, taskId: string) {
     .select()
     .from(attempts)
     .where(eq(attempts.taskId, taskId))
-    .orderBy(asc(attempts.createdAt))
+    .orderBy(asc(attempts.attemptNumber), asc(attempts.id))
     .all()
-    .map(attemptSummaryFromRow);
+    .map((row) => attemptSummaryFromRow(db, row));
 }
 
 function taskContextFromInput(db: DatabaseSession, input: TaskContextQuery): TaskContextPackage {
@@ -1011,6 +1152,7 @@ function commandError(error: unknown): TaskCommandError {
   }
   if (
     error instanceof TaskAlreadyArchivedError ||
+    error instanceof TaskAuthorizationError ||
     error instanceof TaskClaimUnavailableError ||
     error instanceof TaskDiscoveryCursorStaleError ||
     error instanceof TaskIdempotencyConflictError ||
@@ -1020,6 +1162,7 @@ function commandError(error: unknown): TaskCommandError {
     error instanceof TaskNotFoundError ||
     error instanceof TaskPathError ||
     error instanceof TaskRelationError ||
+    error instanceof TaskReviewError ||
     error instanceof TaskTagConstraintError ||
     error instanceof TaskTagDefinitionConflictError ||
     error instanceof TaskVersionConflictError
@@ -1060,6 +1203,8 @@ function activeLeaseForToken(db: DatabaseSession, token: string, now: string) {
       taskId: row.taskId,
       leaseId: row.id,
       reason: row.status === "expired" ? "expired" : "inactive",
+      leaseStatus: row.status,
+      invalidationReason: row.invalidationReason ?? undefined,
       message:
         row.status === "expired"
           ? "That lease has expired."
@@ -1089,12 +1234,62 @@ function assertLeaseOwner(db: DatabaseSession, row: LeaseRow, claimant: TaskClai
   }
 }
 
+function activeAttemptForReport(
+  db: DatabaseSession,
+  input: CompleteTaskInput | FailTaskInput,
+  claimant: TaskClaimant,
+  context: TaskEvaluationContext,
+) {
+  const lease = activeLeaseForToken(db, input.leaseToken, context.now);
+  assertLeaseOwner(db, lease, claimant);
+  if (lease.taskId !== input.taskId) {
+    throw new TaskLeaseError({
+      taskId: input.taskId,
+      leaseId: lease.id,
+      reason: "owner_mismatch",
+      message: "That lease belongs to a different task.",
+    });
+  }
+  const task = currentTask(db, input.taskId);
+  if (task.projectId !== input.projectId) {
+    throw new TaskNotFoundError({
+      taskId: input.taskId,
+      message: "That task does not belong to the requested project.",
+    });
+  }
+  assertExpectedVersion(task, input.expectedVersion);
+  if (task.archivedAt || task.lifecycle !== "in_progress") {
+    throw new TaskLeaseError({
+      taskId: task.id,
+      leaseId: lease.id,
+      reason: "inactive",
+      message: "Only the active in-progress attempt can report a result.",
+    });
+  }
+  const attempt = db.select().from(attempts).where(eq(attempts.id, lease.attemptId)).limit(1).get();
+  if (
+    !attempt ||
+    attempt.taskId !== task.id ||
+    attempt.agentRunId !== claimant.runId ||
+    attempt.status !== "active"
+  ) {
+    throw new TaskLeaseError({
+      taskId: task.id,
+      leaseId: lease.id,
+      reason: "inactive",
+      message: "The lease no longer has an active execution attempt.",
+    });
+  }
+  return { attempt, lease, task };
+}
+
 function closeLeaseAttempt(
   db: DatabaseSession,
   row: LeaseRow,
   status: "released" | "expired" | "cancelled" | "reassigned",
   reason: string,
   now: string,
+  attemptStatus: "abandoned" | "cancelled" = "abandoned",
 ) {
   const attempt = db
     .select({ summary: attempts.summary })
@@ -1108,7 +1303,7 @@ function closeLeaseAttempt(
     .run();
   db.update(attempts)
     .set({
-      status: "abandoned",
+      status: attemptStatus,
       summary: attempt?.summary.trim() ? attempt.summary : reason,
       completedAt: now,
     })
@@ -1284,13 +1479,27 @@ function createClaimGrant(
   }
 
   const now = context.now;
+  const previousAttemptNumber =
+    db
+      .select({ value: max(attempts.attemptNumber) })
+      .from(attempts)
+      .where(eq(attempts.taskId, row.id))
+      .get()?.value ?? 0;
   const attempt = {
     id: randomUUID(),
     taskId: row.id,
+    attemptNumber: previousAttemptNumber + 1,
     agentRunId: claimant.runId,
+    agentProfileId: claimant.profileId,
+    agentDisplayName: claimant.displayName,
     status: "active" as const,
     summary: "",
+    changedAreasJson: "[]",
     verificationJson: "[]",
+    referencesJson: "[]",
+    risksJson: "[]",
+    followUpWorkJson: "[]",
+    failureClassification: null,
     createdAt: now,
     completedAt: null,
   };
@@ -1316,7 +1525,7 @@ function createClaimGrant(
   const task = taskFromRow(db, currentTask(db, row.id), context);
   const grant = taskLeaseGrantSchema.parse({
     task,
-    attempt: attemptSummaryFromRow(attempt),
+    attempt: attemptSummaryFromRow(db, attempt),
     claim: claimFromLeaseRow(db, lease),
     leaseToken: token,
   });
@@ -1380,6 +1589,134 @@ function invalidateLease(
   });
 }
 
+function assertHumanTaskActor(actor: Actor) {
+  if (actor.type === "human") return;
+  throw new TaskAuthorizationError({
+    message: "Only the local human can perform this task transition.",
+  });
+}
+
+function reviewedAttempt(db: DatabaseSession, row: TaskRow, attemptId: string): AttemptRow {
+  if (row.lifecycle !== "review" || !row.reviewAttemptId) {
+    throw new TaskReviewError({
+      taskId: row.id,
+      attemptId,
+      reviewAttemptId: row.reviewAttemptId ?? undefined,
+      reason: "not_in_review",
+      message: "That task is not awaiting review.",
+    });
+  }
+  if (row.reviewAttemptId !== attemptId) {
+    throw new TaskReviewError({
+      taskId: row.id,
+      attemptId,
+      reviewAttemptId: row.reviewAttemptId,
+      reason: "attempt_mismatch",
+      message: "That review decision targets a different attempt.",
+    });
+  }
+  const attempt = db.select().from(attempts).where(eq(attempts.id, attemptId)).limit(1).get();
+  if (!attempt || attempt.taskId !== row.id || attempt.status !== "completed") {
+    throw new TaskReviewError({
+      taskId: row.id,
+      attemptId,
+      reviewAttemptId: row.reviewAttemptId,
+      reason: "attempt_mismatch",
+      message: "The task review no longer points to a completed attempt.",
+    });
+  }
+  return attempt;
+}
+
+function humanChangeRequestEntry(
+  db: DatabaseSession,
+  input: RequestTaskChangesInput,
+  task: TaskRow,
+  actor: Actor,
+  now: string,
+): ActivityEntry {
+  const duplicate = db
+    .select({ id: activityEntries.id })
+    .from(activityEntries)
+    .where(eq(activityEntries.id, input.entryId))
+    .limit(1)
+    .get();
+  if (duplicate) {
+    throw new TaskIdempotencyConflictError({
+      key: input.idempotencyKey,
+      message: "That change-request entry identifier already belongs to another command.",
+    });
+  }
+  const content = richTextDocumentSchema.parse({
+    version: 1,
+    doc: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", text: input.summary }],
+        },
+        {
+          type: "bulletList",
+          content: input.requestedChanges.map((change) => ({
+            type: "listItem",
+            content: [
+              {
+                type: "paragraph",
+                content: [{ type: "text", text: change }],
+              },
+            ],
+          })),
+        },
+      ],
+    },
+  });
+  db.insert(activityEntries)
+    .values({
+      id: input.entryId,
+      projectId: task.projectId,
+      taskId: task.id,
+      attemptId: input.attemptId,
+      kind: "change_request",
+      authorType: actor.type,
+      authorId: actor.id,
+      authorDisplayName: "You",
+      agentProfileId: null,
+      agentRunId: null,
+      contentJson: JSON.stringify(content),
+      contentText: richTextToPlainText(content),
+      createdAt: now,
+      withdrawnAt: null,
+      withdrawnByType: null,
+      withdrawnById: null,
+      withdrawalReason: null,
+    })
+    .run();
+  const inserted = db
+    .select()
+    .from(activityEntries)
+    .where(eq(activityEntries.id, input.entryId))
+    .limit(1)
+    .get();
+  if (!inserted) throw new Error("The review change request could not be reloaded.");
+  return activityEntrySchema.parse({
+    id: inserted.id,
+    projectId: inserted.projectId,
+    taskId: inserted.taskId,
+    attemptId: inserted.attemptId,
+    kind: inserted.kind,
+    author: { type: inserted.authorType, id: inserted.authorId },
+    authorDisplayName: inserted.authorDisplayName,
+    agentProfileId: inserted.agentProfileId,
+    content,
+    contentText: inserted.contentText,
+    createdAt: inserted.createdAt,
+    withdrawnAt: null,
+    withdrawnBy: null,
+    withdrawalReason: null,
+  });
+}
+
 export function createSqliteTaskStore(database: Database.Database): TaskStore {
   const db = drizzle(database, { schema });
   const leaseTokenCache = leaseTokenCacheFor(database);
@@ -1425,6 +1762,24 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
             .orderBy(asc(tags.name), asc(tags.id))
             .all()
             .map((tag) => tagSchema.parse(tag)),
+        catch: persistenceError,
+      });
+    },
+    listAttempts(input) {
+      return Effect.try({
+        try: () => {
+          const where = input.taskIds
+            ? and(eq(tasks.projectId, input.projectId), inArray(attempts.taskId, input.taskIds))
+            : eq(tasks.projectId, input.projectId);
+          return db
+            .select({ attempt: attempts })
+            .from(attempts)
+            .innerJoin(tasks, eq(attempts.taskId, tasks.id))
+            .where(where)
+            .orderBy(asc(attempts.attemptNumber), asc(attempts.id))
+            .all()
+            .map(({ attempt }) => attemptSummaryFromRow(db, attempt));
+        },
         catch: persistenceError,
       });
     },
@@ -1634,7 +1989,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
               }
               const grant = taskLeaseGrantSchema.parse({
                 task: taskFromRow(tx, currentTask(tx, row.id), context),
-                attempt: attemptSummaryFromRow(attempt),
+                attempt: attemptSummaryFromRow(tx, attempt),
                 claim: claimFromLeaseRow(tx, updatedLease),
                 leaseToken: input.leaseToken,
               });
@@ -1865,6 +2220,8 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
               acceptanceCriteria: input.acceptanceCriteria,
               agentContext: input.agentContext,
               checklist: input.checklist,
+              reviewAttemptId: null,
+              cancelledFromLifecycle: null,
               version: 1,
               archivedAt: null,
               createdAt: now,
@@ -2051,100 +2408,769 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
         catch: commandError,
       });
     },
-    complete(input: CompleteTaskInput, actor: Actor, context: TaskEvaluationContext) {
+    completeAttempt(
+      input: CompleteTaskInput,
+      claimant: TaskClaimant,
+      context: TaskEvaluationContext,
+    ) {
+      return Effect.try({
+        try: () => {
+          const command = "task.attempt.complete";
+          assertActiveClaimant(db, claimant);
+          const hash = inputHash(command, {
+            ...withoutIdempotencyKey(input),
+            claimantRunId: claimant.runId,
+          });
+          const cached = findIdempotentSnapshot(db, command, input.idempotencyKey, hash, (value) =>
+            taskCompletionResultSchema.parse(value),
+          );
+          if (cached) {
+            leaseTokenCache.delete(cached.claim.id);
+            return cached;
+          }
+          reconcileAndEvict(context);
+          const result = db.transaction(
+            (tx) => {
+              const existing = findIdempotentSnapshot(
+                tx,
+                command,
+                input.idempotencyKey,
+                hash,
+                (value) => taskCompletionResultSchema.parse(value),
+              );
+              if (existing) return existing;
+              const committedContext = refreshEvaluationTime(context);
+              const {
+                attempt,
+                lease,
+                task: row,
+              } = activeAttemptForReport(tx, input, claimant, committedContext);
+              const project = tx
+                .select({ reviewMode: projects.reviewMode })
+                .from(projects)
+                .where(eq(projects.id, row.projectId))
+                .limit(1)
+                .get();
+              if (!project) throw new Error("The task project does not exist.");
+              const reviewMode = projectReviewModeSchema.parse(project.reviewMode);
+              const destination = reviewMode === "required" ? "review" : "done";
+              const attemptUpdate = tx
+                .update(attempts)
+                .set({
+                  status: "completed",
+                  summary: input.report.resultSummary,
+                  changedAreasJson: JSON.stringify(input.report.changedAreas),
+                  verificationJson: JSON.stringify(input.report.verificationResults),
+                  referencesJson: JSON.stringify(input.report.references),
+                  risksJson: JSON.stringify(input.report.risks),
+                  followUpWorkJson: JSON.stringify(input.report.followUpWork),
+                  failureClassification: null,
+                  completedAt: committedContext.now,
+                })
+                .where(and(eq(attempts.id, attempt.id), eq(attempts.status, "active")))
+                .run();
+              const leaseUpdate = tx
+                .update(leases)
+                .set({
+                  status: "released",
+                  invalidatedAt: committedContext.now,
+                  invalidationReason: "Completion report accepted.",
+                })
+                .where(and(eq(leases.id, lease.id), eq(leases.status, "active")))
+                .run();
+              const taskUpdate = tx
+                .update(tasks)
+                .set({
+                  lifecycle: destination,
+                  reviewAttemptId: destination === "review" ? attempt.id : null,
+                  cancelledFromLifecycle: null,
+                  version: row.version + 1,
+                  updatedAt: committedContext.now,
+                })
+                .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
+                .run();
+              if (
+                attemptUpdate.changes !== 1 ||
+                leaseUpdate.changes !== 1 ||
+                taskUpdate.changes !== 1
+              ) {
+                throw new TaskLeaseError({
+                  taskId: row.id,
+                  leaseId: lease.id,
+                  reason: "inactive",
+                  message: "The execution attempt changed before completion could commit.",
+                });
+              }
+              const task = taskFromRow(tx, currentTask(tx, row.id), committedContext);
+              const completedAttempt = tx
+                .select()
+                .from(attempts)
+                .where(eq(attempts.id, attempt.id))
+                .limit(1)
+                .get();
+              if (!completedAttempt)
+                throw new Error("The completed attempt could not be reloaded.");
+              const claim = claimFromLeaseRow(tx, {
+                ...lease,
+                status: "released",
+                invalidatedAt: committedContext.now,
+                invalidationReason: "Completion report accepted.",
+              });
+              const kind = destination === "review" ? "task.review.requested" : "task.completed";
+              const event = appendTaskEvent(
+                tx,
+                task,
+                { type: "agent", id: claimant.runId },
+                kind,
+                {
+                  attemptId: attempt.id,
+                  leaseId: lease.id,
+                  agentRunId: claimant.runId,
+                  previousVersion: row.version,
+                  version: task.version,
+                  reviewModeApplied: reviewMode,
+                  destination,
+                  summary: input.report.resultSummary,
+                  changedAreas: input.report.changedAreas,
+                  verificationResults: input.report.verificationResults,
+                  references: input.report.references,
+                  risks: input.report.risks,
+                  followUpWork: input.report.followUpWork,
+                },
+                {
+                  taskIds: destination === "done" ? blockingRelationTargetIds(tx, row.id) : [],
+                  agentRunIds: [claimant.runId],
+                  scopes: ["agents"],
+                },
+              );
+              const snapshot = taskCompletionResultSchema.parse({
+                task,
+                attempt: attemptSummaryFromRow(tx, completedAttempt),
+                claim,
+                event,
+                routing: { reviewMode, destination },
+              });
+              recordResultSnapshot(tx, input, command, hash, snapshot, committedContext.now);
+              return snapshot;
+            },
+            { behavior: "immediate" },
+          );
+          leaseTokenCache.delete(result.claim.id);
+          return result;
+        },
+        catch: commandError,
+      });
+    },
+    failAttempt(input: FailTaskInput, claimant: TaskClaimant, context: TaskEvaluationContext) {
+      return Effect.try({
+        try: () => {
+          const command = "task.attempt.fail";
+          assertActiveClaimant(db, claimant);
+          const hash = inputHash(command, {
+            ...withoutIdempotencyKey(input),
+            claimantRunId: claimant.runId,
+          });
+          const cached = findIdempotentSnapshot(db, command, input.idempotencyKey, hash, (value) =>
+            taskFailureResultSchema.parse(value),
+          );
+          if (cached) {
+            leaseTokenCache.delete(cached.claim.id);
+            return cached;
+          }
+          reconcileAndEvict(context);
+          const result = db.transaction(
+            (tx) => {
+              const existing = findIdempotentSnapshot(
+                tx,
+                command,
+                input.idempotencyKey,
+                hash,
+                (value) => taskFailureResultSchema.parse(value),
+              );
+              if (existing) return existing;
+              const committedContext = refreshEvaluationTime(context);
+              const {
+                attempt,
+                lease,
+                task: row,
+              } = activeAttemptForReport(tx, input, claimant, committedContext);
+              const attemptUpdate = tx
+                .update(attempts)
+                .set({
+                  status: "failed",
+                  summary: input.report.reason,
+                  changedAreasJson: JSON.stringify(input.report.changedAreas),
+                  verificationJson: JSON.stringify(input.report.verificationResults),
+                  referencesJson: JSON.stringify(input.report.references),
+                  risksJson: JSON.stringify(input.report.risks),
+                  followUpWorkJson: JSON.stringify(input.report.followUpWork),
+                  failureClassification: input.report.classification,
+                  completedAt: committedContext.now,
+                })
+                .where(and(eq(attempts.id, attempt.id), eq(attempts.status, "active")))
+                .run();
+              const invalidationReason = `Attempt failed (${input.report.classification}).`;
+              const leaseUpdate = tx
+                .update(leases)
+                .set({
+                  status: "released",
+                  invalidatedAt: committedContext.now,
+                  invalidationReason,
+                })
+                .where(and(eq(leases.id, lease.id), eq(leases.status, "active")))
+                .run();
+              const taskUpdate = tx
+                .update(tasks)
+                .set({
+                  lifecycle: "ready",
+                  reviewAttemptId: null,
+                  cancelledFromLifecycle: null,
+                  version: row.version + 1,
+                  updatedAt: committedContext.now,
+                })
+                .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
+                .run();
+              if (
+                attemptUpdate.changes !== 1 ||
+                leaseUpdate.changes !== 1 ||
+                taskUpdate.changes !== 1
+              ) {
+                throw new TaskLeaseError({
+                  taskId: row.id,
+                  leaseId: lease.id,
+                  reason: "inactive",
+                  message: "The execution attempt changed before failure could commit.",
+                });
+              }
+              const task = taskFromRow(tx, currentTask(tx, row.id), committedContext);
+              const failedAttempt = tx
+                .select()
+                .from(attempts)
+                .where(eq(attempts.id, attempt.id))
+                .limit(1)
+                .get();
+              if (!failedAttempt) throw new Error("The failed attempt could not be reloaded.");
+              const claim = claimFromLeaseRow(tx, {
+                ...lease,
+                status: "released",
+                invalidatedAt: committedContext.now,
+                invalidationReason,
+              });
+              const event = appendTaskEvent(
+                tx,
+                task,
+                { type: "agent", id: claimant.runId },
+                "task.attempt.failed",
+                {
+                  attemptId: attempt.id,
+                  leaseId: lease.id,
+                  agentRunId: claimant.runId,
+                  previousVersion: row.version,
+                  version: task.version,
+                  classification: input.report.classification,
+                  reason: input.report.reason,
+                  changedAreas: input.report.changedAreas,
+                  verificationResults: input.report.verificationResults,
+                  references: input.report.references,
+                  risks: input.report.risks,
+                  followUpWork: input.report.followUpWork,
+                },
+                { agentRunIds: [claimant.runId], scopes: ["agents"] },
+              );
+              const snapshot = taskFailureResultSchema.parse({
+                task,
+                attempt: attemptSummaryFromRow(tx, failedAttempt),
+                claim,
+                event,
+              });
+              recordResultSnapshot(tx, input, command, hash, snapshot, committedContext.now);
+              return snapshot;
+            },
+            { behavior: "immediate" },
+          );
+          leaseTokenCache.delete(result.claim.id);
+          return result;
+        },
+        catch: commandError,
+      });
+    },
+    approveReview(input: ApproveTaskReviewInput, actor: Actor, context: TaskEvaluationContext) {
       return Effect.try({
         try: () =>
-          db.transaction((tx) => {
-            const command = "task.complete";
-            const hash = inputHash(command, withoutIdempotencyKey(input));
-            const existing = findIdempotentResult(tx, command, input.idempotencyKey, hash, context);
-            if (existing) return existing;
-            const row = currentTask(tx, input.taskId);
-            assertExpectedVersion(row, input.expectedVersion);
-            if (actor.type === "agent") {
-              throw new TaskLeaseError({
-                taskId: row.id,
-                reason: "required",
-                message: "Agent completion requires an active lease and structured attempt report.",
+          db.transaction(
+            (tx) => {
+              assertHumanTaskActor(actor);
+              const command = "task.review.approve";
+              const hash = inputHash(command, { ...withoutIdempotencyKey(input), actor });
+              const existing = findIdempotentSnapshot(
+                tx,
+                command,
+                input.idempotencyKey,
+                hash,
+                (value) => taskTransitionResultSchema.parse(value),
+              );
+              if (existing) return existing;
+              const row = currentTask(tx, input.taskId);
+              assertExpectedVersion(row, input.expectedVersion);
+              if (row.archivedAt) {
+                throw new TaskAlreadyArchivedError({
+                  taskId: row.id,
+                  message: "Archived tasks cannot be reviewed.",
+                });
+              }
+              const attempt = reviewedAttempt(tx, row, input.attemptId);
+              const taskUpdate = tx
+                .update(tasks)
+                .set({
+                  lifecycle: "done",
+                  reviewAttemptId: null,
+                  version: row.version + 1,
+                  updatedAt: context.now,
+                })
+                .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
+                .run();
+              if (taskUpdate.changes !== 1) {
+                throw new TaskVersionConflictError({
+                  taskId: row.id,
+                  expectedVersion: row.version,
+                  currentVersion: currentTask(tx, row.id).version,
+                  changeSummary: "The task changed during review.",
+                  message: "The task changed before approval could commit.",
+                });
+              }
+              const task = taskFromRow(tx, currentTask(tx, row.id), context);
+              const event = appendTaskEvent(
+                tx,
+                task,
+                actor,
+                "task.review.approved",
+                {
+                  attemptId: attempt.id,
+                  previousVersion: row.version,
+                  version: task.version,
+                  summary: input.summary,
+                },
+                {
+                  taskIds: blockingRelationTargetIds(tx, row.id),
+                  agentRunIds: attempt.agentRunId ? [attempt.agentRunId] : [],
+                  scopes: attempt.agentRunId ? ["agents"] : [],
+                },
+              );
+              const snapshot = taskTransitionResultSchema.parse({
+                task,
+                attempt: attemptSummaryFromRow(tx, attempt),
+                claim: null,
+                entry: null,
+                event,
               });
-            }
-            if (row.archivedAt) {
-              throw new TaskAlreadyArchivedError({
-                taskId: row.id,
-                message: "Archived tasks cannot be completed.",
+              recordResultSnapshot(tx, input, command, hash, snapshot, context.now);
+              return snapshot;
+            },
+            { behavior: "immediate" },
+          ),
+        catch: commandError,
+      });
+    },
+    requestChanges(input: RequestTaskChangesInput, actor: Actor, context: TaskEvaluationContext) {
+      return Effect.try({
+        try: () =>
+          db.transaction(
+            (tx) => {
+              assertHumanTaskActor(actor);
+              const command = "task.review.request_changes";
+              const hash = inputHash(command, { ...withoutIdempotencyKey(input), actor });
+              const existing = findIdempotentSnapshot(
+                tx,
+                command,
+                input.idempotencyKey,
+                hash,
+                (value) => taskTransitionResultSchema.parse(value),
+              );
+              if (existing) return existing;
+              const row = currentTask(tx, input.taskId);
+              assertExpectedVersion(row, input.expectedVersion);
+              if (row.archivedAt) {
+                throw new TaskAlreadyArchivedError({
+                  taskId: row.id,
+                  message: "Archived tasks cannot receive review changes.",
+                });
+              }
+              const attempt = reviewedAttempt(tx, row, input.attemptId);
+              const entry = humanChangeRequestEntry(tx, input, row, actor, context.now);
+              const taskUpdate = tx
+                .update(tasks)
+                .set({
+                  lifecycle: "ready",
+                  reviewAttemptId: null,
+                  version: row.version + 1,
+                  updatedAt: context.now,
+                })
+                .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
+                .run();
+              if (taskUpdate.changes !== 1)
+                throw new Error("The review task could not be updated.");
+              const task = taskFromRow(tx, currentTask(tx, row.id), context);
+              const event = appendTaskEvent(
+                tx,
+                task,
+                actor,
+                "task.review.changes_requested",
+                {
+                  attemptId: attempt.id,
+                  entryId: entry.id,
+                  previousVersion: row.version,
+                  version: task.version,
+                  summary: input.summary,
+                  requestedChanges: input.requestedChanges,
+                },
+                {
+                  activityEntryIds: [entry.id],
+                  agentRunIds: attempt.agentRunId ? [attempt.agentRunId] : [],
+                  scopes: attempt.agentRunId ? ["activity", "agents"] : ["activity"],
+                },
+              );
+              const result = taskTransitionResultSchema.parse({
+                task,
+                attempt: attemptSummaryFromRow(tx, attempt),
+                claim: null,
+                entry,
+                event,
               });
-            }
-            if (row.lifecycle !== "ready") {
-              throw new TaskLifecycleError({
-                taskId: row.id,
-                lifecycle: row.lifecycle,
-                message: "Only ready tasks can be completed by this pre-claim lifecycle command.",
+              recordResultSnapshot(tx, input, command, hash, result, context.now);
+              return result;
+            },
+            { behavior: "immediate" },
+          ),
+        catch: commandError,
+      });
+    },
+    cancel(input: CancelTaskInput, actor: Actor, context: TaskEvaluationContext) {
+      return Effect.try({
+        try: () => {
+          const command = "task.cancel";
+          const hash = inputHash(command, { ...withoutIdempotencyKey(input), actor });
+          const cached = findIdempotentSnapshot(db, command, input.idempotencyKey, hash, (value) =>
+            taskTransitionResultSchema.parse(value),
+          );
+          if (cached) {
+            if (cached.claim) leaseTokenCache.delete(cached.claim.id);
+            return cached;
+          }
+          reconcileAndEvict(context);
+          const result = db.transaction(
+            (tx) => {
+              assertHumanTaskActor(actor);
+              const existing = findIdempotentSnapshot(
+                tx,
+                command,
+                input.idempotencyKey,
+                hash,
+                (value) => taskTransitionResultSchema.parse(value),
+              );
+              if (existing) return existing;
+              const row = currentTask(tx, input.taskId);
+              assertExpectedVersion(row, input.expectedVersion);
+              if (row.archivedAt) {
+                throw new TaskAlreadyArchivedError({
+                  taskId: row.id,
+                  message: "Archived tasks cannot be cancelled.",
+                });
+              }
+              if (row.lifecycle === "done" || row.lifecycle === "cancelled") {
+                throw new TaskLifecycleError({
+                  taskId: row.id,
+                  lifecycle: row.lifecycle,
+                  message:
+                    row.lifecycle === "done"
+                      ? "Reopen completed work before cancelling it."
+                      : "That task is already cancelled.",
+                });
+              }
+              const activeLease = tx
+                .select()
+                .from(leases)
+                .where(and(eq(leases.taskId, row.id), eq(leases.status, "active")))
+                .limit(1)
+                .get();
+              if (row.lifecycle === "in_progress" && !activeLease) {
+                throw new TaskLeaseError({
+                  taskId: row.id,
+                  reason: "required",
+                  message: "The in-progress task no longer has an active lease.",
+                });
+              }
+              let cancelledAttempt: AttemptRow | null = null;
+              let cancelledClaim: TaskClaim | null = null;
+              if (activeLease) {
+                closeLeaseAttempt(
+                  tx,
+                  activeLease,
+                  "cancelled",
+                  input.reason,
+                  context.now,
+                  "cancelled",
+                );
+                cancelledAttempt =
+                  tx
+                    .select()
+                    .from(attempts)
+                    .where(eq(attempts.id, activeLease.attemptId))
+                    .limit(1)
+                    .get() ?? null;
+                cancelledClaim = claimFromLeaseRow(tx, {
+                  ...activeLease,
+                  status: "cancelled",
+                  invalidatedAt: context.now,
+                  invalidationReason: input.reason,
+                });
+              } else if (row.lifecycle === "review") {
+                if (!row.reviewAttemptId) {
+                  throw new TaskReviewError({
+                    taskId: row.id,
+                    reason: "attempt_mismatch",
+                    message: "The review task no longer identifies its completed attempt.",
+                  });
+                }
+                cancelledAttempt = reviewedAttempt(tx, row, row.reviewAttemptId);
+              }
+              const taskUpdate = tx
+                .update(tasks)
+                .set({
+                  lifecycle: "cancelled",
+                  cancelledFromLifecycle: row.lifecycle,
+                  reviewAttemptId: row.lifecycle === "review" ? row.reviewAttemptId : null,
+                  version: row.version + 1,
+                  updatedAt: context.now,
+                })
+                .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
+                .run();
+              if (taskUpdate.changes !== 1) throw new Error("The task could not be cancelled.");
+              const task = taskFromRow(tx, currentTask(tx, row.id), context);
+              const event = appendTaskEvent(
+                tx,
+                task,
+                actor,
+                "task.cancelled",
+                {
+                  previousVersion: row.version,
+                  version: task.version,
+                  previousLifecycle: row.lifecycle,
+                  reason: input.reason,
+                  ...(activeLease
+                    ? {
+                        leaseId: activeLease.id,
+                        attemptId: activeLease.attemptId,
+                        agentRunId: activeLease.agentRunId,
+                      }
+                    : {}),
+                },
+                {
+                  taskIds: blockingRelationTargetIds(tx, row.id),
+                  agentRunIds: activeLease ? [activeLease.agentRunId] : [],
+                  scopes: activeLease ? ["agents"] : [],
+                },
+              );
+              const snapshot = taskTransitionResultSchema.parse({
+                task,
+                attempt: cancelledAttempt ? attemptSummaryFromRow(tx, cancelledAttempt) : null,
+                claim: cancelledClaim,
+                entry: null,
+                event,
               });
-            }
-
-            const now = new Date().toISOString();
-            tx.update(tasks)
-              .set({
-                lifecycle: "done",
-                version: row.version + 1,
-                updatedAt: now,
-              })
-              .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
-              .run();
-            const task = taskFromRow(tx, currentTask(tx, row.id), context);
-            recordMutation(tx, input, command, hash, task, actor, {
-              kind: "task.completed",
-              payload: { previousVersion: row.version, version: task.version },
-            });
-            return task;
-          }),
+              recordResultSnapshot(tx, input, command, hash, snapshot, context.now);
+              return snapshot;
+            },
+            { behavior: "immediate" },
+          );
+          if (result.claim) leaseTokenCache.delete(result.claim.id);
+          return result;
+        },
+        catch: commandError,
+      });
+    },
+    restore(input: RestoreCancelledTaskInput, actor: Actor, context: TaskEvaluationContext) {
+      return Effect.try({
+        try: () =>
+          db.transaction(
+            (tx) => {
+              assertHumanTaskActor(actor);
+              const command = "task.cancel.restore";
+              const hash = inputHash(command, { ...withoutIdempotencyKey(input), actor });
+              const existing = findIdempotentSnapshot(
+                tx,
+                command,
+                input.idempotencyKey,
+                hash,
+                (value) => taskTransitionResultSchema.parse(value),
+              );
+              if (existing) return existing;
+              const row = currentTask(tx, input.taskId);
+              assertExpectedVersion(row, input.expectedVersion);
+              if (row.archivedAt) {
+                throw new TaskAlreadyArchivedError({
+                  taskId: row.id,
+                  message: "Archived tasks cannot be restored.",
+                });
+              }
+              if (row.lifecycle !== "cancelled" || !row.cancelledFromLifecycle) {
+                throw new TaskLifecycleError({
+                  taskId: row.id,
+                  lifecycle: row.lifecycle,
+                  message: "Only explicitly cancelled work can be restored.",
+                });
+              }
+              const destination =
+                row.cancelledFromLifecycle === "in_progress" ? "ready" : row.cancelledFromLifecycle;
+              let reviewAttempt: AttemptRow | null = null;
+              if (destination === "review") {
+                if (!row.reviewAttemptId) {
+                  throw new TaskReviewError({
+                    taskId: row.id,
+                    reason: "attempt_mismatch",
+                    message: "The cancelled review no longer identifies its completed attempt.",
+                  });
+                }
+                reviewAttempt =
+                  tx
+                    .select()
+                    .from(attempts)
+                    .where(eq(attempts.id, row.reviewAttemptId))
+                    .limit(1)
+                    .get() ?? null;
+                if (
+                  !reviewAttempt ||
+                  reviewAttempt.taskId !== row.id ||
+                  reviewAttempt.status !== "completed"
+                ) {
+                  throw new TaskReviewError({
+                    taskId: row.id,
+                    attemptId: row.reviewAttemptId,
+                    reviewAttemptId: row.reviewAttemptId,
+                    reason: "attempt_mismatch",
+                    message: "The cancelled review attempt is no longer restorable.",
+                  });
+                }
+              }
+              const taskUpdate = tx
+                .update(tasks)
+                .set({
+                  lifecycle: destination,
+                  reviewAttemptId: destination === "review" ? row.reviewAttemptId : null,
+                  cancelledFromLifecycle: null,
+                  version: row.version + 1,
+                  updatedAt: context.now,
+                })
+                .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
+                .run();
+              if (taskUpdate.changes !== 1) throw new Error("The task could not be restored.");
+              const task = taskFromRow(tx, currentTask(tx, row.id), context);
+              const event = appendTaskEvent(
+                tx,
+                task,
+                actor,
+                "task.restored",
+                {
+                  previousVersion: row.version,
+                  version: task.version,
+                  cancelledFromLifecycle: row.cancelledFromLifecycle,
+                  destination,
+                  reason: input.reason,
+                  ...(row.reviewAttemptId ? { attemptId: row.reviewAttemptId } : {}),
+                },
+                { taskIds: blockingRelationTargetIds(tx, row.id) },
+              );
+              const result = taskTransitionResultSchema.parse({
+                task,
+                attempt: reviewAttempt ? attemptSummaryFromRow(tx, reviewAttempt) : null,
+                claim: null,
+                entry: null,
+                event,
+              });
+              recordResultSnapshot(tx, input, command, hash, result, context.now);
+              return result;
+            },
+            { behavior: "immediate" },
+          ),
         catch: commandError,
       });
     },
     reopen(input: ReopenTaskInput, actor: Actor, context: TaskEvaluationContext) {
       return Effect.try({
         try: () =>
-          db.transaction((tx) => {
-            const command = "task.reopen";
-            const hash = inputHash(command, withoutIdempotencyKey(input));
-            const existing = findIdempotentResult(tx, command, input.idempotencyKey, hash, context);
-            if (existing) return existing;
-            const row = currentTask(tx, input.taskId);
-            assertExpectedVersion(row, input.expectedVersion);
-            if (row.archivedAt) {
-              throw new TaskAlreadyArchivedError({
-                taskId: row.id,
-                message: "Archived tasks cannot be reopened.",
-              });
-            }
-            if (row.lifecycle !== "done") {
-              throw new TaskLifecycleError({
-                taskId: row.id,
-                lifecycle: row.lifecycle,
-                message: "Only complete tasks can be reopened.",
-              });
-            }
+          db.transaction(
+            (tx) => {
+              const command = "task.reopen";
+              const hash = inputHash(command, { ...withoutIdempotencyKey(input), actor });
+              const existing = findIdempotentSnapshot(
+                tx,
+                command,
+                input.idempotencyKey,
+                hash,
+                (value) => taskTransitionResultSchema.parse(value),
+              );
+              if (existing) return existing;
+              const row = currentTask(tx, input.taskId);
+              assertExpectedVersion(row, input.expectedVersion);
+              if (row.archivedAt) {
+                throw new TaskAlreadyArchivedError({
+                  taskId: row.id,
+                  message: "Archived tasks cannot be reopened.",
+                });
+              }
+              if (row.lifecycle !== "done") {
+                throw new TaskLifecycleError({
+                  taskId: row.id,
+                  lifecycle: row.lifecycle,
+                  message: "Only complete tasks can be reopened.",
+                });
+              }
 
-            const now = new Date().toISOString();
-            tx.update(tasks)
-              .set({
-                lifecycle: "ready",
-                version: row.version + 1,
-                updatedAt: now,
-              })
-              .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
-              .run();
-            const task = taskFromRow(tx, currentTask(tx, row.id), context);
-            recordMutation(tx, input, command, hash, task, actor, {
-              kind: "task.reopened",
-              payload: {
-                previousVersion: row.version,
-                version: task.version,
-                reason: input.reason,
-              },
-            });
-            return task;
-          }),
+              const taskUpdate = tx
+                .update(tasks)
+                .set({
+                  lifecycle: input.destination,
+                  reviewAttemptId: null,
+                  cancelledFromLifecycle: null,
+                  version: row.version + 1,
+                  updatedAt: context.now,
+                })
+                .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
+                .run();
+              if (taskUpdate.changes !== 1) throw new Error("The task could not be reopened.");
+              const priorAttempt = tx
+                .select()
+                .from(attempts)
+                .where(eq(attempts.taskId, row.id))
+                .orderBy(desc(attempts.attemptNumber), desc(attempts.id))
+                .limit(1)
+                .get();
+              const task = taskFromRow(tx, currentTask(tx, row.id), context);
+              const event = appendTaskEvent(
+                tx,
+                task,
+                actor,
+                "task.reopened",
+                {
+                  previousVersion: row.version,
+                  version: task.version,
+                  destination: input.destination,
+                  reason: input.reason,
+                  ...(priorAttempt ? { priorAttemptId: priorAttempt.id } : {}),
+                },
+                { taskIds: blockingRelationTargetIds(tx, row.id) },
+              );
+              const result = taskTransitionResultSchema.parse({
+                task,
+                attempt: priorAttempt ? attemptSummaryFromRow(tx, priorAttempt) : null,
+                claim: null,
+                entry: null,
+                event,
+              });
+              recordResultSnapshot(tx, input, command, hash, result, context.now);
+              return result;
+            },
+            { behavior: "immediate" },
+          ),
         catch: commandError,
       });
     },

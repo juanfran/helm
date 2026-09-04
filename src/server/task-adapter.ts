@@ -1,13 +1,18 @@
 import { Effect, Either } from "effect";
 
 import {
+  approveTaskReview,
   archiveTask,
+  cancelTask,
   completeTask,
   createTask,
   createTaskRelation,
+  failTask,
   invalidateTaskClaim,
   prepareTask,
   reopenTask,
+  requestTaskChanges,
+  restoreCancelledTask,
   updateTaskPlanning,
   type TaskServices,
 } from "../application/tasks";
@@ -16,7 +21,16 @@ import {
   type TaskCommandError,
   type TaskErrorDto,
 } from "../application/task-errors";
-import type { Actor, Task, TaskLeaseMutationResult, TaskRelation } from "../domain/tasks";
+import type { RegisteredAgentRun } from "../domain/agents";
+import type {
+  Actor,
+  Task,
+  TaskCompletionResult,
+  TaskFailureResult,
+  TaskLeaseMutationResult,
+  TaskRelation,
+  TaskTransitionResult,
+} from "../domain/tasks";
 
 export type TaskCommandResponse = { ok: true; task: Task } | { ok: false; error: TaskErrorDto };
 export type TaskRelationCommandResponse =
@@ -24,6 +38,15 @@ export type TaskRelationCommandResponse =
   | { ok: false; error: TaskErrorDto };
 export type TaskLeaseCommandResponse =
   | { ok: true; result: TaskLeaseMutationResult }
+  | { ok: false; error: TaskErrorDto };
+export type TaskCompletionCommandResponse =
+  | { ok: true; result: TaskCompletionResult }
+  | { ok: false; error: TaskErrorDto };
+export type TaskFailureCommandResponse =
+  | { ok: true; result: TaskFailureResult }
+  | { ok: false; error: TaskErrorDto };
+export type TaskTransitionCommandResponse =
+  | { ok: true; result: TaskTransitionResult }
   | { ok: false; error: TaskErrorDto };
 
 async function execute(
@@ -53,6 +76,15 @@ async function executeLeaseMutation(
     : { ok: false, error: toTaskErrorDto(result.left) };
 }
 
+async function executeResult<A>(
+  operation: Effect.Effect<A, TaskCommandError>,
+): Promise<{ ok: true; result: A } | { ok: false; error: TaskErrorDto }> {
+  const result = await Effect.runPromise(Effect.either(operation));
+  return Either.isRight(result)
+    ? { ok: true, result: result.right }
+    : { ok: false, error: toTaskErrorDto(result.left) };
+}
+
 export function executeCreateTask(
   data: unknown,
   actor: Actor,
@@ -72,11 +104,34 @@ export function executeUpdateTaskPlanning(data: unknown, actor: Actor, services:
 
 export function executeCompleteTask(
   data: unknown,
-  actor: Actor,
+  registration: RegisteredAgentRun,
   services: TaskServices,
-  agentCapabilities: readonly string[] = [],
-) {
-  return execute(completeTask(data, actor, services, agentCapabilities));
+): Promise<TaskCompletionCommandResponse> {
+  return executeResult(completeTask(data, registration, services));
+}
+
+export function executeFailTask(
+  data: unknown,
+  registration: RegisteredAgentRun,
+  services: TaskServices,
+): Promise<TaskFailureCommandResponse> {
+  return executeResult(failTask(data, registration, services));
+}
+
+export function executeApproveTaskReview(data: unknown, actor: Actor, services: TaskServices) {
+  return executeResult(approveTaskReview(data, actor, services));
+}
+
+export function executeRequestTaskChanges(data: unknown, actor: Actor, services: TaskServices) {
+  return executeResult(requestTaskChanges(data, actor, services));
+}
+
+export function executeCancelTask(data: unknown, actor: Actor, services: TaskServices) {
+  return executeResult(cancelTask(data, actor, services));
+}
+
+export function executeRestoreCancelledTask(data: unknown, actor: Actor, services: TaskServices) {
+  return executeResult(restoreCancelledTask(data, actor, services));
 }
 
 export function executeReopenTask(
@@ -84,8 +139,8 @@ export function executeReopenTask(
   actor: Actor,
   services: TaskServices,
   agentCapabilities: readonly string[] = [],
-) {
-  return execute(reopenTask(data, actor, services, agentCapabilities));
+): Promise<TaskTransitionCommandResponse> {
+  return executeResult(reopenTask(data, actor, services, agentCapabilities));
 }
 
 export function executeCreateTaskRelation(data: unknown, actor: Actor, services: TaskServices) {

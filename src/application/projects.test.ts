@@ -5,8 +5,13 @@ import { tmpdir } from "node:os";
 import { Effect, Either } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createProject, getAppState, setTheme } from "./projects";
-import { compiledCreateProjectInputSchema, createProjectInputSchema } from "../domain/projects";
+import { createProject, getAppState, setProjectReviewMode, setTheme } from "./projects";
+import {
+  compiledCreateProjectInputSchema,
+  compiledSetProjectReviewModeInputSchema,
+  createProjectInputSchema,
+  setProjectReviewModeInputSchema,
+} from "../domain/projects";
 import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
 import {
   createSqliteProjectStore,
@@ -180,6 +185,121 @@ describe("project application commands", () => {
     reopenedStore.close();
   });
 
+  it("changes review mode with versioning, attribution, and idempotency", async () => {
+    const store = createSqliteProjectStore(":memory:");
+    const root = await repository("review-mode");
+    const project = await Effect.runPromise(
+      createProject({ repositoryRoot: root, idempotencyKey: "review-project" }, services(store)),
+    );
+    const command = {
+      projectId: project.id,
+      reviewMode: "direct" as const,
+      expectedVersion: project.version,
+      idempotencyKey: "direct-review-mode",
+    };
+
+    const updated = await Effect.runPromise(
+      setProjectReviewMode(command, { type: "human", id: "local-human" }, services(store)),
+    );
+    const retry = await Effect.runPromise(
+      setProjectReviewMode(command, { type: "human", id: "local-human" }, services(store)),
+    );
+    const stale = await Effect.runPromise(
+      Effect.either(
+        setProjectReviewMode(
+          { ...command, idempotencyKey: "stale-review-mode" },
+          { type: "human", id: "local-human" },
+          services(store),
+        ),
+      ),
+    );
+    const unauthorized = await Effect.runPromise(
+      Effect.either(
+        setProjectReviewMode(
+          {
+            ...command,
+            expectedVersion: updated.version,
+            idempotencyKey: "agent-review-mode",
+          },
+          { type: "agent", id: "run-1" },
+          services(store),
+        ),
+      ),
+    );
+    const event = store.database
+      .prepare<[], { actorType: string; actorId: string; payloadJson: string }>(
+        "select actor_type as actorType, actor_id as actorId, payload_json as payloadJson from events where kind = 'project.review_mode.changed'",
+      )
+      .get();
+
+    expect(project).toMatchObject({ reviewMode: "required", version: 1 });
+    expect(updated).toMatchObject({ reviewMode: "direct", version: 2 });
+    expect(retry).toEqual(updated);
+    expect(Either.isLeft(stale) && stale.left).toMatchObject({
+      _tag: "ProjectVersionConflictError",
+      expectedVersion: 1,
+      currentVersion: 2,
+    });
+    expect(Either.isLeft(unauthorized) && unauthorized.left).toMatchObject({
+      _tag: "ProjectAuthorizationError",
+    });
+    expect(event).toMatchObject({ actorType: "human", actorId: "local-human" });
+    expect(JSON.parse(event?.payloadJson ?? "null")).toEqual({
+      previousReviewMode: "required",
+      reviewMode: "direct",
+      previousVersion: 1,
+      version: 2,
+    });
+    store.close();
+  });
+
+  it("rolls review mode, audit, and idempotency back together", async () => {
+    const store = createSqliteProjectStore(":memory:");
+    const root = await repository("review-mode-rollback");
+    const project = await Effect.runPromise(
+      createProject(
+        { repositoryRoot: root, idempotencyKey: "review-rollback-project" },
+        services(store),
+      ),
+    );
+    store.database.exec(`
+      create trigger reject_review_mode_event
+      before insert on events when NEW.kind = 'project.review_mode.changed'
+      begin select raise(abort, 'review mode event rejected'); end;
+    `);
+
+    const result = await Effect.runPromise(
+      Effect.either(
+        setProjectReviewMode(
+          {
+            projectId: project.id,
+            reviewMode: "direct",
+            expectedVersion: project.version,
+            idempotencyKey: "review-mode-rollback",
+          },
+          { type: "human", id: "local-human" },
+          services(store),
+        ),
+      ),
+    );
+    const persisted = store.database
+      .prepare<[string], { reviewMode: string; version: number }>(
+        "select review_mode as reviewMode, version from projects where id = ?",
+      )
+      .get(project.id);
+    const idempotencyCount = store.database
+      .prepare<[string], number>("select count(*) from idempotency_records where key = ?")
+      .pluck()
+      .get("review-mode-rollback");
+
+    expect(Either.isLeft(result) && result.left).toMatchObject({
+      _tag: "ProjectPersistenceError",
+    });
+    expect(persisted).toEqual({ reviewMode: "required", version: 1 });
+    expect(idempotencyCount).toBe(0);
+    store.close();
+  });
+
   it("accepts and rejects representative input through normal and compiled schemas", () => {
     const valid = { repositoryRoot: "/tmp/example", idempotencyKey: "request-1" };
     expect(createProjectInputSchema.parse(valid)).toEqual(valid);
@@ -188,5 +308,13 @@ describe("project application commands", () => {
     expect(() =>
       compiledCreateProjectInputSchema.parse({ ...valid, repositoryRoot: "" }),
     ).toThrow();
+    const reviewMode = {
+      projectId: "project-1",
+      reviewMode: "required" as const,
+      expectedVersion: 1,
+      idempotencyKey: "review-mode",
+    };
+    expect(setProjectReviewModeInputSchema.parse(reviewMode)).toEqual(reviewMode);
+    expect(compiledSetProjectReviewModeInputSchema.parse(reviewMode)).toEqual(reviewMode);
   });
 });

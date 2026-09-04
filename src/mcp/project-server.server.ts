@@ -16,9 +16,12 @@ import { getAppState, listProjects, type ProjectServices } from "../application/
 import {
   claimNextTask,
   claimTask,
+  completeTask,
+  failTask,
   findWork,
   getTaskContext,
   releaseTaskLease,
+  reopenTask,
   renewTaskLease,
   type TaskServices,
 } from "../application/tasks";
@@ -41,29 +44,28 @@ import {
   completeTaskInputSchema,
   createTaskInputSchema,
   createTaskRelationInputSchema,
+  failTaskInputSchema,
   findWorkInputSchema,
   releaseTaskLeaseInputSchema,
   reopenTaskInputSchema,
   renewTaskLeaseInputSchema,
   taskContextInputSchema,
   taskContextPackageSchema,
+  taskCompletionResultSchema,
   taskDiscoveryPageSchema,
+  taskFailureResultSchema,
   taskLeaseGrantSchema,
   taskLeaseMutationResultSchema,
   taskRelationSchema,
   taskSchema,
+  taskTransitionResultSchema,
   type Actor,
 } from "../domain/tasks";
 import {
   executeCreateAgentActivityEntry,
   executeCreateAgentManualBlocker,
 } from "../server/activity-adapter";
-import {
-  executeCompleteTask,
-  executeCreateTask,
-  executeCreateTaskRelation,
-  executeReopenTask,
-} from "../server/task-adapter";
+import { executeCreateTask, executeCreateTaskRelation } from "../server/task-adapter";
 
 type McpExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 export type McpClientIdentity = {
@@ -117,6 +119,15 @@ const taskErrorSchema = z.discriminatedUnion("type", [
     message: z.string(),
     taskId: z.string(),
     lifecycle: z.string(),
+  }),
+  z.object({ type: z.literal("TaskAuthorizationError"), message: z.string() }),
+  z.object({
+    type: z.literal("TaskReviewError"),
+    message: z.string(),
+    taskId: z.string(),
+    attemptId: z.string().optional(),
+    reviewAttemptId: z.string().optional(),
+    reviewReason: z.enum(["not_in_review", "attempt_mismatch"]),
   }),
   z.object({
     type: z.literal("TaskNestingError"),
@@ -179,6 +190,8 @@ const taskErrorSchema = z.discriminatedUnion("type", [
       "owner_mismatch",
       "inactive_run",
     ]),
+    leaseStatus: z.enum(["active", "released", "expired", "cancelled", "reassigned"]).optional(),
+    invalidationReason: z.string().optional(),
   }),
   z.object({ type: z.literal("TaskPersistenceError"), message: z.string() }),
 ]);
@@ -210,6 +223,8 @@ const activityErrorSchema = z.object({
   leaseReason: z
     .enum(["not_found", "required", "expired", "inactive", "owner_mismatch", "inactive_run"])
     .optional(),
+  leaseStatus: z.enum(["active", "released", "expired", "cancelled", "reassigned"]).optional(),
+  invalidationReason: z.string().optional(),
 });
 
 const activityToolErrorSchema = z.union([agentErrorSchema, activityErrorSchema]);
@@ -728,25 +743,52 @@ export function createHelmMcpServer(
     {
       title: "Complete a Helm task",
       description:
-        "Agent completion is currently unavailable; lease-aware completion with structured attempt reports is deferred to the execution-reporting slice.",
+        "Submit the registered agent's structured completion report for its active leased attempt.",
       inputSchema: completeTaskInputSchema,
       outputSchema: {
         ok: z.boolean(),
-        task: taskSchema.optional(),
+        result: taskCompletionResultSchema.optional(),
         error: z.union([agentErrorSchema, taskErrorSchema]).optional(),
       },
       annotations: { readOnlyHint: false, idempotentHint: true },
     },
     async (input, extra) => {
-      const actor = await actorForTool(extra, agentServices, client);
-      if (!actor.ok) return jsonToolResult({ ok: false, error: actor.error }, true);
-      const response = await executeCompleteTask(
-        input,
-        actor.actor,
-        taskServices,
-        actor.capabilities,
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const result = await Effect.runPromise(
+        Effect.either(completeTask(input, registered.registration, taskServices)),
       );
-      return jsonToolResult(response, !response.ok);
+      const structuredContent = Either.isRight(result)
+        ? { ok: true, result: result.right }
+        : { ok: false, error: toTaskErrorDto(result.left) };
+      return jsonToolResult(structuredContent, !structuredContent.ok);
+    },
+  );
+
+  server.registerTool(
+    "fail_task",
+    {
+      title: "Report a failed Helm task attempt",
+      description:
+        "Submit a classified failure report for the registered agent's active leased attempt.",
+      inputSchema: failTaskInputSchema,
+      outputSchema: {
+        ok: z.boolean(),
+        result: taskFailureResultSchema.optional(),
+        error: z.union([agentErrorSchema, taskErrorSchema]).optional(),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const result = await Effect.runPromise(
+        Effect.either(failTask(input, registered.registration, taskServices)),
+      );
+      const structuredContent = Either.isRight(result)
+        ? { ok: true, result: result.right }
+        : { ok: false, error: toTaskErrorDto(result.left) };
+      return jsonToolResult(structuredContent, !structuredContent.ok);
     },
   );
 
@@ -759,7 +801,7 @@ export function createHelmMcpServer(
       inputSchema: reopenTaskInputSchema,
       outputSchema: {
         ok: z.boolean(),
-        task: taskSchema.optional(),
+        result: taskTransitionResultSchema.optional(),
         error: z.union([agentErrorSchema, taskErrorSchema]).optional(),
       },
       annotations: { readOnlyHint: false, idempotentHint: true },
@@ -767,13 +809,13 @@ export function createHelmMcpServer(
     async (input, extra) => {
       const actor = await actorForTool(extra, agentServices, client);
       if (!actor.ok) return jsonToolResult({ ok: false, error: actor.error }, true);
-      const response = await executeReopenTask(
-        input,
-        actor.actor,
-        taskServices,
-        actor.capabilities,
+      const result = await Effect.runPromise(
+        Effect.either(reopenTask(input, actor.actor, taskServices, actor.capabilities)),
       );
-      return jsonToolResult(response, !response.ok);
+      const structuredContent = Either.isRight(result)
+        ? { ok: true, result: result.right }
+        : { ok: false, error: toTaskErrorDto(result.left) };
+      return jsonToolResult(structuredContent, !structuredContent.ok);
     },
   );
 

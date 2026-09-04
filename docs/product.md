@@ -73,7 +73,7 @@ Helm does not execute agents. External agents connect to the local server and de
 - Core lifecycle values remain fixed. Custom fields, tags, views, and review policies provide workflow flexibility without redefining lifecycle semantics.
 - Ordering combines explicit priority, manual position, satisfied dependencies, start date, capability match, and stable age. Queries return a human-readable explanation.
 - Only blocking relations affect eligibility. Informational relations do not.
-- An attempt records one execution of a task. Reopening preserves the task and prior attempts while creating a new attempt.
+- An attempt records one execution of a task. Reopening preserves the task and prior attempts; the next successful claim creates a new attempt.
 - Claims use atomic, renewable, expiring leases. Cancellation, reassignment, or version conflict invalidates stale completion.
 - Completion reports include a result summary, changed areas, verification, references, risks, and follow-up work.
 - Review policy can be set by project, tag, or task. The most specific policy wins.

@@ -73,7 +73,9 @@ backlog -> ready -> in_progress -> review -> done
    └─────────┴───────────┴───────────┴-> cancelled
 ```
 
-Reopening `done` or rejected `review` creates a new attempt and returns the task to `ready` unless the user explicitly chooses `backlog`.
+Reopening `done` returns the task to `ready` unless the actor explicitly chooses `backlog`. Rejecting
+`review` returns it to `ready`. Both preserve prior attempts; a fresh attempt is created only by the next
+successful claim.
 
 `scheduled`, `blocked`, `claimable`, and `claimed` are eligibility projections, not extra lifecycle values:
 
@@ -99,9 +101,17 @@ The query result includes eligibility facts and a short ordering explanation. Du
 
 ## Attempts and leases
 
-Claiming is a single SQLite transaction that verifies eligibility, creates an attempt if needed, creates the lease, changes lifecycle to `in_progress`, increments the task version, and appends events.
+Claiming is a single SQLite transaction that verifies eligibility, creates an attempt, creates the lease,
+changes lifecycle to `in_progress`, increments the task version, and appends events. Completion and
+failure require that attempt's active lease token and the current task version. A completion report is
+stored immutably on the attempt; the project review mode is read in the same transaction and routes the
+task to `review` or `done`. Failure stores a classified report and returns the task to `ready`.
 
-Lease renewal requires the lease token, current task version, and active run. Expiration makes the task claimable again and closes the attempt as abandoned when cleanup observes it. Cancellation or reassignment invalidates the token immediately. Completion from an invalid lease is rejected and preserved only as a rejected protocol event where useful.
+Lease renewal requires the lease token, current task version, and active run. Expiration makes the task
+claimable again and closes the attempt as abandoned when cleanup observes it. Lease invalidation returns
+work to ready; human task cancellation is a distinct attributed command that moves the task to
+`cancelled`, closes active execution without success, and invalidates the token immediately. Late results
+from any invalid lease are rejected without changing task or attempt history.
 
 ## MCP boundary
 

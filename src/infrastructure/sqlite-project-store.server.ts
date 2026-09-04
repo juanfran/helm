@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import Database from "better-sqlite3";
-import { asc, eq, max } from "drizzle-orm";
+import { and, asc, eq, max } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { Effect } from "effect";
@@ -11,11 +11,20 @@ import { Effect } from "effect";
 import {
   DuplicateRepositoryRootError,
   IdempotencyConflictError,
+  ProjectAuthorizationError,
   ProjectPersistenceError,
+  ProjectVersionConflictError,
   type ProjectCommandError,
 } from "../application/project-errors";
 import type { ProjectStore, RepositoryDetails } from "../application/projects";
-import type { AppState, CreateProjectInput, Project, SetThemeInput } from "../domain/projects";
+import type { ActivityActor } from "../domain/activity";
+import type {
+  AppState,
+  CreateProjectInput,
+  Project,
+  SetProjectReviewModeInput,
+  SetThemeInput,
+} from "../domain/projects";
 import { appStateSchema, projectSchema } from "../domain/projects";
 import { events, idempotencyRecords, preferences, projects, schema } from "../db/schema";
 import { importanceForEventKind, normalizeEventChangeHints } from "../domain/activity";
@@ -149,6 +158,7 @@ export function createSqliteProjectStore(
               sequence: (sequenceResult?.value ?? 0) + 1,
               name: repository.name,
               repositoryRoot: repository.canonicalRoot,
+              reviewMode: "required",
               version: 1,
               createdAt: now,
               updatedAt: now,
@@ -283,6 +293,138 @@ export function createSqliteProjectStore(
           }),
         catch: (error): ProjectCommandError =>
           error instanceof IdempotencyConflictError ? error : persistenceError(error),
+      });
+    },
+    setReviewMode(input: SetProjectReviewModeInput, actor: ActivityActor) {
+      return Effect.try({
+        try: () =>
+          db.transaction(
+            (tx) => {
+              if (actor.type !== "human") {
+                throw new ProjectAuthorizationError({
+                  message: "Only the local human can change the project review mode.",
+                });
+              }
+              const command = "project.review_mode.set";
+              const hash = inputHash(command, {
+                projectId: input.projectId,
+                reviewMode: input.reviewMode,
+                expectedVersion: input.expectedVersion,
+              });
+              const existingRequest = tx
+                .select()
+                .from(idempotencyRecords)
+                .where(eq(idempotencyRecords.key, input.idempotencyKey))
+                .limit(1)
+                .get();
+              if (existingRequest) {
+                if (existingRequest.command !== command || existingRequest.inputHash !== hash) {
+                  throw new IdempotencyConflictError({
+                    key: input.idempotencyKey,
+                    message: "That idempotency key was already used for a different command.",
+                  });
+                }
+                return projectSchema.parse(JSON.parse(existingRequest.resultJson));
+              }
+
+              const project = tx
+                .select()
+                .from(projects)
+                .where(eq(projects.id, input.projectId))
+                .limit(1)
+                .get();
+              if (!project) {
+                throw new ProjectVersionConflictError({
+                  projectId: input.projectId,
+                  expectedVersion: input.expectedVersion,
+                  currentVersion: 0,
+                  message: "That project does not exist.",
+                });
+              }
+              if (project.version !== input.expectedVersion) {
+                throw new ProjectVersionConflictError({
+                  projectId: project.id,
+                  expectedVersion: input.expectedVersion,
+                  currentVersion: project.version,
+                  message: `Project version conflict: expected ${input.expectedVersion}, current ${project.version}.`,
+                });
+              }
+
+              const now = new Date().toISOString();
+              const update = tx
+                .update(projects)
+                .set({
+                  reviewMode: input.reviewMode,
+                  version: project.version + 1,
+                  updatedAt: now,
+                })
+                .where(and(eq(projects.id, project.id), eq(projects.version, project.version)))
+                .run();
+              if (update.changes !== 1) {
+                const currentVersion =
+                  tx
+                    .select({ version: projects.version })
+                    .from(projects)
+                    .where(eq(projects.id, project.id))
+                    .limit(1)
+                    .get()?.version ?? project.version;
+                throw new ProjectVersionConflictError({
+                  projectId: project.id,
+                  expectedVersion: input.expectedVersion,
+                  currentVersion,
+                  message: `Project version conflict: expected ${input.expectedVersion}, current ${currentVersion}.`,
+                });
+              }
+              const updated = projectSchema.parse(
+                tx.select().from(projects).where(eq(projects.id, project.id)).limit(1).get(),
+              );
+              tx.insert(events)
+                .values({
+                  projectId: updated.id,
+                  kind: "project.review_mode.changed",
+                  importance: importanceForEventKind("project.review_mode.changed"),
+                  actorType: actor.type,
+                  actorId: actor.id,
+                  entityType: "project",
+                  entityId: updated.id,
+                  payloadJson: JSON.stringify({
+                    previousReviewMode: project.reviewMode,
+                    reviewMode: updated.reviewMode,
+                    previousVersion: project.version,
+                    version: updated.version,
+                  }),
+                  changesJson: JSON.stringify(
+                    normalizeEventChangeHints({
+                      projectIds: [updated.id],
+                      scopes: ["projects"],
+                    }),
+                  ),
+                  occurredAt: now,
+                })
+                .run();
+              tx.insert(idempotencyRecords)
+                .values({
+                  key: input.idempotencyKey,
+                  command,
+                  inputHash: hash,
+                  resultJson: JSON.stringify(updated),
+                  createdAt: now,
+                })
+                .run();
+              return updated;
+            },
+            { behavior: "immediate" },
+          ),
+        catch: (error): ProjectCommandError => {
+          if (
+            error instanceof IdempotencyConflictError ||
+            error instanceof ProjectVersionConflictError ||
+            error instanceof ProjectAuthorizationError
+          ) {
+            return error;
+          }
+          return persistenceError(error);
+        },
       });
     },
   };

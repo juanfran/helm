@@ -1,7 +1,8 @@
 import { z } from "zod";
 
 import { richTextDocumentSchema } from "./rich-text";
-import { activityEntrySchema, manualBlockerSchema } from "./activity";
+import { activityEntrySchema, manualBlockerSchema, projectEventSchema } from "./activity";
+import { projectReviewModeSchema } from "./projects";
 
 export {
   emptyRichTextDocument,
@@ -62,6 +63,43 @@ export const taskClaimSchema = z.object({
   invalidationReason: z.string().nullable(),
 });
 export type TaskClaim = z.infer<typeof taskClaimSchema>;
+
+export const taskVerificationStatusSchema = z.enum(["passed", "failed", "not_run"]);
+export const taskVerificationResultSchema = z.object({
+  name: z.string().trim().min(1).max(300),
+  status: taskVerificationStatusSchema,
+  details: z.string().trim().max(2_000),
+});
+export type TaskVerificationResult = z.infer<typeof taskVerificationResultSchema>;
+
+export const taskFailureClassificationSchema = z.enum([
+  "implementation",
+  "verification",
+  "environment",
+  "requirements",
+  "unknown",
+]);
+export type TaskFailureClassification = z.infer<typeof taskFailureClassificationSchema>;
+
+export const taskAttemptSummarySchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  attemptNumber: z.number().int().positive().default(1),
+  agentRunId: z.string().nullable(),
+  agentProfileId: z.string().nullable().default(null),
+  agentDisplayName: z.string().nullable().default(null),
+  status: z.enum(["active", "completed", "failed", "abandoned", "cancelled"]),
+  summary: z.string(),
+  changedAreas: z.array(z.string()).default([]),
+  verificationResults: z.array(taskVerificationResultSchema).default([]),
+  references: z.array(z.string()).default([]),
+  risks: z.array(z.string()).default([]),
+  followUpWork: z.array(z.string()).default([]),
+  failureClassification: taskFailureClassificationSchema.nullable().default(null),
+  createdAt: z.string(),
+  completedAt: z.string().nullable(),
+});
+export type TaskAttemptSummary = z.infer<typeof taskAttemptSummarySchema>;
 
 export const taskDateSchema = z.iso.date({
   error: "Use a valid ISO date in YYYY-MM-DD format.",
@@ -227,24 +265,17 @@ export const taskSchema = z.object({
   acceptanceCriteria: z.string(),
   agentContext: z.string(),
   checklist: z.array(checklistItemSchema),
+  reviewAttemptId: z.string().nullable().default(null),
+  cancelledFromLifecycle: z
+    .enum(["backlog", "ready", "in_progress", "review"])
+    .nullable()
+    .default(null),
   version: z.number().int().positive(),
   archivedAt: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type Task = z.infer<typeof taskSchema>;
-
-export const taskAttemptSummarySchema = z.object({
-  id: z.string(),
-  taskId: z.string(),
-  agentRunId: z.string().nullable(),
-  status: z.enum(["active", "completed", "failed", "abandoned"]),
-  summary: z.string(),
-  verification: z.array(z.string()),
-  createdAt: z.string(),
-  completedAt: z.string().nullable(),
-});
-export type TaskAttemptSummary = z.infer<typeof taskAttemptSummarySchema>;
 
 export const taskLeaseGrantSchema = z.object({
   task: taskSchema,
@@ -378,20 +409,121 @@ export const archiveTaskInputSchema = z.object({
 });
 export type ArchiveTaskInput = z.infer<typeof archiveTaskInputSchema>;
 
-export const completeTaskInputSchema = z.object({
+const boundedReportListSchema = z.array(z.string().trim().min(1).max(1_000)).max(25);
+
+export const taskCompletionReportSchema = z.object({
+  resultSummary: z.string().trim().min(1).max(20_000),
+  changedAreas: boundedReportListSchema.min(1),
+  verificationResults: z.array(taskVerificationResultSchema).min(1).max(25),
+  references: boundedReportListSchema,
+  risks: boundedReportListSchema,
+  followUpWork: boundedReportListSchema,
+});
+export type TaskCompletionReport = z.infer<typeof taskCompletionReportSchema>;
+
+export const taskFailureReportSchema = z.object({
+  classification: taskFailureClassificationSchema,
+  reason: z.string().trim().min(1).max(20_000),
+  changedAreas: boundedReportListSchema,
+  verificationResults: z.array(taskVerificationResultSchema).max(25),
+  references: boundedReportListSchema,
+  risks: boundedReportListSchema,
+  followUpWork: boundedReportListSchema,
+});
+export type TaskFailureReport = z.infer<typeof taskFailureReportSchema>;
+
+const attemptReportCommandFields = {
+  projectId: z.string().trim().min(1),
   taskId: z.string().trim().min(1),
+  leaseToken: z.string().trim().min(1).max(500),
   expectedVersion: z.number().int().positive(),
   idempotencyKey: z.string().trim().min(1).max(200),
+};
+
+export const completeTaskInputSchema = z.object({
+  ...attemptReportCommandFields,
+  report: taskCompletionReportSchema,
 });
 export type CompleteTaskInput = z.infer<typeof completeTaskInputSchema>;
 
+export const failTaskInputSchema = z.object({
+  ...attemptReportCommandFields,
+  report: taskFailureReportSchema,
+});
+export type FailTaskInput = z.infer<typeof failTaskInputSchema>;
+
+export const approveTaskReviewInputSchema = z.object({
+  taskId: z.string().trim().min(1),
+  attemptId: z.string().trim().min(1),
+  expectedVersion: z.number().int().positive(),
+  summary: z.string().trim().min(1).max(5_000),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type ApproveTaskReviewInput = z.infer<typeof approveTaskReviewInputSchema>;
+
+export const requestTaskChangesInputSchema = z.object({
+  entryId: z.string().trim().min(1).max(200),
+  taskId: z.string().trim().min(1),
+  attemptId: z.string().trim().min(1),
+  expectedVersion: z.number().int().positive(),
+  summary: z.string().trim().min(1).max(5_000),
+  requestedChanges: boundedReportListSchema.min(1),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type RequestTaskChangesInput = z.infer<typeof requestTaskChangesInputSchema>;
+
+export const cancelTaskInputSchema = z.object({
+  taskId: z.string().trim().min(1),
+  expectedVersion: z.number().int().positive(),
+  reason: z.string().trim().min(1).max(5_000),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type CancelTaskInput = z.infer<typeof cancelTaskInputSchema>;
+
+export const restoreCancelledTaskInputSchema = z.object({
+  taskId: z.string().trim().min(1),
+  expectedVersion: z.number().int().positive(),
+  reason: z.string().trim().min(1).max(5_000),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type RestoreCancelledTaskInput = z.infer<typeof restoreCancelledTaskInputSchema>;
+
 export const reopenTaskInputSchema = z.object({
   taskId: z.string().trim().min(1),
+  destination: z.enum(["backlog", "ready"]).optional().default("ready"),
   expectedVersion: z.number().int().positive(),
   reason: z.string().trim().min(1).max(1_000),
   idempotencyKey: z.string().trim().min(1).max(200),
 });
 export type ReopenTaskInput = z.infer<typeof reopenTaskInputSchema>;
+
+const taskAttemptMutationFields = {
+  task: taskSchema,
+  attempt: taskAttemptSummarySchema,
+  claim: taskClaimSchema,
+  event: projectEventSchema,
+};
+
+export const taskCompletionResultSchema = z.object({
+  ...taskAttemptMutationFields,
+  routing: z.object({
+    reviewMode: projectReviewModeSchema,
+    destination: z.enum(["review", "done"]),
+  }),
+});
+export type TaskCompletionResult = z.infer<typeof taskCompletionResultSchema>;
+
+export const taskFailureResultSchema = z.object(taskAttemptMutationFields);
+export type TaskFailureResult = z.infer<typeof taskFailureResultSchema>;
+
+export const taskTransitionResultSchema = z.object({
+  task: taskSchema,
+  attempt: taskAttemptSummarySchema.nullable(),
+  claim: taskClaimSchema.nullable(),
+  entry: activityEntrySchema.nullable(),
+  event: projectEventSchema,
+});
+export type TaskTransitionResult = z.infer<typeof taskTransitionResultSchema>;
 
 export const updateTaskPlanningInputSchema = z.object({
   taskId: z.string().trim().min(1),
@@ -429,6 +561,12 @@ export const listTaskTagsInputSchema = z.object({
   projectId: z.string().trim().min(1),
 });
 export type ListTaskTagsInput = z.infer<typeof listTaskTagsInputSchema>;
+
+export const listTaskAttemptsInputSchema = z.object({
+  projectId: z.string().trim().min(1),
+  taskIds: z.array(z.string().trim().min(1)).min(1).max(200).optional(),
+});
+export type ListTaskAttemptsInput = z.infer<typeof listTaskAttemptsInputSchema>;
 
 export const taskDiscoveryCursorSchema = z
   .string()
@@ -501,11 +639,17 @@ export const compiledCreateTaskInputSchema = z.compile(createTaskInputSchema);
 export const compiledPrepareTaskInputSchema = z.compile(prepareTaskInputSchema);
 export const compiledArchiveTaskInputSchema = z.compile(archiveTaskInputSchema);
 export const compiledCompleteTaskInputSchema = z.compile(completeTaskInputSchema);
+export const compiledFailTaskInputSchema = z.compile(failTaskInputSchema);
+export const compiledApproveTaskReviewInputSchema = z.compile(approveTaskReviewInputSchema);
+export const compiledRequestTaskChangesInputSchema = z.compile(requestTaskChangesInputSchema);
+export const compiledCancelTaskInputSchema = z.compile(cancelTaskInputSchema);
+export const compiledRestoreCancelledTaskInputSchema = z.compile(restoreCancelledTaskInputSchema);
 export const compiledReopenTaskInputSchema = z.compile(reopenTaskInputSchema);
 export const compiledUpdateTaskPlanningInputSchema = z.compile(updateTaskPlanningInputSchema);
 export const compiledCreateTaskRelationInputSchema = z.compile(createTaskRelationInputSchema);
 export const compiledListTasksInputSchema = z.compile(listTasksInputSchema);
 export const compiledListTaskTagsInputSchema = z.compile(listTaskTagsInputSchema);
+export const compiledListTaskAttemptsInputSchema = z.compile(listTaskAttemptsInputSchema);
 export const compiledFindWorkInputSchema = z.compile(findWorkInputSchema);
 export const compiledTaskContextInputSchema = z.compile(taskContextInputSchema);
 export const compiledClaimTaskInputSchema = z.compile(claimTaskInputSchema);
@@ -555,6 +699,7 @@ export type TaskEvaluationContext = {
   readonly agentCapabilities: readonly string[];
   readonly today: string;
   readonly now: string;
+  readonly currentTime?: () => string;
 };
 
 export type TaskOrderingKey = Pick<Task, "priority" | "position" | "dueAt" | "sequence">;

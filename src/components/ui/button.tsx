@@ -4,7 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import { tokens } from "../../styles/tokens.stylex";
 
 type ButtonProps = Omit<ButtonPrimitive.Props, "className"> & {
-  variant?: "primary" | "quiet";
+  variant?: "primary" | "quiet" | "danger";
 };
 
 export function Button({ variant = "primary", ...props }: ButtonProps) {
@@ -51,6 +51,14 @@ const styles = stylex.create({
     color: tokens.foreground,
     ":hover": {
       borderColor: tokens.accent,
+    },
+  },
+  danger: {
+    backgroundColor: tokens.danger,
+    borderColor: tokens.danger,
+    color: tokens.background,
+    ":hover": {
+      opacity: 0.88,
     },
   },
 });

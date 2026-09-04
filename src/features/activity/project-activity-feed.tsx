@@ -3,7 +3,7 @@ import * as stylex from "@stylexjs/stylex";
 import { AlertCircle, Bot, Circle, UserRound } from "lucide-react";
 
 import type { ActivityEntry, ProjectEvent } from "../../domain/activity";
-import type { Task } from "../../domain/tasks";
+import type { Task, TaskAttemptSummary } from "../../domain/tasks";
 import { tokens } from "../../styles/tokens.stylex";
 
 function eventTitle(kind: string) {
@@ -13,11 +13,12 @@ function eventTitle(kind: string) {
     .join(" · ");
 }
 
-function eventActor(event: ProjectEvent, entry?: ActivityEntry) {
+function eventActor(event: ProjectEvent, entry?: ActivityEntry, attempt?: TaskAttemptSummary) {
   if (event.actor.type === "human") return "Human";
   if (event.actor.type === "system") return "Helm";
   if (entry?.author.type === "agent" && entry.authorDisplayName) return entry.authorDisplayName;
-  return `Agent ${event.actor.id}`;
+  if (attempt?.agentDisplayName) return attempt.agentDisplayName;
+  return "Agent";
 }
 
 function eventEntry(event: ProjectEvent, entriesById: ReadonlyMap<string, ActivityEntry>) {
@@ -29,6 +30,19 @@ function eventEntry(event: ProjectEvent, entriesById: ReadonlyMap<string, Activi
         ? event.entity.id
         : null;
   return entryId ? entriesById.get(entryId) : undefined;
+}
+
+function eventAttempt(
+  event: ProjectEvent,
+  entry: ActivityEntry | undefined,
+  attemptsById: ReadonlyMap<string, TaskAttemptSummary>,
+) {
+  const payloadAttemptId = event.payload.attemptId;
+  const attemptId =
+    typeof payloadAttemptId === "string"
+      ? payloadAttemptId
+      : (entry?.attemptId ?? (event.entity.type === "task_attempt" ? event.entity.id : null));
+  return attemptId ? attemptsById.get(attemptId) : undefined;
 }
 
 function eventDetail(event: ProjectEvent, entry?: ActivityEntry) {
@@ -59,10 +73,12 @@ export function ProjectActivityFeed({
   events,
   tasks,
   entries,
+  attempts,
 }: {
   events: readonly ProjectEvent[];
   tasks: readonly Task[];
   entries: readonly ActivityEntry[];
+  attempts: readonly TaskAttemptSummary[];
 }) {
   const taskNames = useMemo(
     () => new Map(tasks.map((task) => [task.id, `#${task.sequence} ${task.title}`])),
@@ -73,6 +89,10 @@ export function ProjectActivityFeed({
     [events],
   );
   const entriesById = useMemo(() => new Map(entries.map((entry) => [entry.id, entry])), [entries]);
+  const attemptsById = useMemo(
+    () => new Map(attempts.map((attempt) => [attempt.id, attempt])),
+    [attempts],
+  );
 
   return (
     <section aria-labelledby="project-activity-heading" {...stylex.props(styles.root)}>
@@ -97,6 +117,7 @@ export function ProjectActivityFeed({
             const taskId = event.changes.taskIds[0];
             const taskName = taskId ? taskNames.get(taskId) : null;
             const entry = eventEntry(event, entriesById);
+            const attempt = eventAttempt(event, entry, attemptsById);
             const detail = eventDetail(event, entry);
             return (
               <article
@@ -129,7 +150,7 @@ export function ProjectActivityFeed({
                     ) : (
                       <UserRound size={13} aria-hidden="true" />
                     )}
-                    <span>{eventActor(event, entry)}</span>
+                    <span>{eventActor(event, entry, attempt)}</span>
                     <time dateTime={event.occurredAt}>{formatTimestamp(event.occurredAt)}</time>
                     <span>cursor {event.cursor}</span>
                   </div>

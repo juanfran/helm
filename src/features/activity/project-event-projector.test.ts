@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ActivityEntry, ManualBlocker, ProjectEvent } from "../../domain/activity";
-import { emptyRichTextDocument, taskSchema, type Task } from "../../domain/tasks";
+import {
+  emptyRichTextDocument,
+  taskSchema,
+  type Task,
+  type TaskAttemptSummary,
+} from "../../domain/tasks";
 import { projectEvent, type ProjectionCollection } from "./project-event-projector";
 
 function collection<T extends { id: string }>() {
@@ -70,26 +75,50 @@ const entry: ActivityEntry = {
   withdrawnBy: null,
   withdrawalReason: null,
 };
+const attempt: TaskAttemptSummary = {
+  id: "attempt-1",
+  taskId: task.id,
+  attemptNumber: 1,
+  agentRunId: "run-1",
+  agentProfileId: "profile-1",
+  agentDisplayName: "Build Agent",
+  status: "completed",
+  summary: "Implemented the task.",
+  changedAreas: ["src/features"],
+  verificationResults: [{ name: "pnpm check", status: "passed", details: "All checks passed." }],
+  references: [],
+  risks: [],
+  followUpWork: [],
+  failureClassification: null,
+  createdAt: "2026-09-04T09:30:00.000Z",
+  completedAt: "2026-09-04T10:00:00.000Z",
+};
 
 describe("project event projector", () => {
   it("uses event hints for targeted direct writes", async () => {
     const taskCollection = collection<Task>();
+    const attemptCollection = collection<TaskAttemptSummary>();
     const activityCollection = collection<ActivityEntry>();
     const eventCollection = collection<ProjectEvent>();
     const readTaskDelta = vi.fn(async () => ({ upserts: [task], deleteIds: [] }));
+    const readAttemptDelta = vi.fn(async () => ({ upserts: [attempt], deleteIds: [] }));
     const readActivityDelta = vi.fn(async () => ({ upserts: [entry], deleteIds: [] }));
 
     await projectEvent(event(), {
       taskCollection: taskCollection.value,
+      attemptCollection: attemptCollection.value,
       activityCollection: activityCollection.value,
       eventCollection: eventCollection.value,
       readTaskDelta,
+      readAttemptDelta,
       readActivityDelta,
     });
 
     expect(readTaskDelta).toHaveBeenCalledWith(["task-1"]);
+    expect(readAttemptDelta).toHaveBeenCalledWith(["task-1"]);
     expect(readActivityDelta).toHaveBeenCalledWith(["entry-1"]);
     expect(taskCollection.writeUpsert).toHaveBeenCalledWith([task]);
+    expect(attemptCollection.writeUpsert).toHaveBeenCalledWith([attempt]);
     expect(activityCollection.writeUpsert).toHaveBeenCalledWith([entry]);
     expect(eventCollection.writeUpsert).toHaveBeenCalledWith(event());
   });

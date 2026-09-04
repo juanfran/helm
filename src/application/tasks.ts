@@ -1,14 +1,18 @@
 import { Effect } from "effect";
 
 import {
+  compiledApproveTaskReviewInputSchema,
   compiledArchiveTaskInputSchema,
+  compiledCancelTaskInputSchema,
   compiledClaimNextTaskInputSchema,
   compiledClaimTaskInputSchema,
   compiledCompleteTaskInputSchema,
   compiledCreateTaskInputSchema,
   compiledCreateTaskRelationInputSchema,
   compiledFindWorkInputSchema,
+  compiledFailTaskInputSchema,
   compiledListTaskTagsInputSchema,
+  compiledListTaskAttemptsInputSchema,
   compiledListTasksInputSchema,
   compiledInvalidateTaskClaimInputSchema,
   compiledReleaseTaskLeaseInputSchema,
@@ -16,38 +20,51 @@ import {
   compiledTaskContextInputSchema,
   compiledPrepareTaskInputSchema,
   compiledReopenTaskInputSchema,
+  compiledRequestTaskChangesInputSchema,
+  compiledRestoreCancelledTaskInputSchema,
   compiledUpdateTaskPlanningInputSchema,
   duplicateExclusiveTagGroups,
   missingReadyPreparation,
+  type ApproveTaskReviewInput,
   type Actor,
   type ArchiveTaskInput,
+  type CancelTaskInput,
   type ClaimNextTaskInput,
   type ClaimTaskInput,
   type CompleteTaskInput,
   type CreateTaskInput,
   type CreateTaskRelationInput,
   type FindWorkInput,
+  type FailTaskInput,
   type ListTaskTagsInput,
+  type ListTaskAttemptsInput,
   type ListTasksInput,
   type InvalidateTaskClaimInput,
   type PrepareTaskInput,
   type ReopenTaskInput,
+  type RequestTaskChangesInput,
+  type RestoreCancelledTaskInput,
   type ReleaseTaskLeaseInput,
   type RenewTaskLeaseInput,
   type Task,
+  type TaskAttemptSummary,
   type TaskContextInput,
   type TaskContextPackage,
+  type TaskCompletionResult,
   type TaskDiscoveryPage,
   type TaskEvaluationContext,
   type TaskLeaseGrant,
   type TaskLeaseMutationResult,
+  type TaskFailureResult,
   type TaskRelation,
   type TaskTag,
+  type TaskTransitionResult,
   type UpdateTaskPlanningInput,
 } from "../domain/tasks";
 import type { RegisteredAgentRun } from "../domain/agents";
 import {
   InvalidTaskInputError,
+  TaskAuthorizationError,
   TaskTagConstraintError,
   TaskPreparationError,
   type TaskCommandError,
@@ -57,6 +74,9 @@ import {
 export interface TaskStore {
   list(input: TaskListQuery): Effect.Effect<readonly Task[], TaskPersistenceError>;
   listTags(input: ListTaskTagsInput): Effect.Effect<readonly TaskTag[], TaskPersistenceError>;
+  listAttempts(
+    input: ListTaskAttemptsInput,
+  ): Effect.Effect<readonly TaskAttemptSummary[], TaskPersistenceError>;
   discoverPage(input: TaskDiscoveryQuery): Effect.Effect<TaskDiscoveryPage, TaskCommandError>;
   getContext(input: TaskContextQuery): Effect.Effect<TaskContextPackage, TaskCommandError>;
   create(
@@ -69,16 +89,41 @@ export interface TaskStore {
     actor: Actor,
     context: TaskEvaluationContext,
   ): Effect.Effect<Task, TaskCommandError>;
-  complete(
+  completeAttempt(
     input: CompleteTaskInput,
+    claimant: TaskClaimant,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<TaskCompletionResult, TaskCommandError>;
+  failAttempt(
+    input: FailTaskInput,
+    claimant: TaskClaimant,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<TaskFailureResult, TaskCommandError>;
+  approveReview(
+    input: ApproveTaskReviewInput,
     actor: Actor,
     context: TaskEvaluationContext,
-  ): Effect.Effect<Task, TaskCommandError>;
+  ): Effect.Effect<TaskTransitionResult, TaskCommandError>;
+  requestChanges(
+    input: RequestTaskChangesInput,
+    actor: Actor,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<TaskTransitionResult, TaskCommandError>;
+  cancel(
+    input: CancelTaskInput,
+    actor: Actor,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<TaskTransitionResult, TaskCommandError>;
+  restore(
+    input: RestoreCancelledTaskInput,
+    actor: Actor,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<TaskTransitionResult, TaskCommandError>;
   reopen(
     input: ReopenTaskInput,
     actor: Actor,
     context: TaskEvaluationContext,
-  ): Effect.Effect<Task, TaskCommandError>;
+  ): Effect.Effect<TaskTransitionResult, TaskCommandError>;
   updatePlanning(
     input: UpdateTaskPlanningInput,
     actor: Actor,
@@ -155,9 +200,11 @@ function evaluationContext(
   services: TaskServices,
   agentCapabilities: readonly string[] = [],
 ): TaskEvaluationContext {
+  const currentTime = () => services.clock.now?.() ?? new Date().toISOString();
   return {
     today: services.clock.today(),
-    now: services.clock.now?.() ?? new Date().toISOString(),
+    now: currentTime(),
+    currentTime,
     agentCapabilities,
   };
 }
@@ -264,14 +311,105 @@ export function updateTaskPlanning(
 
 export function completeTask(
   input: unknown,
+  registration: RegisteredAgentRun,
+  services: TaskServices,
+) {
+  const claimant = claimantFromRegistration(registration);
+  return Effect.flatMap(
+    parseInput(() => compiledCompleteTaskInputSchema.parse(input)),
+    (parsed) =>
+      services.store.completeAttempt(
+        parsed,
+        claimant,
+        evaluationContext(services, claimant.capabilities),
+      ),
+  );
+}
+
+export function failTask(input: unknown, registration: RegisteredAgentRun, services: TaskServices) {
+  const claimant = claimantFromRegistration(registration);
+  return Effect.flatMap(
+    parseInput(() => compiledFailTaskInputSchema.parse(input)),
+    (parsed) =>
+      services.store.failAttempt(
+        parsed,
+        claimant,
+        evaluationContext(services, claimant.capabilities),
+      ),
+  );
+}
+
+function requireHuman(actor: Actor) {
+  return actor.type === "human"
+    ? Effect.void
+    : Effect.fail(
+        new TaskAuthorizationError({
+          message: "Only the local human can perform this task transition.",
+        }),
+      );
+}
+
+export function approveTaskReview(
+  input: unknown,
   actor: Actor,
   services: TaskServices,
   agentCapabilities: readonly string[] = [],
 ) {
   return Effect.flatMap(
-    parseInput(() => compiledCompleteTaskInputSchema.parse(input)),
+    parseInput(() => compiledApproveTaskReviewInputSchema.parse(input)),
     (parsed) =>
-      services.store.complete(parsed, actor, evaluationContext(services, agentCapabilities)),
+      Effect.flatMap(requireHuman(actor), () =>
+        services.store.approveReview(parsed, actor, evaluationContext(services, agentCapabilities)),
+      ),
+  );
+}
+
+export function requestTaskChanges(
+  input: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
+  return Effect.flatMap(
+    parseInput(() => compiledRequestTaskChangesInputSchema.parse(input)),
+    (parsed) =>
+      Effect.flatMap(requireHuman(actor), () =>
+        services.store.requestChanges(
+          parsed,
+          actor,
+          evaluationContext(services, agentCapabilities),
+        ),
+      ),
+  );
+}
+
+export function cancelTask(
+  input: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
+  return Effect.flatMap(
+    parseInput(() => compiledCancelTaskInputSchema.parse(input)),
+    (parsed) =>
+      Effect.flatMap(requireHuman(actor), () =>
+        services.store.cancel(parsed, actor, evaluationContext(services, agentCapabilities)),
+      ),
+  );
+}
+
+export function restoreCancelledTask(
+  input: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
+  return Effect.flatMap(
+    parseInput(() => compiledRestoreCancelledTaskInputSchema.parse(input)),
+    (parsed) =>
+      Effect.flatMap(requireHuman(actor), () =>
+        services.store.restore(parsed, actor, evaluationContext(services, agentCapabilities)),
+      ),
   );
 }
 
@@ -324,6 +462,13 @@ export function listTaskTags(input: unknown, services: TaskServices) {
   return Effect.flatMap(
     parseInput(() => compiledListTaskTagsInputSchema.parse(input)),
     (parsed) => services.store.listTags(parsed),
+  );
+}
+
+export function listTaskAttempts(input: unknown, services: TaskServices) {
+  return Effect.flatMap(
+    parseInput(() => compiledListTaskAttemptsInputSchema.parse(input)),
+    (parsed) => services.store.listAttempts(parsed),
   );
 }
 

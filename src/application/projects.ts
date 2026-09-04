@@ -2,14 +2,18 @@ import { Effect } from "effect";
 
 import {
   compiledCreateProjectInputSchema,
+  compiledSetProjectReviewModeInputSchema,
   compiledSetThemeInputSchema,
   type AppState,
   type CreateProjectInput,
   type Project,
+  type SetProjectReviewModeInput,
   type SetThemeInput,
 } from "../domain/projects";
+import type { ActivityActor } from "../domain/activity";
 import {
   InvalidProjectInputError,
+  ProjectAuthorizationError,
   type ProjectCommandError,
   type ProjectPersistenceError,
 } from "./project-errors";
@@ -28,6 +32,10 @@ export interface ProjectStore {
     repository: RepositoryDetails,
   ): Effect.Effect<Project, ProjectCommandError>;
   setTheme(input: SetThemeInput): Effect.Effect<AppState, ProjectCommandError>;
+  setReviewMode(
+    input: SetProjectReviewModeInput,
+    actor: ActivityActor,
+  ): Effect.Effect<Project, ProjectCommandError>;
 }
 
 export type ProjectServices = {
@@ -62,6 +70,24 @@ export function setTheme(
   return Effect.flatMap(
     parseInput(() => compiledSetThemeInputSchema.parse(input)),
     (parsed) => services.store.setTheme(parsed),
+  );
+}
+
+export function setProjectReviewMode(
+  input: unknown,
+  actor: ActivityActor,
+  services: ProjectServices,
+): Effect.Effect<Project, ProjectCommandError> {
+  if (actor.type !== "human") {
+    return Effect.fail(
+      new ProjectAuthorizationError({
+        message: "Only the local human can change the project review mode.",
+      }),
+    );
+  }
+  return Effect.flatMap(
+    parseInput(() => compiledSetProjectReviewModeInputSchema.parse(input)),
+    (parsed) => services.store.setReviewMode(parsed, actor),
   );
 }
 

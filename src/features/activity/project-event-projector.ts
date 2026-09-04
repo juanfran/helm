@@ -1,5 +1,5 @@
 import type { ActivityEntry, ManualBlocker, ProjectEvent } from "../../domain/activity";
-import type { Task } from "../../domain/tasks";
+import type { Task, TaskAttemptSummary } from "../../domain/tasks";
 import { markAuthoritativeRows } from "./optimistic-reconciliation";
 
 export type ProjectionCollection<T extends { id: string }> = {
@@ -18,10 +18,12 @@ export type ProjectionDelta<T> = {
 
 export type ProjectEventProjector = {
   taskCollection: ProjectionCollection<Task>;
+  attemptCollection?: ProjectionCollection<TaskAttemptSummary>;
   activityCollection: ProjectionCollection<ActivityEntry>;
   blockerCollection?: ProjectionCollection<ManualBlocker>;
   eventCollection?: ProjectionCollection<ProjectEvent>;
   readTaskDelta: (taskIds: readonly string[]) => Promise<ProjectionDelta<Task>>;
+  readAttemptDelta?: (taskIds: readonly string[]) => Promise<ProjectionDelta<TaskAttemptSummary>>;
   readActivityDelta: (entryIds: readonly string[]) => Promise<ProjectionDelta<ActivityEntry>>;
   readBlockerDelta?: (taskIds: readonly string[]) => Promise<ProjectionDelta<ManualBlocker>>;
 };
@@ -41,16 +43,20 @@ export function applyProjectionDelta<T extends { id: string }>(
 export async function projectEvent(event: ProjectEvent, projector: ProjectEventProjector) {
   const taskIds = [...new Set(event.changes.taskIds)];
   const activityEntryIds = [...new Set(event.changes.activityEntryIds)];
+  const readAttemptDelta = projector.readAttemptDelta;
   const readBlockerDelta = projector.readBlockerDelta;
   const shouldReadBlockers =
     Boolean(projector.blockerCollection && readBlockerDelta) &&
     taskIds.length > 0 &&
     event.kind.startsWith("task.blocker.");
 
-  const [taskDelta, activityDelta, blockerDelta] = await Promise.all([
+  const [taskDelta, attemptDelta, activityDelta, blockerDelta] = await Promise.all([
     taskIds.length > 0
       ? projector.readTaskDelta(taskIds)
       : Promise.resolve<ProjectionDelta<Task>>({ upserts: [], deleteIds: [] }),
+    taskIds.length > 0 && projector.attemptCollection && readAttemptDelta
+      ? readAttemptDelta(taskIds)
+      : Promise.resolve<ProjectionDelta<TaskAttemptSummary>>({ upserts: [], deleteIds: [] }),
     activityEntryIds.length > 0
       ? projector.readActivityDelta(activityEntryIds)
       : Promise.resolve<ProjectionDelta<ActivityEntry>>({ upserts: [], deleteIds: [] }),
@@ -60,6 +66,9 @@ export async function projectEvent(event: ProjectEvent, projector: ProjectEventP
   ]);
 
   applyProjectionDelta(projector.taskCollection, taskDelta);
+  if (projector.attemptCollection) {
+    applyProjectionDelta(projector.attemptCollection, attemptDelta);
+  }
   applyProjectionDelta(projector.activityCollection, activityDelta);
   if (projector.blockerCollection && blockerDelta) {
     applyProjectionDelta(projector.blockerCollection, blockerDelta);

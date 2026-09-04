@@ -20,11 +20,14 @@ import {
 import {
   emptyRichTextDocument,
   richTextDocumentSchema,
+  taskCompletionResultSchema,
   taskContextPackageSchema,
   taskDiscoveryPageSchema,
+  taskFailureResultSchema,
   taskLeaseGrantSchema,
   taskLeaseMutationResultSchema,
   taskSchema,
+  taskTransitionResultSchema,
 } from "../domain/tasks";
 import { createSqliteAgentStore } from "../infrastructure/sqlite-agent-store.server";
 import { createSqliteActivityStore } from "../infrastructure/sqlite-activity-store.server";
@@ -59,6 +62,18 @@ const successfulLeaseGrantSchema = z.object({
 const successfulLeaseMutationSchema = z.object({
   ok: z.literal(true),
   result: taskLeaseMutationResultSchema,
+});
+const successfulCompletionSchema = z.object({
+  ok: z.literal(true),
+  result: taskCompletionResultSchema,
+});
+const successfulFailureSchema = z.object({
+  ok: z.literal(true),
+  result: taskFailureResultSchema,
+});
+const successfulTransitionSchema = z.object({
+  ok: z.literal(true),
+  result: taskTransitionResultSchema,
 });
 const successfulActivityMutationSchema = z.object({
   ok: z.literal(true),
@@ -180,6 +195,41 @@ function activityContent(text: string) {
   });
 }
 
+function completionReport(summary = "The requested behavior is complete.") {
+  return {
+    resultSummary: summary,
+    changedAreas: ["src/mcp"],
+    verificationResults: [
+      {
+        name: "pnpm test src/mcp/project-server.test.ts",
+        status: "passed" as const,
+        details: "",
+      },
+    ],
+    references: ["commit:example"],
+    risks: [],
+    followUpWork: [],
+  };
+}
+
+function failureReport() {
+  return {
+    classification: "environment" as const,
+    reason: "The local build dependency is unavailable.",
+    changedAreas: [],
+    verificationResults: [
+      {
+        name: "pnpm test src/mcp/project-server.test.ts",
+        status: "not_run" as const,
+        details: "Dependency installation failed.",
+      },
+    ],
+    references: [],
+    risks: ["The task remains unverified."],
+    followUpWork: ["Restore the dependency and claim the task again."],
+  };
+}
+
 function persistedLeaseState(leaseId: string) {
   return projectStore.database
     .prepare<
@@ -266,11 +316,30 @@ describe("MCP agent run, work discovery, and lease contract", () => {
   it("claims chosen and next work, renews and releases leases, and rejects stale ownership", async () => {
     const tools = await client.listTools();
     expect(tools.tools.map((tool) => tool.name)).toEqual(
-      expect.arrayContaining(["claim_task", "claim_next", "renew_lease", "release_lease"]),
+      expect.arrayContaining([
+        "claim_task",
+        "claim_next",
+        "renew_lease",
+        "release_lease",
+        "complete_task",
+        "fail_task",
+      ]),
     );
-    expect(tools.tools.find((tool) => tool.name === "complete_task")?.description).toMatch(
-      /currently unavailable.*lease-aware completion.*deferred/i,
-    );
+    for (const toolName of ["complete_task", "fail_task"]) {
+      const tool = tools.tools.find((candidate) => candidate.name === toolName);
+      expect(tool?.inputSchema).toMatchObject({
+        required: expect.arrayContaining([
+          "projectId",
+          "taskId",
+          "leaseToken",
+          "expectedVersion",
+          "report",
+          "idempotencyKey",
+        ]),
+      });
+      expect(tool?.inputSchema.properties).not.toHaveProperty("actor");
+      expect(tool?.inputSchema.properties).not.toHaveProperty("agentRunId");
+    }
 
     const unregistered = await client.callTool({
       name: "claim_next",
@@ -465,8 +534,11 @@ describe("MCP agent run, work discovery, and lease contract", () => {
     const lateCompletion = await client.callTool({
       name: "complete_task",
       arguments: {
+        projectId,
         taskId: chosenTask.id,
+        leaseToken: chosenClaim.leaseToken,
         expectedVersion: released.task.version,
+        report: completionReport("This late report must be rejected."),
         idempotencyKey: "complete-released-lease-task",
       },
     });
@@ -474,9 +546,333 @@ describe("MCP agent run, work discovery, and lease contract", () => {
       isError: true,
       structuredContent: {
         ok: false,
-        error: { type: "TaskLeaseError", leaseReason: "required" },
+        error: {
+          type: "TaskLeaseError",
+          leaseReason: "inactive",
+          leaseStatus: "released",
+          invalidationReason: releaseArguments.reason,
+        },
       },
     });
+  });
+
+  it("submits a lease-bound completion for review without returning the lease token", async () => {
+    const registrationResult = await client.callTool({
+      name: "register_agent_run",
+      arguments: {
+        profileKey: "completion-agent",
+        displayName: "Completion Agent",
+        capabilities: ["typescript"],
+        idempotencyKey: "register-completion-agent",
+      },
+    });
+    const registration = successfulRegistrationSchema.parse(registrationResult.structuredContent);
+    const taskResult = await client.callTool({
+      name: "create_task",
+      arguments: readyTaskArguments("Completion contract task", "completion-contract-task", [
+        "typescript",
+      ]),
+    });
+    const task = successfulTaskSchema.parse(taskResult.structuredContent).task;
+    const claimResult = await client.callTool({
+      name: "claim_task",
+      arguments: {
+        projectId,
+        taskId: task.id,
+        expectedVersion: task.version,
+        leaseDurationSeconds: 300,
+        idempotencyKey: "claim-completion-contract-task",
+      },
+    });
+    const grant = successfulLeaseGrantSchema.parse(claimResult.structuredContent).grant;
+    const report = completionReport();
+    const completionArguments = {
+      projectId,
+      taskId: task.id,
+      leaseToken: grant.leaseToken,
+      expectedVersion: grant.task.version,
+      report,
+      idempotencyKey: "complete-contract-task",
+    };
+
+    const completionResult = await client.callTool({
+      name: "complete_task",
+      arguments: completionArguments,
+    });
+    const completion = successfulCompletionSchema.parse(completionResult.structuredContent).result;
+
+    expect(completion).toMatchObject({
+      task: {
+        id: task.id,
+        lifecycle: "review",
+        claim: null,
+        reviewAttemptId: grant.attempt.id,
+        version: grant.task.version + 1,
+      },
+      attempt: {
+        id: grant.attempt.id,
+        agentRunId: registration.registration.run.id,
+        status: "completed",
+        summary: report.resultSummary,
+        changedAreas: report.changedAreas,
+        verificationResults: report.verificationResults,
+        references: report.references,
+        risks: report.risks,
+        followUpWork: report.followUpWork,
+        failureClassification: null,
+      },
+      claim: {
+        id: grant.claim.id,
+        status: "released",
+        invalidationReason: "Completion report accepted.",
+      },
+      event: {
+        kind: "task.review.requested",
+        importance: "attention",
+        actor: { type: "agent", id: registration.registration.run.id },
+      },
+      routing: { reviewMode: "required", destination: "review" },
+    });
+    expect(JSON.stringify(completionResult)).not.toContain(grant.leaseToken);
+
+    const completionRetry = await client.callTool({
+      name: "complete_task",
+      arguments: completionArguments,
+    });
+    expect(completionRetry.structuredContent).toEqual(completionResult.structuredContent);
+    expect(JSON.stringify(completionRetry)).not.toContain(grant.leaseToken);
+
+    const lateCompletion = await client.callTool({
+      name: "complete_task",
+      arguments: {
+        ...completionArguments,
+        expectedVersion: completion.task.version,
+        idempotencyKey: "complete-contract-task-again",
+      },
+    });
+    expect(lateCompletion).toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        error: {
+          type: "TaskLeaseError",
+          taskId: task.id,
+          leaseId: grant.claim.id,
+          leaseReason: "inactive",
+          leaseStatus: "released",
+          invalidationReason: "Completion report accepted.",
+        },
+      },
+    });
+    expect(JSON.stringify(lateCompletion)).not.toContain(grant.leaseToken);
+  });
+
+  it("submits a classified failure, releases the lease, and makes the task claimable again", async () => {
+    const registrationResult = await client.callTool({
+      name: "register_agent_run",
+      arguments: {
+        profileKey: "failure-agent",
+        displayName: "Failure Agent",
+        capabilities: ["typescript"],
+        idempotencyKey: "register-failure-agent",
+      },
+    });
+    const registration = successfulRegistrationSchema.parse(registrationResult.structuredContent);
+    const taskResult = await client.callTool({
+      name: "create_task",
+      arguments: readyTaskArguments("Failure contract task", "failure-contract-task", [
+        "typescript",
+      ]),
+    });
+    const task = successfulTaskSchema.parse(taskResult.structuredContent).task;
+    const claimResult = await client.callTool({
+      name: "claim_task",
+      arguments: {
+        projectId,
+        taskId: task.id,
+        expectedVersion: task.version,
+        leaseDurationSeconds: 300,
+        idempotencyKey: "claim-failure-contract-task",
+      },
+    });
+    const grant = successfulLeaseGrantSchema.parse(claimResult.structuredContent).grant;
+    const report = failureReport();
+    const failureArguments = {
+      projectId,
+      taskId: task.id,
+      leaseToken: grant.leaseToken,
+      expectedVersion: grant.task.version,
+      report,
+      idempotencyKey: "fail-contract-task",
+    };
+
+    const failureResult = await client.callTool({
+      name: "fail_task",
+      arguments: failureArguments,
+    });
+    const failure = successfulFailureSchema.parse(failureResult.structuredContent).result;
+
+    expect(failure).toMatchObject({
+      task: {
+        id: task.id,
+        lifecycle: "ready",
+        claim: null,
+        version: grant.task.version + 1,
+      },
+      attempt: {
+        id: grant.attempt.id,
+        agentRunId: registration.registration.run.id,
+        status: "failed",
+        summary: report.reason,
+        changedAreas: report.changedAreas,
+        verificationResults: report.verificationResults,
+        references: report.references,
+        risks: report.risks,
+        followUpWork: report.followUpWork,
+        failureClassification: report.classification,
+      },
+      claim: {
+        id: grant.claim.id,
+        status: "released",
+        invalidationReason: "Attempt failed (environment).",
+      },
+      event: {
+        kind: "task.attempt.failed",
+        importance: "critical",
+        actor: { type: "agent", id: registration.registration.run.id },
+      },
+    });
+    expect(JSON.stringify(failureResult)).not.toContain(grant.leaseToken);
+
+    const failureRetry = await client.callTool({
+      name: "fail_task",
+      arguments: failureArguments,
+    });
+    expect(failureRetry.structuredContent).toEqual(failureResult.structuredContent);
+    expect(JSON.stringify(failureRetry)).not.toContain(grant.leaseToken);
+
+    const nextClaimResult = await client.callTool({
+      name: "claim_task",
+      arguments: {
+        projectId,
+        taskId: task.id,
+        expectedVersion: failure.task.version,
+        leaseDurationSeconds: 300,
+        idempotencyKey: "reclaim-failure-contract-task",
+      },
+    });
+    const nextGrant = successfulLeaseGrantSchema.parse(nextClaimResult.structuredContent).grant;
+    expect(nextGrant).toMatchObject({
+      task: { id: task.id, lifecycle: "in_progress" },
+      attempt: { status: "active" },
+      claim: { status: "active" },
+    });
+    expect(nextGrant.attempt.id).not.toBe(grant.attempt.id);
+    expect(nextGrant.leaseToken).not.toBe(grant.leaseToken);
+  });
+
+  it("completes directly when configured and returns the transition result when reopened", async () => {
+    await Effect.runPromise(
+      projectStore.setReviewMode(
+        {
+          projectId,
+          reviewMode: "direct",
+          expectedVersion: 1,
+          idempotencyKey: "set-direct-review-mode",
+        },
+        { type: "human", id: "local-human" },
+      ),
+    );
+    const registrationResult = await client.callTool({
+      name: "register_agent_run",
+      arguments: {
+        profileKey: "direct-completion-agent",
+        displayName: "Direct Completion Agent",
+        capabilities: ["typescript"],
+        idempotencyKey: "register-direct-completion-agent",
+      },
+    });
+    const registration = successfulRegistrationSchema.parse(registrationResult.structuredContent);
+    const taskResult = await client.callTool({
+      name: "create_task",
+      arguments: readyTaskArguments("Direct completion task", "direct-completion-task", [
+        "typescript",
+      ]),
+    });
+    const task = successfulTaskSchema.parse(taskResult.structuredContent).task;
+    const claimResult = await client.callTool({
+      name: "claim_task",
+      arguments: {
+        projectId,
+        taskId: task.id,
+        expectedVersion: task.version,
+        idempotencyKey: "claim-direct-completion-task",
+      },
+    });
+    const grant = successfulLeaseGrantSchema.parse(claimResult.structuredContent).grant;
+    const completionResult = await client.callTool({
+      name: "complete_task",
+      arguments: {
+        projectId,
+        taskId: task.id,
+        leaseToken: grant.leaseToken,
+        expectedVersion: grant.task.version,
+        report: completionReport("The direct completion path is complete."),
+        idempotencyKey: "complete-direct-completion-task",
+      },
+    });
+    const completion = successfulCompletionSchema.parse(completionResult.structuredContent).result;
+    expect(completion).toMatchObject({
+      task: { id: task.id, lifecycle: "done", reviewAttemptId: null },
+      event: {
+        kind: "task.completed",
+        importance: "routine",
+        actor: { type: "agent", id: registration.registration.run.id },
+      },
+      routing: { reviewMode: "direct", destination: "done" },
+    });
+    expect(JSON.stringify(completionResult)).not.toContain(grant.leaseToken);
+
+    const reopenArguments = {
+      taskId: task.id,
+      destination: "backlog" as const,
+      expectedVersion: completion.task.version,
+      reason: "The human and agent need to refine the scope.",
+      idempotencyKey: "reopen-direct-completion-task",
+    };
+    const reopenResult = await client.callTool({
+      name: "reopen_task",
+      arguments: reopenArguments,
+    });
+    const reopened = successfulTransitionSchema.parse(reopenResult.structuredContent).result;
+    expect(reopened).toMatchObject({
+      task: {
+        id: task.id,
+        lifecycle: "backlog",
+        reviewAttemptId: null,
+        version: completion.task.version + 1,
+      },
+      attempt: { id: grant.attempt.id, status: "completed" },
+      claim: null,
+      entry: null,
+      event: {
+        kind: "task.reopened",
+        actor: { type: "agent", id: registration.registration.run.id },
+        payload: {
+          destination: "backlog",
+          priorAttemptId: grant.attempt.id,
+          reason: reopenArguments.reason,
+        },
+      },
+    });
+    expect(JSON.stringify(reopenResult)).not.toContain(grant.leaseToken);
+
+    const reopenRetry = await client.callTool({
+      name: "reopen_task",
+      arguments: reopenArguments,
+    });
+    expect(reopenRetry.structuredContent).toEqual(reopenResult.structuredContent);
+    expect(JSON.stringify(reopenRetry)).not.toContain(grant.leaseToken);
   });
 
   it("serializes registration, paginated discovery, context, typed errors, and attribution", async () => {
@@ -683,7 +1079,7 @@ describe("MCP agent run, work discovery, and lease contract", () => {
     });
     projectStore.database
       .prepare(
-        "insert into attempts (id, task_id, agent_run_id, status, summary, verification_json, created_at, completed_at) values (?, ?, ?, ?, ?, ?, ?, ?)",
+        "insert into attempts (id, task_id, attempt_number, agent_run_id, status, summary, verification_json, created_at, completed_at) values (?, ?, 1, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         "prior-attempt",
@@ -730,7 +1126,13 @@ describe("MCP agent run, work discovery, and lease contract", () => {
           agentRunId: resumed.registration.run.id,
           status: "failed",
           summary: "The first approach exposed a version conflict.",
-          verification: ["pnpm typecheck"],
+          verificationResults: [
+            {
+              name: "pnpm typecheck",
+              status: "not_run",
+              details: "Imported from a legacy verification note.",
+            },
+          ],
         },
       ],
       projectInstructions: [
