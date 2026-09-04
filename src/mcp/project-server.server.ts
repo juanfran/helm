@@ -14,6 +14,13 @@ import { toAgentErrorDto, type AgentErrorDto } from "../application/agent-errors
 import { registerAgentRun, requireAgentRun, type AgentServices } from "../application/agents";
 import { getAppState, listProjects, type ProjectServices } from "../application/projects";
 import {
+  getSavedView,
+  listSavedViews,
+  searchTasks,
+  type TaskQueryServices,
+} from "../application/task-queries";
+import { toTaskQueryErrorDto } from "../application/task-query-errors";
+import {
   claimNextTask,
   claimTask,
   completeTask,
@@ -38,6 +45,12 @@ import {
   readActivityEventsInputSchema,
 } from "../domain/activity";
 import { appStateSchema, projectSchema } from "../domain/projects";
+import {
+  getSavedViewInputSchema,
+  listSavedViewsInputSchema,
+  savedViewSchema,
+} from "../domain/saved-views";
+import { searchTasksInputSchema, taskSearchPageSchema } from "../domain/task-filters";
 import {
   claimNextTaskInputSchema,
   claimTaskInputSchema,
@@ -228,6 +241,28 @@ const activityErrorSchema = z.object({
 });
 
 const activityToolErrorSchema = z.union([agentErrorSchema, activityErrorSchema]);
+const taskQueryErrorSchema = z.object({
+  type: z.enum([
+    "InvalidTaskQueryError",
+    "TaskQueryCursorError",
+    "SavedViewNotFoundError",
+    "SavedViewVersionConflictError",
+    "SavedViewNameConflictError",
+    "SavedViewIdempotencyConflictError",
+    "TaskQueryPersistenceError",
+  ]),
+  message: z.string(),
+  issues: z.array(z.string()).optional(),
+  reason: z.enum(["malformed", "stale", "query_mismatch", "evaluation_context_changed"]).optional(),
+  cursorRevision: z.number().optional(),
+  currentRevision: z.number().optional(),
+  savedViewId: z.string().optional(),
+  expectedVersion: z.number().optional(),
+  currentVersion: z.number().optional(),
+  projectId: z.string().optional(),
+  name: z.string().optional(),
+  key: z.string().optional(),
+});
 const agentActivityEntryInputSchema = createAgentActivityEntryInputSchema.options[1].omit({
   kind: true,
 });
@@ -314,6 +349,7 @@ export function createHelmMcpServer(
   taskServices: TaskServices,
   agentServices: AgentServices,
   activityServices: ActivityServices,
+  taskQueryServices: TaskQueryServices,
   client: McpClientIdentity = { clientName: null, clientVersion: null },
 ) {
   const server = new McpServer({ name: "helm", version: "0.1.0" });
@@ -368,6 +404,52 @@ export function createHelmMcpServer(
   );
 
   server.registerTool(
+    "list_saved_views",
+    {
+      title: "List Helm saved views",
+      description: "List saved task views for one project in stable sequence order.",
+      inputSchema: listSavedViewsInputSchema,
+      outputSchema: {
+        ok: z.boolean(),
+        views: z.array(savedViewSchema).optional(),
+        error: taskQueryErrorSchema.optional(),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async (input) => {
+      const result = await Effect.runPromise(
+        Effect.either(listSavedViews(input, taskQueryServices)),
+      );
+      const structuredContent = Either.isRight(result)
+        ? { ok: true, views: [...result.right] }
+        : { ok: false, error: toTaskQueryErrorDto(result.left) };
+      return jsonToolResult(structuredContent, !structuredContent.ok);
+    },
+  );
+
+  server.registerTool(
+    "get_saved_view",
+    {
+      title: "Read a Helm saved view",
+      description: "Read one validated saved task view without changing project state.",
+      inputSchema: getSavedViewInputSchema,
+      outputSchema: {
+        ok: z.boolean(),
+        view: savedViewSchema.optional(),
+        error: taskQueryErrorSchema.optional(),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async (input) => {
+      const result = await Effect.runPromise(Effect.either(getSavedView(input, taskQueryServices)));
+      const structuredContent = Either.isRight(result)
+        ? { ok: true, view: result.right }
+        : { ok: false, error: toTaskQueryErrorDto(result.left) };
+      return jsonToolResult(structuredContent, !structuredContent.ok);
+    },
+  );
+
+  server.registerTool(
     "find_work",
     {
       title: "Find claimable Helm work",
@@ -390,6 +472,35 @@ export function createHelmMcpServer(
       const structuredContent = Either.isRight(result)
         ? { ok: true, page: result.right }
         : { ok: false, error: toTaskErrorDto(result.left) };
+      return jsonToolResult(structuredContent, !structuredContent.ok);
+    },
+  );
+
+  server.registerTool(
+    "search_tasks",
+    {
+      title: "Search Helm tasks",
+      description:
+        "Search and filter paginated project tasks using the registered agent profile's capabilities.",
+      inputSchema: searchTasksInputSchema,
+      outputSchema: {
+        ok: z.boolean(),
+        page: taskSearchPageSchema.optional(),
+        error: z.union([agentErrorSchema, taskQueryErrorSchema]).optional(),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const result = await Effect.runPromise(
+        Effect.either(
+          searchTasks(input, registered.registration.profile.capabilities, taskQueryServices),
+        ),
+      );
+      const structuredContent = Either.isRight(result)
+        ? { ok: true, page: result.right }
+        : { ok: false, error: toTaskQueryErrorDto(result.left) };
       return jsonToolResult(structuredContent, !structuredContent.ok);
     },
   );

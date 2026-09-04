@@ -34,6 +34,11 @@ const migrationNamesThrough0007 = [
   ...migrationNamesThrough0006,
   "0007_sturdy_gladiator.sql",
 ] as const;
+const migrationNamesThrough0009 = [
+  ...migrationNamesThrough0007,
+  "0008_secret_patriot.sql",
+  "0009_supreme_blue_shield.sql",
+] as const;
 
 function temporaryDirectory(prefix: string) {
   const path = mkdtempSync(join(tmpdir(), prefix));
@@ -653,6 +658,89 @@ describe("SQLite forward migrations", () => {
           failureClassification: null,
         }),
       ]);
+    } finally {
+      projectStore.close();
+    }
+  });
+
+  it("backfills task, activity, and attempt text into FTS and adds saved views from 0009", () => {
+    const root = temporaryDirectory("helm-search-migration-fixture-");
+    const databasePath = join(root, "helm.db");
+    const previousMigrations = createPreviousMigrationFolder(migrationNamesThrough0009);
+    const legacyDatabase = new Database(databasePath);
+    legacyDatabase.pragma("foreign_keys = ON");
+    migrate(drizzle(legacyDatabase), { migrationsFolder: previousMigrations });
+    const createdAt = "2026-08-01T10:00:00.000Z";
+
+    legacyDatabase
+      .prepare(
+        `insert into projects (
+          id, sequence, name, repository_root, review_mode, version, created_at, updated_at
+        ) values (?, 1, 'legacy', ?, 'required', 1, ?, ?)`,
+      )
+      .run("legacy-project", root, createdAt, createdAt);
+    legacyDatabase
+      .prepare(
+        `insert into tasks (
+          id, project_id, sequence, parent_task_id, title, lifecycle, priority, position,
+          not_before, due_at, size, description_json, description_text, expected_outcome,
+          acceptance_criteria, agent_context, checklist_json, review_attempt_id,
+          cancelled_from_lifecycle, version, archived_at, created_at, updated_at
+        ) values (
+          'legacy-task', 'legacy-project', 1, null, 'BackfillTitle', 'backlog', 'normal', 1,
+          null, null, null, ?, 'BodySignal', '', 'AcceptanceSignal', '', '[]', null,
+          null, 1, null, ?, ?
+        )`,
+      )
+      .run(JSON.stringify(emptyRichTextDocument), createdAt, createdAt);
+    legacyDatabase
+      .prepare(
+        `insert into activity_entries (
+          id, project_id, task_id, attempt_id, kind, author_type, author_id,
+          author_display_name, agent_profile_id, agent_run_id, content_json, content_text,
+          created_at, withdrawn_at, withdrawn_by_type, withdrawn_by_id, withdrawal_reason
+        ) values (
+          'legacy-entry', 'legacy-project', 'legacy-task', null, 'comment', 'human',
+          'local-human', 'You', null, null, '{}', 'CommentSignal', ?, null, null, null, null
+        )`,
+      )
+      .run(createdAt);
+    legacyDatabase
+      .prepare(
+        `insert into attempts (
+          id, task_id, attempt_number, agent_run_id, agent_profile_id, agent_display_name,
+          status, summary, changed_areas_json, verification_json, references_json,
+          risks_json, follow_up_work_json, failure_classification, created_at, completed_at
+        ) values (
+          'legacy-attempt', 'legacy-task', 1, null, null, null, 'failed', 'ReportSignal',
+          '[]', '[]', '[]', '[]', '[]', 'verification', ?, ?
+        )`,
+      )
+      .run(createdAt, createdAt);
+    legacyDatabase.close();
+
+    const projectStore = createSqliteProjectStore(databasePath);
+    try {
+      const search = projectStore.database.prepare<[string], { taskId: string }>(
+        "select task_id as taskId from task_search where task_search match ?",
+      );
+      for (const term of [
+        "BackfillTitle",
+        "BodySignal",
+        "AcceptanceSignal",
+        "CommentSignal",
+        "ReportSignal",
+      ]) {
+        expect(search.all(term)).toEqual([{ taskId: "legacy-task" }]);
+      }
+      expect(
+        projectStore.database
+          .prepare(
+            "select count(*) from sqlite_master where type = 'table' and name = 'saved_views'",
+          )
+          .pluck()
+          .get(),
+      ).toBe(1);
     } finally {
       projectStore.close();
     }

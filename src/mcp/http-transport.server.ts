@@ -7,6 +7,7 @@ import { Effect } from "effect";
 import type { ActivityServices } from "../application/activity";
 import { closeAgentRun, type AgentServices } from "../application/agents";
 import type { ProjectServices } from "../application/projects";
+import type { TaskQueryServices } from "../application/task-queries";
 import { cancelTaskLeasesForRun, type TaskServices } from "../application/tasks";
 import { createHelmMcpServer } from "./project-server.server";
 
@@ -32,6 +33,7 @@ export function createMcpRequestHandler(
   taskServices: TaskServices,
   agentServices: AgentServices,
   activityServices: ActivityServices,
+  taskQueryServices: TaskQueryServices,
 ) {
   const sessions = new Map<string, McpHttpSession>();
   const closingSessions = new Set<string>();
@@ -86,6 +88,7 @@ export function createMcpRequestHandler(
       taskServices,
       agentServices,
       activityServices,
+      taskQueryServices,
       {
         clientName: initializeRequest.params.clientInfo.name,
         clientVersion: initializeRequest.params.clientInfo.version,

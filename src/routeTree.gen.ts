@@ -10,12 +10,19 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as SearchRouteImport } from './routes/search'
 import { Route as ApiEventsRouteImport } from './routes/api/events'
 import { Route as ApiMcpRouteImport } from './routes/api/mcp'
+import { Route as ViewsViewIdRouteImport } from './routes/views.$viewId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SearchRoute = SearchRouteImport.update({
+  id: '/search',
+  path: '/search',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiEventsRoute = ApiEventsRouteImport.update({
@@ -28,35 +35,49 @@ const ApiMcpRoute = ApiMcpRouteImport.update({
   path: '/api/mcp',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ViewsViewIdRoute = ViewsViewIdRouteImport.update({
+  id: '/views/$viewId',
+  path: '/views/$viewId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/search': typeof SearchRoute
   '/api/events': typeof ApiEventsRoute
   '/api/mcp': typeof ApiMcpRoute
+  '/views/$viewId': typeof ViewsViewIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/search': typeof SearchRoute
   '/api/events': typeof ApiEventsRoute
   '/api/mcp': typeof ApiMcpRoute
+  '/views/$viewId': typeof ViewsViewIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/search': typeof SearchRoute
   '/api/events': typeof ApiEventsRoute
   '/api/mcp': typeof ApiMcpRoute
+  '/views/$viewId': typeof ViewsViewIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/api/events' | '/api/mcp'
+  fullPaths: '/' | '/search' | '/api/events' | '/api/mcp' | '/views/$viewId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/api/events' | '/api/mcp'
-  id: '__root__' | '/' | '/api/events' | '/api/mcp'
+  to: '/' | '/search' | '/api/events' | '/api/mcp' | '/views/$viewId'
+  id:
+    '__root__' | '/' | '/search' | '/api/events' | '/api/mcp' | '/views/$viewId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  SearchRoute: typeof SearchRoute
   ApiEventsRoute: typeof ApiEventsRoute
   ApiMcpRoute: typeof ApiMcpRoute
+  ViewsViewIdRoute: typeof ViewsViewIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -66,6 +87,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/search': {
+      id: '/search'
+      path: '/search'
+      fullPath: '/search'
+      preLoaderRoute: typeof SearchRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/events': {
@@ -82,13 +110,22 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiMcpRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/views/$viewId': {
+      id: '/views/$viewId'
+      path: '/views/$viewId'
+      fullPath: '/views/$viewId'
+      preLoaderRoute: typeof ViewsViewIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  SearchRoute: SearchRoute,
   ApiEventsRoute: ApiEventsRoute,
   ApiMcpRoute: ApiMcpRoute,
+  ViewsViewIdRoute: ViewsViewIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

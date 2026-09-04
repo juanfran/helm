@@ -1717,6 +1717,30 @@ function humanChangeRequestEntry(
   });
 }
 
+function readTaskProjections(db: DatabaseSession, input: TaskListQuery) {
+  const where = input.taskIds
+    ? and(eq(tasks.projectId, input.projectId), inArray(tasks.id, input.taskIds))
+    : input.includeArchived
+      ? eq(tasks.projectId, input.projectId)
+      : and(eq(tasks.projectId, input.projectId), isNull(tasks.archivedAt));
+  return db
+    .select()
+    .from(tasks)
+    .where(where)
+    .orderBy(asc(tasks.sequence))
+    .all()
+    .map((row) => taskFromRow(db, row, input))
+    .toSorted(compareTaskOrder);
+}
+
+/** Hydrates the canonical task read model for SQLite-backed query adapters. */
+export function readSqliteTaskProjections(
+  database: Database.Database,
+  input: TaskListQuery,
+): readonly Task[] {
+  return readTaskProjections(drizzle(database, { schema }), input);
+}
+
 export function createSqliteTaskStore(database: Database.Database): TaskStore {
   const db = drizzle(database, { schema });
   const leaseTokenCache = leaseTokenCacheFor(database);
@@ -1734,21 +1758,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
   return {
     list(input: TaskListQuery) {
       return Effect.try({
-        try: () => {
-          const where = input.taskIds
-            ? and(eq(tasks.projectId, input.projectId), inArray(tasks.id, input.taskIds))
-            : input.includeArchived
-              ? eq(tasks.projectId, input.projectId)
-              : and(eq(tasks.projectId, input.projectId), isNull(tasks.archivedAt));
-          return db
-            .select()
-            .from(tasks)
-            .where(where)
-            .orderBy(asc(tasks.sequence))
-            .all()
-            .map((row) => taskFromRow(db, row, input))
-            .toSorted(compareTaskOrder);
-        },
+        try: () => readTaskProjections(db, input),
         catch: persistenceError,
       });
     },

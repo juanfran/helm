@@ -59,7 +59,14 @@ export type ManualBlocker = z.infer<typeof manualBlockerSchema>;
 export const eventImportanceSchema = z.enum(["routine", "attention", "critical"]);
 export type EventImportance = z.infer<typeof eventImportanceSchema>;
 
-export const eventScopeSchema = z.enum(["projects", "tasks", "activity", "agents", "preferences"]);
+export const eventScopeSchema = z.enum([
+  "projects",
+  "tasks",
+  "activity",
+  "agents",
+  "preferences",
+  "views",
+]);
 export type EventScope = z.infer<typeof eventScopeSchema>;
 
 export const eventChangeHintsSchema = z.object({
@@ -67,6 +74,7 @@ export const eventChangeHintsSchema = z.object({
   taskIds: z.array(z.string()),
   activityEntryIds: z.array(z.string()),
   agentRunIds: z.array(z.string()),
+  savedViewIds: z.array(z.string()).optional(),
   scopes: z.array(eventScopeSchema),
 });
 export type EventChangeHints = z.infer<typeof eventChangeHintsSchema>;
@@ -76,6 +84,7 @@ export const emptyEventChangeHints: EventChangeHints = {
   taskIds: [],
   activityEntryIds: [],
   agentRunIds: [],
+  savedViewIds: [],
   scopes: [],
 };
 
@@ -89,6 +98,7 @@ export function normalizeEventChangeHints(hints: Partial<EventChangeHints> = {})
     taskIds: sortedUnique(hints.taskIds),
     activityEntryIds: sortedUnique(hints.activityEntryIds),
     agentRunIds: sortedUnique(hints.agentRunIds),
+    savedViewIds: sortedUnique(hints.savedViewIds),
     scopes: sortedUnique(hints.scopes).map((scope) => eventScopeSchema.parse(scope)),
   });
 }

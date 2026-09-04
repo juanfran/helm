@@ -29,6 +29,35 @@ export const projects = sqliteTable(
   ],
 );
 
+export const savedViews = sqliteTable(
+  "saved_views",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id),
+    sequence: integer("sequence").notNull(),
+    name: text("name").notNull(),
+    definitionVersion: integer("definition_version").notNull().default(1),
+    definitionJson: text("definition_json").notNull(),
+    version: integer("version").notNull().default(1),
+    archivedAt: text("archived_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("saved_views_project_sequence_unique").on(table.projectId, table.sequence),
+    uniqueIndex("saved_views_active_project_name_unique")
+      .on(table.projectId, table.name)
+      .where(sql`${table.archivedAt} is null`),
+    index("saved_views_project_archive_sequence_index").on(
+      table.projectId,
+      table.archivedAt,
+      table.sequence,
+    ),
+  ],
+);
+
 export const tasks = sqliteTable(
   "tasks",
   {
@@ -377,6 +406,7 @@ export const idempotencyRecords = sqliteTable("idempotency_records", {
 
 export const schema = {
   projects,
+  savedViews,
   tasks,
   tags,
   taskTags,

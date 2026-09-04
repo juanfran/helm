@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { createFileRoute, useRouter } from "@tanstack/react-router";
+import { Link, createFileRoute, useRouter } from "@tanstack/react-router";
 import { useLiveSuspenseQuery } from "@tanstack/react-db";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 
@@ -19,6 +19,7 @@ import { ProjectLanding } from "../features/projects/project-landing";
 import { getTaskAttemptCollection } from "../features/tasks/task-attempt-collection";
 import { getTaskCollection } from "../features/tasks/task-collection";
 import { TaskWorkspace } from "../features/tasks/task-workspace";
+import { emptyTaskSearchParams } from "../features/tasks/task-search-params";
 import {
   createHumanActivity,
   createHumanManualBlocker,
@@ -459,6 +460,11 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
       manualBlockers={manualBlockers}
       projectEvents={projectEvents}
       liveStatus={liveStatus}
+      renderSearchLink={(props) => (
+        <Link to="/search" search={emptyTaskSearchParams} {...props}>
+          Search
+        </Link>
+      )}
       onCreateTask={(input) => createHumanTask({ data: input }).then(applyTaskResponse)}
       onPrepareTask={(input) => prepareHumanTask({ data: input }).then(applyTaskResponse)}
       onUpdateTaskPlanning={(input) =>

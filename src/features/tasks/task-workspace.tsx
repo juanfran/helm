@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useMemo, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import * as stylex from "@stylexjs/stylex";
 import {
   Activity,
@@ -85,6 +85,7 @@ type TaskWorkspaceProps = {
   manualBlockers: readonly ManualBlocker[];
   projectEvents: readonly ProjectEvent[];
   liveStatus: "connecting" | "live" | "retrying";
+  renderSearchLink?: (props: { className?: string; style?: CSSProperties }) => ReactNode;
   onCreateTask: (input: CreateTaskInput) => Promise<TaskCommandResponse>;
   onPrepareTask: (input: PrepareTaskInput) => Promise<TaskCommandResponse>;
   onUpdateTaskPlanning: (input: UpdateTaskPlanningInput) => Promise<TaskCommandResponse>;
@@ -124,6 +125,7 @@ export function TaskWorkspace({
   manualBlockers,
   projectEvents,
   liveStatus,
+  renderSearchLink,
   onCreateTask,
   onPrepareTask,
   onUpdateTaskPlanning,
@@ -229,6 +231,7 @@ export function TaskWorkspace({
           >
             Activity
           </button>
+          {renderSearchLink?.(stylex.props(styles.viewButton, styles.viewLink))}
         </nav>
         <span
           aria-live="polite"
@@ -1258,6 +1261,7 @@ const styles = stylex.create({
     borderColor: tokens.border,
     color: tokens.foreground,
   },
+  viewLink: { textDecoration: "none" },
   liveStatus: {
     alignItems: "center",
     color: tokens.foregroundMuted,

@@ -5,6 +5,7 @@ import {
   activityServices,
   agentServices,
   projectServices,
+  taskQueryServices,
   taskServices,
 } from "../../server/project-runtime.server";
 
@@ -13,6 +14,7 @@ const handleMcpRequest = createMcpRequestHandler(
   taskServices,
   agentServices,
   activityServices,
+  taskQueryServices,
 );
 
 export const Route = createFileRoute("/api/mcp")({

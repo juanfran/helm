@@ -10,6 +10,7 @@ import { z } from "zod";
 
 import { createProject } from "../application/projects";
 import { reconcileActiveAgentRuns } from "../application/agents";
+import { createSavedView } from "../application/task-queries";
 import { registeredAgentRunSchema } from "../domain/agents";
 import {
   activityEntryMutationResultSchema,
@@ -17,6 +18,8 @@ import {
   activityEventPageSchema,
   manualBlockerMutationResultSchema,
 } from "../domain/activity";
+import { savedViewSchema } from "../domain/saved-views";
+import { taskSearchPageSchema } from "../domain/task-filters";
 import {
   emptyRichTextDocument,
   richTextDocumentSchema,
@@ -37,6 +40,7 @@ import {
   type SqliteProjectStore,
 } from "../infrastructure/sqlite-project-store.server";
 import { createSqliteTaskStore } from "../infrastructure/sqlite-task-store.server";
+import { createSqliteTaskQueryStore } from "../infrastructure/sqlite-task-query-store.server";
 import { createMcpRequestHandler } from "./http-transport.server";
 
 const successfulRegistrationSchema = z.object({
@@ -91,6 +95,18 @@ const successfulManualBlockerMutationSchema = z.object({
   ok: z.literal(true),
   payload: manualBlockerMutationResultSchema,
 });
+const successfulTaskSearchSchema = z.object({
+  ok: z.literal(true),
+  page: taskSearchPageSchema,
+});
+const successfulSavedViewListSchema = z.object({
+  ok: z.literal(true),
+  views: z.array(savedViewSchema),
+});
+const successfulSavedViewSchema = z.object({
+  ok: z.literal(true),
+  view: savedViewSchema,
+});
 
 let temporaryRoot: string;
 let projectStore: SqliteProjectStore;
@@ -103,6 +119,7 @@ let projectServices: Parameters<typeof createMcpRequestHandler>[0];
 let taskServices: Parameters<typeof createMcpRequestHandler>[1];
 let agentServices: Parameters<typeof createMcpRequestHandler>[2];
 let activityServices: Parameters<typeof createMcpRequestHandler>[3];
+let taskQueryServices: Parameters<typeof createMcpRequestHandler>[4];
 
 async function connectClient() {
   transport = new StreamableHTTPClientTransport(new URL("http://helm.local/api/mcp"), {
@@ -149,11 +166,19 @@ beforeEach(async () => {
     store: createSqliteActivityStore(projectStore.database),
     clock: { now: () => now },
   };
+  taskQueryServices = {
+    store: createSqliteTaskQueryStore(projectStore.database),
+    clock: {
+      today: () => "2026-09-03",
+      now: () => now,
+    },
+  };
   handleMcpRequest = createMcpRequestHandler(
     projectServices,
     taskServices,
     agentServices,
     activityServices,
+    taskQueryServices,
   );
   await connectClient();
 });
@@ -311,6 +336,160 @@ function persistedSystemActivity(taskId: string) {
     )
     .get(taskId);
 }
+
+describe("MCP shared task-query contract", () => {
+  it("searches with registered capabilities and reads saved views without registration", async () => {
+    const view = await Effect.runPromise(
+      createSavedView(
+        {
+          projectId,
+          name: "Agent-ready work",
+          definition: {
+            schemaVersion: 1,
+            filter: {
+              schemaVersion: 1,
+              projectId,
+              eligibility: ["claimable"],
+            },
+            order: [{ field: "priority", direction: "asc" }],
+            grouping: { type: "eligibility" },
+            visibleFields: ["title", "eligibility", "priority"],
+          },
+          idempotencyKey: "create-mcp-query-view",
+        },
+        { type: "human", id: "mcp-contract-human" },
+        taskQueryServices,
+      ),
+    );
+    const tools = await client.listTools();
+    const searchTool = tools.tools.find((tool) => tool.name === "search_tasks");
+    const listViewsTool = tools.tools.find((tool) => tool.name === "list_saved_views");
+    const getViewTool = tools.tools.find((tool) => tool.name === "get_saved_view");
+
+    expect(searchTool).toMatchObject({
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        type: "object",
+        properties: { filter: expect.any(Object), order: expect.any(Object) },
+        required: expect.arrayContaining(["filter"]),
+      },
+    });
+    expect(searchTool?.inputSchema.properties).not.toHaveProperty("agentCapabilities");
+    expect(listViewsTool).toMatchObject({
+      annotations: { readOnlyHint: true },
+      inputSchema: { required: expect.arrayContaining(["projectId"]) },
+    });
+    expect(getViewTool).toMatchObject({
+      annotations: { readOnlyHint: true },
+      inputSchema: { required: expect.arrayContaining(["projectId", "savedViewId"]) },
+    });
+    expect(tools.tools.map(({ name }) => name)).not.toEqual(
+      expect.arrayContaining([
+        "create_saved_view",
+        "update_saved_view",
+        "archive_saved_view",
+        "restore_saved_view",
+      ]),
+    );
+
+    const listedResult = await client.callTool({
+      name: "list_saved_views",
+      arguments: { projectId },
+    });
+    const listed = successfulSavedViewListSchema.parse(listedResult.structuredContent);
+    expect(listedResult.isError).not.toBe(true);
+    expect(listed.views).toEqual([view]);
+
+    const readResult = await client.callTool({
+      name: "get_saved_view",
+      arguments: { projectId, savedViewId: view.id },
+    });
+    expect(successfulSavedViewSchema.parse(readResult.structuredContent).view).toEqual(view);
+    const missingView = await client.callTool({
+      name: "get_saved_view",
+      arguments: { projectId, savedViewId: "missing-view" },
+    });
+    expect(missingView).toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        error: { type: "SavedViewNotFoundError", savedViewId: "missing-view" },
+      },
+    });
+
+    const filter = {
+      schemaVersion: 1 as const,
+      projectId,
+      search: { text: "contractneedle", mode: "all" as const },
+      eligibility: ["claimable" as const],
+    };
+    const unregisteredSearch = await client.callTool({
+      name: "search_tasks",
+      arguments: { filter },
+    });
+    expect(unregisteredSearch).toMatchObject({
+      isError: true,
+      structuredContent: { ok: false, error: { type: "AgentRunRequiredError" } },
+    });
+
+    await client.callTool({
+      name: "register_agent_run",
+      arguments: {
+        profileKey: "query-contract-agent",
+        displayName: "Query Contract Agent",
+        capabilities: ["typescript"],
+        idempotencyKey: "register-query-contract-agent",
+      },
+    });
+    const compatibleTaskResult = await client.callTool({
+      name: "create_task",
+      arguments: {
+        ...readyTaskArguments("Compatible query task", "compatible-query-task", ["typescript"]),
+        acceptanceCriteria: "The contractneedle is indexed from acceptance criteria.",
+      },
+    });
+    const incompatibleTaskResult = await client.callTool({
+      name: "create_task",
+      arguments: {
+        ...readyTaskArguments("Incompatible query task", "incompatible-query-task", ["sqlite"]),
+        acceptanceCriteria: "The contractneedle is also present here.",
+      },
+    });
+    const compatibleTask = successfulTaskSchema.parse(compatibleTaskResult.structuredContent).task;
+    const incompatibleTask = successfulTaskSchema.parse(
+      incompatibleTaskResult.structuredContent,
+    ).task;
+
+    const searchResult = await client.callTool({
+      name: "search_tasks",
+      arguments: { filter, limit: 10 },
+    });
+    const page = successfulTaskSearchSchema.parse(searchResult.structuredContent).page;
+    expect(page).toMatchObject({
+      items: [
+        {
+          task: { id: compatibleTask.id, eligibility: { status: "claimable" } },
+          matchedSources: expect.arrayContaining(["acceptance_criteria"]),
+        },
+      ],
+      hasMore: false,
+      total: 1,
+    });
+    expect(page.items.map(({ task }) => task.id)).not.toContain(incompatibleTask.id);
+
+    const malformedCursor = await client.callTool({
+      name: "search_tasks",
+      arguments: { filter, cursor: "tq1:not-json" },
+    });
+    expect(malformedCursor).toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        error: { type: "TaskQueryCursorError", reason: "malformed" },
+      },
+    });
+  });
+});
 
 describe("MCP agent run, work discovery, and lease contract", () => {
   it("claims chosen and next work, renews and releases leases, and rejects stale ownership", async () => {
@@ -1332,6 +1511,7 @@ describe("MCP agent run, work discovery, and lease contract", () => {
       taskServices,
       agentServices,
       activityServices,
+      taskQueryServices,
     );
     await connectClient();
     const resumedResult = await client.callTool({
