@@ -27,6 +27,12 @@ import type {
   WithdrawActivityEntryInput,
 } from "../../domain/activity";
 import type { AgentRunSummary } from "../../domain/agents";
+import type {
+  CustomFieldDefinition,
+  CustomFieldValue,
+  SetTaskReviewModeOverrideInput,
+  TaskCustomFieldAssignment,
+} from "../../domain/customization";
 import { type Project, type SetProjectReviewModeInput, type Theme } from "../../domain/projects";
 import {
   emptyRichTextDocument,
@@ -90,10 +96,14 @@ type TaskWorkspaceProps = {
   activeAgentRuns?: readonly AgentRunSummary[];
   liveStatus: "connecting" | "live" | "retrying";
   projectSwitcher?: ReactNode;
+  customizationControl?: ReactNode;
   renderSearchLink?: (props: { className?: string; style?: CSSProperties }) => ReactNode;
   onCreateTask: (input: CreateTaskInput) => Promise<TaskCommandResponse>;
   onPrepareTask: (input: PrepareTaskInput) => Promise<TaskCommandResponse>;
   onUpdateTaskPlanning: (input: UpdateTaskPlanningInput) => Promise<TaskCommandResponse>;
+  onSetTaskReviewModeOverride: (
+    input: SetTaskReviewModeOverrideInput,
+  ) => Promise<TaskCommandResponse>;
   onApproveTaskReview: (input: ApproveTaskReviewInput) => Promise<TaskTransitionCommandResponse>;
   onRequestTaskChanges: (input: RequestTaskChangesInput) => Promise<TaskTransitionCommandResponse>;
   onCancelTask: (input: CancelTaskInput) => Promise<TaskTransitionCommandResponse>;
@@ -136,10 +146,12 @@ export function TaskWorkspace({
   activeAgentRuns = noActiveAgentRuns,
   liveStatus,
   projectSwitcher,
+  customizationControl,
   renderSearchLink,
   onCreateTask,
   onPrepareTask,
   onUpdateTaskPlanning,
+  onSetTaskReviewModeOverride,
   onApproveTaskReview,
   onRequestTaskChanges,
   onCancelTask,
@@ -159,7 +171,9 @@ export function TaskWorkspace({
 }: TaskWorkspaceProps) {
   const orderedTasks = useMemo(() => tasks.toSorted(compareTaskOrder), [tasks]);
   const [captureTitle, setCaptureTitle] = useState("");
-  const [workspaceView, setWorkspaceView] = useState<"dashboard" | "tasks" | "activity">("tasks");
+  const [workspaceView, setWorkspaceView] = useState<
+    "dashboard" | "tasks" | "activity" | "settings"
+  >("tasks");
   const [selectedId, setSelectedId] = useState<string | null>(orderedTasks[0]?.id ?? null);
   const [bulkSelectedTaskIds, setBulkSelectedTaskIds] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -269,6 +283,19 @@ export function TaskWorkspace({
           >
             Activity
           </button>
+          {customizationControl ? (
+            <button
+              type="button"
+              aria-pressed={workspaceView === "settings"}
+              onClick={() => setWorkspaceView("settings")}
+              {...stylex.props(
+                styles.viewButton,
+                workspaceView === "settings" && styles.viewButtonActive,
+              )}
+            >
+              Settings
+            </button>
+          ) : null}
           {renderSearchLink?.(stylex.props(styles.viewButton, styles.viewLink))}
         </nav>
         <div {...stylex.props(styles.headerUtilities)}>
@@ -420,7 +447,16 @@ export function TaskWorkspace({
           data-task-detail={workspaceView === "tasks" ? "true" : undefined}
           {...stylex.props(styles.detail, workspaceView !== "tasks" && styles.overviewDetail)}
         >
-          {workspaceView === "dashboard" ? (
+          {workspaceView === "settings" ? (
+            <div {...stylex.props(styles.detailStack, styles.settingsStack)}>
+              <ProjectReviewModeControl
+                key={`settings:${project.id}:${project.version}`}
+                project={project}
+                onChange={onChangeProjectReviewMode}
+              />
+              {customizationControl}
+            </div>
+          ) : workspaceView === "dashboard" ? (
             <OperationalDashboard
               tasks={orderedTasks}
               attempts={attempts}
@@ -457,6 +493,7 @@ export function TaskWorkspace({
                 onCreateTask={onCreateTask}
                 onPrepare={onPrepareTask}
                 onUpdatePlanning={onUpdateTaskPlanning}
+                onSetReviewModeOverride={onSetTaskReviewModeOverride}
                 onCreateRelation={onCreateTaskRelation}
                 onArchive={onArchiveTask}
                 onInvalidateClaim={onInvalidateClaim}
@@ -488,6 +525,7 @@ function PreparationPanel({
   onCreateTask,
   onPrepare,
   onUpdatePlanning,
+  onSetReviewModeOverride,
   onCreateRelation,
   onArchive,
   onInvalidateClaim,
@@ -504,6 +542,7 @@ function PreparationPanel({
   onCreateTask: TaskWorkspaceProps["onCreateTask"];
   onPrepare: TaskWorkspaceProps["onPrepareTask"];
   onUpdatePlanning: TaskWorkspaceProps["onUpdateTaskPlanning"];
+  onSetReviewModeOverride: TaskWorkspaceProps["onSetTaskReviewModeOverride"];
   onCreateRelation: TaskWorkspaceProps["onCreateTaskRelation"];
   onArchive: TaskWorkspaceProps["onArchiveTask"];
   onInvalidateClaim: TaskWorkspaceProps["onInvalidateClaim"];
@@ -539,6 +578,20 @@ function PreparationPanel({
   const [requiredCapabilities, setRequiredCapabilities] = useState(
     task.requiredCapabilities.join("\n"),
   );
+  const [customFieldValues, setCustomFieldValues] = useState<
+    Record<string, CustomFieldValue | null>
+  >(() =>
+    Object.fromEntries(
+      task.customFields.map((assignment) => [
+        assignment.definition.id,
+        assignment.source === "explicit" ? assignment.value : null,
+      ]),
+    ),
+  );
+  const [reviewModeOverride, setReviewModeOverride] = useState<"required" | "direct" | null>(
+    task.reviewModeOverride,
+  );
+  const [reviewModeReason, setReviewModeReason] = useState("");
   const [referencedPaths, setReferencedPaths] = useState(task.referencedPaths.join("\n"));
   const [childTitle, setChildTitle] = useState("");
   const [relationTargetId, setRelationTargetId] = useState(
@@ -575,6 +628,16 @@ function PreparationPanel({
         .filter((tag) => tag.name.trim().length > 0)
         .map(({ draftId: _draftId, ...tag }) => tagInputSchema.parse(tag)),
       requiredCapabilities: parseLines(requiredCapabilities),
+      ...(task.customFields.some(({ definition }) => definition.retiredAt === null)
+        ? {
+            customFields: task.customFields
+              .filter(({ definition }) => definition.retiredAt === null)
+              .map(({ definition }) => ({
+                fieldId: definition.id,
+                value: customFieldValues[definition.id] ?? null,
+              })),
+          }
+        : {}),
     };
   }
 
@@ -623,6 +686,31 @@ function PreparationPanel({
       if (!response.ok) setError(response.error.message);
     } catch {
       setError("Helm could not update task planning.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function changeReviewModeOverride() {
+    if (!editable || reviewModeOverride === task.reviewModeOverride) return;
+    if (!reviewModeReason.trim()) {
+      setError("Explain why the task review policy is changing.");
+      return;
+    }
+    setPending(true);
+    setError(null);
+    try {
+      const response = await onSetReviewModeOverride({
+        projectId: task.projectId,
+        taskId: task.id,
+        reviewModeOverride,
+        expectedTaskVersion: task.version,
+        reason: reviewModeReason.trim(),
+        idempotencyKey: crypto.randomUUID(),
+      });
+      if (!response.ok) setError(response.error.message);
+    } catch {
+      setError("Helm could not change the task review policy.");
     } finally {
       setPending(false);
     }
@@ -866,6 +954,17 @@ function PreparationPanel({
             />
           </div>
         </section>
+        {task.reviewPolicy ? (
+          <section aria-label="Effective review policy" {...stylex.props(styles.policyCard)}>
+            <div>
+              <p {...stylex.props(styles.fieldLabel)}>Effective review policy</p>
+              <strong>
+                {task.reviewPolicy.mode === "required" ? "Human review" : "Direct completion"}
+              </strong>
+            </div>
+            <p {...stylex.props(styles.hint)}>{task.reviewPolicy.explanation}</p>
+          </section>
+        ) : null}
         <fieldset
           disabled={executionReadOnly}
           {...stylex.props(styles.taskActions, executionReadOnly && styles.readOnlyGroup)}
@@ -1001,7 +1100,79 @@ function PreparationPanel({
                 <option value="xl">XL</option>
               </select>
             </Field>
+            <Field
+              label="Review policy"
+              hint="Task overrides are applied as a separate, reason-bearing audit command."
+            >
+              <div {...stylex.props(styles.reviewPolicyCommand)}>
+                <select
+                  aria-label="Task review policy override"
+                  value={reviewModeOverride ?? ""}
+                  onChange={(event) =>
+                    setReviewModeOverride(
+                      event.target.value === ""
+                        ? null
+                        : event.target.value === "required"
+                          ? "required"
+                          : "direct",
+                    )
+                  }
+                  {...stylex.props(styles.select, styles.fullWidth)}
+                >
+                  <option value="">Inherit project or tags</option>
+                  <option value="required">Require human review</option>
+                  <option value="direct">Complete directly</option>
+                </select>
+                <input
+                  aria-label="Review policy change reason"
+                  value={reviewModeReason}
+                  onChange={(event) => setReviewModeReason(event.target.value)}
+                  placeholder="Why should this task differ?"
+                  maxLength={1_000}
+                  disabled={reviewModeOverride === task.reviewModeOverride}
+                  {...stylex.props(styles.input)}
+                />
+                <Button
+                  type="button"
+                  variant="quiet"
+                  disabled={
+                    pending ||
+                    reviewModeOverride === task.reviewModeOverride ||
+                    reviewModeReason.trim().length === 0
+                  }
+                  onClick={() => void changeReviewModeOverride()}
+                >
+                  Apply review policy
+                </Button>
+              </div>
+            </Field>
           </div>
+          {task.customFields.length > 0 ? (
+            <section aria-label="Custom fields" {...stylex.props(styles.customFields)}>
+              <div>
+                <p {...stylex.props(styles.fieldLabel)}>Custom fields</p>
+                <p {...stylex.props(styles.hint)}>
+                  Project-defined typed values are shared with filters, bulk actions, and agents.
+                </p>
+              </div>
+              <div {...stylex.props(styles.planningGrid)}>
+                {task.customFields.map((assignment) => (
+                  <CustomFieldControl
+                    key={assignment.definition.id}
+                    assignment={assignment}
+                    explicitValue={customFieldValues[assignment.definition.id] ?? null}
+                    disabled={!editable || assignment.definition.retiredAt !== null}
+                    onChange={(value) =>
+                      setCustomFieldValues((current) => ({
+                        ...current,
+                        [assignment.definition.id]: value,
+                      }))
+                    }
+                  />
+                ))}
+              </div>
+            </section>
+          ) : null}
           <Field
             label="Tags"
             hint="Tag definitions are shared across the project. Existing metadata stays canonical."
@@ -1236,6 +1407,170 @@ function ClaimLeaseSummary({ claim, compact = false }: { claim: TaskClaim; compa
         </span>
       </span>
     </span>
+  );
+}
+
+function customFieldValueText(value: CustomFieldValue | null) {
+  if (value === null) return "unset";
+  if (value.type === "boolean") return value.value ? "yes" : "no";
+  return String(value.value);
+}
+
+function customFieldHint(assignment: TaskCustomFieldAssignment) {
+  const details = [assignment.definition.display.description];
+  if (assignment.definition.retiredAt) {
+    details.push("Retired; the historical value is read-only.");
+  } else if (assignment.definition.defaultValue) {
+    details.push(`Default: ${customFieldValueText(assignment.definition.defaultValue)}.`);
+  } else {
+    details.push("No project default.");
+  }
+  return details.filter(Boolean).join(" ");
+}
+
+function CustomFieldControl({
+  assignment,
+  explicitValue,
+  disabled,
+  onChange,
+}: {
+  assignment: TaskCustomFieldAssignment;
+  explicitValue: CustomFieldValue | null;
+  disabled: boolean;
+  onChange: (value: CustomFieldValue | null) => void;
+}) {
+  const definition: CustomFieldDefinition = assignment.definition;
+  const label = definition.display.label;
+  const common = {
+    disabled,
+    "aria-label": `Custom field: ${label}`,
+  } as const;
+  let control: ReactNode;
+
+  switch (definition.type) {
+    case "text":
+      control = (
+        <input
+          {...common}
+          value={explicitValue?.type === "text" ? explicitValue.value : ""}
+          placeholder={
+            definition.defaultValue?.type === "text" ? definition.defaultValue.value : undefined
+          }
+          minLength={definition.validation.minLength}
+          maxLength={definition.validation.maxLength}
+          onChange={(event) => onChange({ type: "text", value: event.target.value })}
+          {...stylex.props(styles.input)}
+        />
+      );
+      break;
+    case "number":
+      control = (
+        <input
+          {...common}
+          type="number"
+          value={explicitValue?.type === "number" ? explicitValue.value : ""}
+          placeholder={
+            definition.defaultValue?.type === "number"
+              ? String(definition.defaultValue.value)
+              : undefined
+          }
+          min={definition.validation.min ?? undefined}
+          max={definition.validation.max ?? undefined}
+          step={definition.validation.integer ? 1 : "any"}
+          onChange={(event) =>
+            onChange(
+              event.target.value === ""
+                ? null
+                : { type: "number", value: Number(event.target.value) },
+            )
+          }
+          {...stylex.props(styles.input)}
+        />
+      );
+      break;
+    case "boolean":
+      control = (
+        <select
+          {...common}
+          value={explicitValue?.type === "boolean" ? String(explicitValue.value) : ""}
+          onChange={(event) =>
+            onChange(
+              event.target.value === ""
+                ? null
+                : { type: "boolean", value: event.target.value === "true" },
+            )
+          }
+          {...stylex.props(styles.select, styles.fullWidth)}
+        >
+          <option value="">Use project default</option>
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+      );
+      break;
+    case "date":
+      control = (
+        <input
+          {...common}
+          type="date"
+          value={explicitValue?.type === "date" ? explicitValue.value : ""}
+          min={definition.validation.min ?? undefined}
+          max={definition.validation.max ?? undefined}
+          onChange={(event) =>
+            onChange(event.target.value === "" ? null : { type: "date", value: event.target.value })
+          }
+          {...stylex.props(styles.input)}
+        />
+      );
+      break;
+    case "single_select":
+      control = (
+        <select
+          {...common}
+          value={explicitValue?.type === "single_select" ? explicitValue.value : ""}
+          onChange={(event) =>
+            onChange(
+              event.target.value === ""
+                ? null
+                : { type: "single_select", value: event.target.value },
+            )
+          }
+          {...stylex.props(styles.select, styles.fullWidth)}
+        >
+          <option value="">Use project default</option>
+          {definition.validation.options.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      );
+      break;
+  }
+
+  return (
+    <Field
+      label={`${label}${definition.retiredAt ? " (retired)" : ""}`}
+      hint={customFieldHint(assignment)}
+    >
+      {definition.retiredAt ? (
+        <output aria-label={`Custom field: ${label}`} {...stylex.props(styles.readOnlyValue)}>
+          {customFieldValueText(assignment.value)}
+        </output>
+      ) : (
+        <div {...stylex.props(styles.customFieldInput)}>
+          {control}
+          <Button
+            type="button"
+            variant="quiet"
+            disabled={disabled || explicitValue === null}
+            onClick={() => onChange(null)}
+          >
+            Use default
+          </Button>
+        </div>
+      )}
+    </Field>
   );
 }
 
@@ -1534,6 +1869,7 @@ const styles = stylex.create({
   },
   overviewDetail: { backgroundColor: tokens.background, padding: 0 },
   detailStack: { marginInline: "auto", maxWidth: 960, width: "100%" },
+  settingsStack: { display: "grid", gap: tokens.space5 },
   empty: {
     alignItems: "center",
     color: tokens.foregroundMuted,
@@ -1609,6 +1945,19 @@ const styles = stylex.create({
     paddingBlockEnd: tokens.space4,
     "@media (max-width: 820px)": { gridTemplateColumns: "1fr" },
   },
+  policyCard: {
+    alignItems: "start",
+    backgroundColor: tokens.surfaceMuted,
+    borderColor: tokens.border,
+    borderRadius: tokens.radius2,
+    borderStyle: "solid",
+    borderWidth: 1,
+    display: "grid",
+    gap: tokens.space2,
+    gridTemplateColumns: "minmax(150px, auto) minmax(0, 1fr)",
+    padding: tokens.space3,
+    "@media (max-width: 560px)": { gridTemplateColumns: "1fr" },
+  },
   relationList: {
     color: tokens.foregroundMuted,
     display: "grid",
@@ -1632,6 +1981,31 @@ const styles = stylex.create({
     gridTemplateColumns: "repeat(5, minmax(112px, 1fr))",
     "@media (max-width: 980px)": { gridTemplateColumns: "repeat(2, minmax(0, 1fr))" },
     "@media (max-width: 560px)": { gridTemplateColumns: "1fr" },
+  },
+  customFields: {
+    borderBlockColor: tokens.border,
+    borderBlockStyle: "solid",
+    borderBlockWidth: 1,
+    display: "grid",
+    gap: tokens.space3,
+    paddingBlock: tokens.space4,
+  },
+  customFieldInput: {
+    alignItems: "center",
+    display: "grid",
+    gap: tokens.space2,
+    gridTemplateColumns: "minmax(0, 1fr) auto",
+  },
+  reviewPolicyCommand: { display: "grid", gap: tokens.space2 },
+  readOnlyValue: {
+    backgroundColor: tokens.surfaceMuted,
+    borderColor: tokens.border,
+    borderRadius: tokens.radius2,
+    borderStyle: "solid",
+    borderWidth: 1,
+    color: tokens.foregroundMuted,
+    minHeight: 40,
+    padding: tokens.space3,
   },
   tagEditor: {
     borderWidth: 0,

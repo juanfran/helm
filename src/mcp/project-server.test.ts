@@ -37,6 +37,7 @@ import {
 } from "../domain/tasks";
 import { createSqliteAgentStore } from "../infrastructure/sqlite-agent-store.server";
 import { createSqliteActivityStore } from "../infrastructure/sqlite-activity-store.server";
+import { createSqliteBulkTaskStore } from "../infrastructure/sqlite-bulk-task-store.server";
 import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
 import {
   createSqliteProjectStore,
@@ -236,6 +237,36 @@ function readyTaskArguments(title: string, idempotencyKey: string, capabilities:
     expectedVersion: 0,
     idempotencyKey,
   };
+}
+
+function insertCustomFieldDefinition(input: {
+  id: string;
+  key: string;
+  type: "number" | "single_select";
+  validation: unknown;
+  defaultValue: unknown;
+  label: string;
+  position: number;
+}) {
+  projectStore.database
+    .prepare(
+      `insert into custom_field_definitions (
+         id, project_id, field_key, type, validation_json, default_value_json,
+         display_label, description, position, retired_at, created_at, updated_at
+       ) values (?, ?, ?, ?, ?, ?, ?, '', ?, null, ?, ?)`,
+    )
+    .run(
+      input.id,
+      projectId,
+      input.key,
+      input.type,
+      JSON.stringify(input.validation),
+      JSON.stringify(input.defaultValue),
+      input.label,
+      input.position,
+      now,
+      now,
+    );
 }
 
 function activityContent(text: string) {
@@ -722,6 +753,203 @@ describe("MCP shared task-query contract", () => {
         error: { type: "TaskQueryCursorError", reason: "malformed" },
       },
     });
+  });
+});
+
+describe("MCP project customization contract", () => {
+  it("shares typed custom fields and effective review policy across agent tools", async () => {
+    insertCustomFieldDefinition({
+      id: "field-estimate",
+      key: "estimate",
+      type: "number",
+      validation: { min: 0, max: 10, integer: true },
+      defaultValue: { type: "number", value: 3 },
+      label: "Estimate",
+      position: 0,
+    });
+    insertCustomFieldDefinition({
+      id: "field-track",
+      key: "track",
+      type: "single_select",
+      validation: {
+        options: [
+          { id: "platform", label: "Platform" },
+          { id: "product", label: "Product" },
+        ],
+      },
+      defaultValue: { type: "single_select", value: "platform" },
+      label: "Track",
+      position: 1,
+    });
+    projectStore.database
+      .prepare(
+        `insert into tags (
+           id, project_id, name, description, color, exclusive_group,
+           review_mode_override, created_at, updated_at
+         ) values (?, ?, ?, ?, ?, null, 'direct', ?, ?)`,
+      )
+      .run(
+        "tag-direct-review",
+        projectId,
+        "direct-review",
+        "Completion can skip review",
+        "#2563eb",
+        now,
+        now,
+      );
+
+    const sqliteBulkStore = createSqliteBulkTaskStore(projectStore.database);
+    bulkPreviewOperation = (...arguments_) => sqliteBulkStore.preview(...arguments_);
+    bulkExecuteOperation = (...arguments_) => sqliteBulkStore.execute(...arguments_);
+
+    await client.callTool({
+      name: "register_agent_run",
+      arguments: {
+        profileKey: "customization-contract-agent",
+        displayName: "Customization Contract Agent",
+        capabilities: ["typescript"],
+        idempotencyKey: "register-customization-contract-agent",
+      },
+    });
+
+    const tools = await client.listTools();
+    expect(
+      tools.tools
+        .filter(({ annotations }) => annotations?.readOnlyHint !== true)
+        .map(({ name, inputSchema }) => ({ name, inputSchema }))
+        .filter(({ inputSchema }) => JSON.stringify(inputSchema).includes("reviewModeOverride")),
+    ).toEqual([]);
+
+    const createResult = await client.callTool({
+      name: "create_task",
+      arguments: {
+        ...readyTaskArguments("Customized MCP task", "create-customized-mcp-task", ["typescript"]),
+        tags: [
+          {
+            name: "direct-review",
+            description: "Completion can skip review",
+            color: "#2563eb",
+            exclusiveGroup: null,
+          },
+        ],
+        customFields: [
+          {
+            fieldId: "field-estimate",
+            value: { type: "number", value: 8 },
+          },
+        ],
+      },
+    });
+    const createdTask = successfulTaskSchema.parse(createResult.structuredContent).task;
+    expect(createdTask.customFields).toMatchObject([
+      {
+        definition: { id: "field-estimate", key: "estimate" },
+        value: { type: "number", value: 8 },
+        source: "explicit",
+      },
+      {
+        definition: { id: "field-track", key: "track" },
+        value: { type: "single_select", value: "platform" },
+        source: "default",
+      },
+    ]);
+
+    const contextResult = await client.callTool({
+      name: "get_task_context",
+      arguments: { projectId, taskId: createdTask.id },
+    });
+    const context = successfulContextSchema.parse(contextResult.structuredContent).context;
+    expect(context.customFields).toEqual(createdTask.customFields);
+    expect(context.task.customFields).toEqual(createdTask.customFields);
+    expect(context.reviewPolicy).toEqual(context.task.reviewPolicy);
+    expect(context.reviewPolicy).toMatchObject({
+      mode: "direct",
+      destination: "done",
+      source: {
+        level: "tag",
+        tagIds: ["tag-direct-review"],
+        tagNames: ["direct-review"],
+      },
+      explanation: expect.stringMatching(/project policy.*direct-review/i),
+    });
+
+    const bulkIntent = {
+      schemaVersion: 1 as const,
+      kind: "create" as const,
+      projectId,
+      reason: "Create the related customized task.",
+      items: [
+        {
+          clientId: "bulk-customized-draft",
+          task: {
+            parentTaskId: null,
+            lifecycle: "backlog" as const,
+            title: "Bulk customized MCP task",
+            description: emptyRichTextDocument,
+            expectedOutcome: "",
+            acceptanceCriteria: "",
+            agentContext: "",
+            checklist: [],
+            referencedPaths: [],
+            customFields: [
+              {
+                fieldId: "field-estimate",
+                value: { type: "number" as const, value: 2 },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const bulkPreviewResult = await client.callTool({
+      name: "preview_bulk_tasks",
+      arguments: bulkIntent,
+    });
+    const bulkPreview = successfulBulkTaskPreviewSchema.parse(
+      bulkPreviewResult.structuredContent,
+    ).preview;
+    expect(bulkPreview.targets[0]?.changes[0]?.after).toMatchObject({
+      customFields: {
+        "field-estimate": {
+          value: { type: "number", value: 2 },
+          source: "explicit",
+        },
+        "field-track": {
+          value: { type: "single_select", value: "platform" },
+          source: "default",
+        },
+      },
+    });
+    const bulkExecutionResult = await client.callTool({
+      name: "execute_bulk_tasks",
+      arguments: {
+        intent: bulkIntent,
+        previewToken: bulkPreview.previewToken,
+        idempotencyKey: "execute-customized-mcp-bulk",
+      },
+    });
+    expect(
+      successfulBulkTaskExecutionSchema.parse(bulkExecutionResult.structuredContent).result,
+    ).toMatchObject({ affectedCount: 1, items: [{ changed: true }] });
+
+    const searchResult = await client.callTool({
+      name: "search_tasks",
+      arguments: {
+        filter: {
+          schemaVersion: 1,
+          projectId,
+          customFields: [
+            {
+              fieldId: "field-estimate",
+              operator: "greater_than",
+              value: { type: "number", value: 7 },
+            },
+          ],
+        },
+      },
+    });
+    const searchPage = successfulTaskSearchSchema.parse(searchResult.structuredContent).page;
+    expect(searchPage.items.map(({ task }) => task.id)).toEqual([createdTask.id]);
   });
 });
 

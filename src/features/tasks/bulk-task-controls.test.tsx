@@ -22,6 +22,7 @@ const tags: readonly TaskTag[] = [
     description: "Browser work",
     color: "#2563eb",
     exclusiveGroup: "area",
+    reviewModeOverride: null,
   },
 ];
 

@@ -21,18 +21,28 @@ import {
   TaskQueryPersistenceError,
   type TaskQueryError,
 } from "../application/task-query-errors";
-import { events, idempotencyRecords, projects, savedViews, schema } from "../db/schema";
+import {
+  customFieldDefinitions,
+  events,
+  idempotencyRecords,
+  projects,
+  savedViews,
+  schema,
+} from "../db/schema";
 import { importanceForEventKind, normalizeEventChangeHints } from "../domain/activity";
+import { customFieldSingleSelectValidationSchema } from "../domain/customization";
 import {
   canonicalizeTaskFilter,
   canonicalizeTaskSearchOrder,
   matchesStructuredTaskFilter,
   stableCanonicalJson,
   taskSearchPageSchema,
+  taskFilterCustomFieldOperandType,
   type SearchTasksInput,
   type StructuredTaskFilterFacts,
   type TaskFilterActorReference,
   type TaskFilterActorSource,
+  type TaskFilterCustomFieldClause,
   type TaskFilterV1,
   type TaskSearchItem,
   type TaskSearchMatchedSource,
@@ -243,6 +253,76 @@ function allProjectTaskIds(database: Database.Database, projectId: string) {
     .map(({ taskId }) => taskId);
 }
 
+type QueryCustomFieldDefinition = Pick<
+  typeof customFieldDefinitions.$inferSelect,
+  "id" | "type" | "validationJson"
+>;
+
+function customFieldClauseOperands(clause: TaskFilterCustomFieldClause) {
+  if ("value" in clause) return [clause.value];
+  if ("from" in clause) return [clause.from, clause.to];
+  return [];
+}
+
+function invalidCustomFieldClause(index: number, message: string) {
+  return new InvalidTaskQueryError({
+    message: "The custom-field filter is invalid for this project.",
+    issues: [`customFields.${index}: ${message}`],
+  });
+}
+
+/** Structural schemas validate operand shapes; this pass validates project identity and type. */
+function validateCustomFieldFilterDefinitions(database: Database.Database, filter: TaskFilterV1) {
+  if (!filter.customFields) return;
+  const rows = database
+    .prepare<
+      [string],
+      {
+        readonly id: string;
+        readonly type: QueryCustomFieldDefinition["type"];
+        readonly validationJson: string;
+      }
+    >(
+      `select id, type, validation_json as validationJson
+       from custom_field_definitions
+       where project_id = ?`,
+    )
+    .all(filter.projectId);
+  const definitions = new Map(rows.map((row) => [row.id, row]));
+  for (const [index, clause] of filter.customFields.entries()) {
+    const definition = definitions.get(clause.fieldId);
+    if (!definition) {
+      throw invalidCustomFieldClause(
+        index,
+        `Custom field ${clause.fieldId} does not exist in this project.`,
+      );
+    }
+    const operandType = taskFilterCustomFieldOperandType(clause);
+    if (operandType !== null && operandType !== definition.type) {
+      throw invalidCustomFieldClause(
+        index,
+        `Custom field ${clause.fieldId} has type ${definition.type}, not ${operandType}.`,
+      );
+    }
+    if (definition.type === "single_select") {
+      const optionIds = new Set(
+        customFieldSingleSelectValidationSchema
+          .parse(JSON.parse(definition.validationJson))
+          .options.map(({ id }) => id),
+      );
+      const unknownOption = customFieldClauseOperands(clause).find(
+        (operand) => operand.type === "single_select" && !optionIds.has(operand.value),
+      );
+      if (unknownOption?.type === "single_select") {
+        throw invalidCustomFieldClause(
+          index,
+          `Custom field ${clause.fieldId} does not define option ${unknownOption.value}.`,
+        );
+      }
+    }
+  }
+}
+
 function pushActorFact(
   facts: Array<StructuredTaskFilterFacts["actors"][number]>,
   source: TaskFilterActorSource,
@@ -393,6 +473,7 @@ export function resolveSqliteTaskQueryItems(
   context: TaskQueryEvaluationContext,
 ) {
   const filter = canonicalizeTaskFilter(filterInput);
+  validateCustomFieldFilterDefinitions(database, filter);
   const order = canonicalizeTaskSearchOrder(orderInput, filter);
   const search = ftsHits(database, filter);
   const taskIds = search

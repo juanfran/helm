@@ -23,6 +23,7 @@ import {
   reopenTask,
   requestTaskChanges,
   restoreCancelledTask,
+  setTaskReviewModeOverride,
   updateTaskPlanning,
   type TaskServices,
 } from "../application/tasks";
@@ -149,6 +150,14 @@ export function executePrepareTask(data: unknown, actor: Actor, services: TaskSe
 
 export function executeUpdateTaskPlanning(data: unknown, actor: Actor, services: TaskServices) {
   return execute(updateTaskPlanning(data, actor, services));
+}
+
+export function executeSetTaskReviewModeOverride(
+  data: unknown,
+  actor: Actor,
+  services: TaskServices,
+) {
+  return execute(setTaskReviewModeOverride(data, actor, services));
 }
 
 export function executeCompleteTask(

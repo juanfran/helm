@@ -3,11 +3,13 @@ import { Effect } from "effect";
 import { systemActivityClock } from "../application/activity";
 import { reconcileActiveAgentRuns } from "../application/agents";
 import { systemBulkTaskClock } from "../application/bulk-tasks";
+import { systemCustomizationClock } from "../application/customizations";
 import { reconcileTaskLeases, systemTaskClock } from "../application/tasks";
 import { systemTaskQueryClock } from "../application/task-queries";
 import { createSqliteAgentStore } from "../infrastructure/sqlite-agent-store.server";
 import { createSqliteActivityStore } from "../infrastructure/sqlite-activity-store.server";
 import { createSqliteBulkTaskStore } from "../infrastructure/sqlite-bulk-task-store.server";
+import { createSqliteCustomizationStore } from "../infrastructure/sqlite-customization-store.server";
 import { createSqliteProjectStore } from "../infrastructure/sqlite-project-store.server";
 import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
 import { createSqliteTaskStore } from "../infrastructure/sqlite-task-store.server";
@@ -31,6 +33,10 @@ function createProjectRuntime() {
     store: createSqliteBulkTaskStore(projectStore.database),
     clock: systemBulkTaskClock,
   };
+  const customizationServices = {
+    store: createSqliteCustomizationStore(projectStore.database),
+    clock: systemCustomizationClock,
+  };
   const agentServices = { store: createSqliteAgentStore(projectStore.database) };
   const activityServices = {
     store: createSqliteActivityStore(projectStore.database),
@@ -52,6 +58,7 @@ function createProjectRuntime() {
     activityServices,
     agentServices,
     bulkTaskServices,
+    customizationServices,
     leaseReconciliationTimer,
     projectServices,
     projectStore,
@@ -79,6 +86,7 @@ export const {
   activityServices,
   agentServices,
   bulkTaskServices,
+  customizationServices,
   projectServices,
   taskQueryServices,
   taskServices,

@@ -75,6 +75,45 @@ function createItem(clientId: string, title: string, overrides: Record<string, u
   };
 }
 
+function insertNumberField(
+  overrides: Partial<{
+    id: string;
+    key: string;
+    defaultValue: { type: "number"; value: number } | null;
+    retiredAt: string | null;
+    position: number;
+  }> = {},
+) {
+  const definition = {
+    id: "field-estimate",
+    key: "estimate",
+    defaultValue: { type: "number" as const, value: 3 },
+    retiredAt: null,
+    position: 0,
+    ...overrides,
+  };
+  projectStore.database
+    .prepare(
+      `insert into custom_field_definitions (
+         id, project_id, field_key, type, validation_json, default_value_json,
+         display_label, description, position, retired_at, created_at, updated_at
+       ) values (?, ?, ?, 'number', ?, ?, ?, '', ?, ?, ?, ?)`,
+    )
+    .run(
+      definition.id,
+      projectId,
+      definition.key,
+      JSON.stringify({ min: 0, max: 10, integer: true }),
+      definition.defaultValue === null ? null : JSON.stringify(definition.defaultValue),
+      definition.key === "estimate" ? "Estimate" : definition.key,
+      definition.position,
+      definition.retiredAt,
+      now,
+      now,
+    );
+  return definition;
+}
+
 beforeEach(async () => {
   temporaryRoot = await mkdtemp(join(tmpdir(), "helm-bulk-task-test-"));
   const repositoryRoot = join(temporaryRoot, "repository");
@@ -661,6 +700,265 @@ describe("SQLite bulk task commands", () => {
     expect(projectStore.database.prepare("select count(*) from tasks").pluck().get()).toBe(
       taskCountAfterInterveningCreate,
     );
+  });
+
+  it("bulk-creates, sets, and clears typed custom fields with effective projections", async () => {
+    const definition = insertNumberField();
+    const createIntent = {
+      schemaVersion: 1 as const,
+      kind: "create" as const,
+      projectId,
+      reason: "Create work with reviewed structured metadata",
+      items: [
+        createItem("custom-draft", "Estimated work", {
+          customFields: [
+            {
+              fieldId: definition.id,
+              value: { type: "number" as const, value: 7 },
+            },
+          ],
+        }),
+      ],
+    };
+    const createPreview = await Effect.runPromise(
+      previewBulkTasks(createIntent, human, bulkServices),
+    );
+    expect(createPreview.targets[0]?.changes[0]?.after).toMatchObject({
+      customFields: {
+        [definition.id]: {
+          value: { type: "number", value: 7 },
+          source: "explicit",
+        },
+      },
+    });
+    const created = await Effect.runPromise(
+      executeBulkTasks(
+        {
+          intent: createIntent,
+          previewToken: createPreview.previewToken,
+          idempotencyKey: "bulk-create-custom-field",
+        },
+        human,
+        bulkServices,
+      ),
+    );
+    const taskId = created.items[0]!.taskId;
+    expect(
+      projectStore.database
+        .prepare("select value_json from task_custom_field_values where task_id = ?")
+        .pluck()
+        .get(taskId),
+    ).toBe(JSON.stringify({ type: "number", value: 7 }));
+    const createdEventPayload = projectStore.database
+      .prepare<[string], string>(
+        "select payload_json from events where entity_id = ? and kind = 'task.created'",
+      )
+      .pluck()
+      .get(taskId);
+    expect(JSON.parse(createdEventPayload ?? "{}")).toMatchObject({
+      customFields: [{ fieldId: definition.id, value: { type: "number", value: 7 } }],
+      reviewModeOverride: null,
+      reviewPolicy: { source: { level: "project", projectId } },
+    });
+
+    const clearIntent = updateIntent([taskId], {
+      customFields: { set: [], clear: [definition.id] },
+    });
+    const clearPreview = await Effect.runPromise(
+      previewBulkTasks(clearIntent, human, bulkServices),
+    );
+    expect(clearPreview.targets[0]?.changes).toMatchObject([
+      {
+        field: "customFields",
+        before: {
+          [definition.id]: {
+            value: { type: "number", value: 7 },
+            source: "explicit",
+          },
+        },
+        after: {
+          [definition.id]: {
+            value: { type: "number", value: 3 },
+            source: "default",
+          },
+        },
+      },
+    ]);
+    const cleared = await Effect.runPromise(
+      executeBulkTasks(
+        {
+          intent: clearIntent,
+          previewToken: clearPreview.previewToken,
+          idempotencyKey: "bulk-clear-custom-field",
+        },
+        human,
+        bulkServices,
+      ),
+    );
+    expect(
+      projectStore.database
+        .prepare("select count(*) from task_custom_field_values where task_id = ?")
+        .pluck()
+        .get(taskId),
+    ).toBe(0);
+    expect(cleared.items[0]).toMatchObject({ version: 2, changed: true });
+
+    const setIntent = updateIntent([taskId], {
+      customFields: {
+        set: [
+          {
+            fieldId: definition.id,
+            value: { type: "number", value: 5 },
+          },
+        ],
+        clear: [],
+      },
+    });
+    const setPreview = await Effect.runPromise(previewBulkTasks(setIntent, human, bulkServices));
+    const setResult = await Effect.runPromise(
+      executeBulkTasks(
+        {
+          intent: setIntent,
+          previewToken: setPreview.previewToken,
+          idempotencyKey: "bulk-set-custom-field",
+        },
+        human,
+        bulkServices,
+      ),
+    );
+    const projected = (await Effect.runPromise(listTasks({ projectId }, taskServices))).find(
+      ({ id }) => id === taskId,
+    );
+    expect(setResult.items[0]).toMatchObject({ version: 3, changed: true });
+    expect(projected?.customFields).toMatchObject([
+      {
+        definition: { id: definition.id },
+        value: { type: "number", value: 5 },
+        source: "explicit",
+      },
+    ]);
+  });
+
+  it("rejects invalid or retired custom-field writes atomically", async () => {
+    const active = insertNumberField();
+    const retired = insertNumberField({
+      id: "field-retired",
+      key: "retired_estimate",
+      position: 1,
+      retiredAt: "2026-09-04T11:00:00.000Z",
+    });
+    const target = await Effect.runPromise(
+      createTask(taskInput({ title: "Custom validation target" }), human, taskServices),
+    );
+    const intent = updateIntent([target.id], {
+      customFields: {
+        set: [
+          {
+            fieldId: "field-missing",
+            value: { type: "number", value: 1 },
+          },
+          {
+            fieldId: retired.id,
+            value: { type: "number", value: 1 },
+          },
+          {
+            fieldId: active.id,
+            value: { type: "number", value: 11 },
+          },
+        ],
+        clear: [],
+      },
+    });
+    const preview = await Effect.runPromise(previewBulkTasks(intent, human, bulkServices));
+    expect(preview).toMatchObject({ executable: false, affectedCount: 0 });
+    expect(preview.targets[0]?.failures.map(({ code }) => code)).toEqual([
+      "custom_field_invalid_value",
+      "custom_field_not_found",
+      "custom_field_retired",
+    ]);
+    const before = {
+      task: projectStore.database
+        .prepare("select version, updated_at from tasks where id = ?")
+        .get(target.id),
+      values: projectStore.database
+        .prepare("select * from task_custom_field_values where task_id = ?")
+        .all(target.id),
+      events: projectStore.database.prepare("select count(*) from events").pluck().get(),
+    };
+    const execution = await Effect.runPromise(
+      Effect.either(
+        executeBulkTasks(
+          {
+            intent,
+            previewToken: preview.previewToken,
+            idempotencyKey: "reject-invalid-custom-fields",
+          },
+          human,
+          bulkServices,
+        ),
+      ),
+    );
+    expect(Either.isLeft(execution) && execution.left["_tag"]).toBe(
+      "BulkTaskPreviewValidationError",
+    );
+    expect({
+      task: projectStore.database
+        .prepare("select version, updated_at from tasks where id = ?")
+        .get(target.id),
+      values: projectStore.database
+        .prepare("select * from task_custom_field_values where task_id = ?")
+        .all(target.id),
+      events: projectStore.database.prepare("select count(*) from events").pluck().get(),
+    }).toEqual(before);
+  });
+
+  it("invalidates a preview when custom-field definition state changes", async () => {
+    const definition = insertNumberField();
+    const target = await Effect.runPromise(
+      createTask(taskInput({ title: "Definition-sensitive task" }), human, taskServices),
+    );
+    const intent = updateIntent([target.id], {
+      customFields: {
+        set: [
+          {
+            fieldId: definition.id,
+            value: { type: "number", value: 5 },
+          },
+        ],
+        clear: [],
+      },
+    });
+    const preview = await Effect.runPromise(previewBulkTasks(intent, human, bulkServices));
+    projectStore.database
+      .prepare("update custom_field_definitions set display_label = ?, updated_at = ? where id = ?")
+      .run("Updated estimate", "2026-09-04T13:00:00.000Z", definition.id);
+
+    const execution = await Effect.runPromise(
+      Effect.either(
+        executeBulkTasks(
+          {
+            intent,
+            previewToken: preview.previewToken,
+            idempotencyKey: "stale-custom-field-definition",
+          },
+          human,
+          bulkServices,
+        ),
+      ),
+    );
+    expect(Either.isLeft(execution) && execution.left["_tag"]).toBe("BulkTaskPreviewStaleError");
+    expect(
+      projectStore.database
+        .prepare("select count(*) from task_custom_field_values where task_id = ?")
+        .pluck()
+        .get(target.id),
+    ).toBe(0);
+    expect(
+      projectStore.database
+        .prepare("select version from tasks where id = ?")
+        .pluck()
+        .get(target.id),
+    ).toBe(target.version);
   });
 
   it("rolls all projections, parent/child events, and idempotency back when a later child event fails", async () => {

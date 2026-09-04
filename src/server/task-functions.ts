@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { Effect } from "effect";
 
 import { listTaskAttempts, listTaskTags, listTasks } from "../application/tasks";
+import { compiledSetTaskReviewModeOverrideInputSchema } from "../domain/customization";
 import {
   compiledBulkTaskIntentSchema,
   compiledExecuteBulkTasksInputSchema,
@@ -37,6 +38,7 @@ import {
   executeReopenTask,
   executeRequestTaskChanges,
   executeRestoreCancelledTask,
+  executeSetTaskReviewModeOverride,
   executeUpdateTaskPlanning,
 } from "./task-adapter";
 
@@ -73,6 +75,10 @@ export const prepareHumanTask = createServerFn({ method: "POST" })
 export const updateHumanTaskPlanning = createServerFn({ method: "POST" })
   .validator(compiledUpdateTaskPlanningInputSchema)
   .handler(({ data }) => executeUpdateTaskPlanning(data, LOCAL_HUMAN, taskServices));
+
+export const setHumanTaskReviewModeOverride = createServerFn({ method: "POST" })
+  .validator(compiledSetTaskReviewModeOverrideInputSchema)
+  .handler(({ data }) => executeSetTaskReviewModeOverride(data, LOCAL_HUMAN, taskServices));
 
 export const approveHumanTaskReview = createServerFn({ method: "POST" })
   .validator(compiledApproveTaskReviewInputSchema)

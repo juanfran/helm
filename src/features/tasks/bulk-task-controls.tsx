@@ -67,6 +67,7 @@ const fieldLabels: Record<BulkTaskProjectedChange["field"], string> = {
   notBefore: "Start date",
   dueAt: "Due date",
   tags: "Tags",
+  customFields: "Custom fields",
   requiredCapabilities: "Required capabilities",
 };
 

@@ -8,6 +8,15 @@ import {
 } from "./task-filters";
 import { jsonValueSchema, type JsonValue } from "./rich-text";
 import {
+  MAX_CUSTOM_FIELD_DEFINITIONS,
+  customFieldValueSchema,
+  taskCustomFieldAssignmentSchema,
+  validateCustomFieldValue,
+  type CustomFieldDefinition,
+  type CustomFieldValue,
+  type TaskCustomFieldAssignment,
+} from "./customization";
+import {
   actorSchema,
   capabilityNameSchema,
   createTaskInputSchema,
@@ -18,7 +27,6 @@ import {
   taskDateSchema,
   taskPrioritySchema,
   type Actor,
-  type CreateTaskInput,
   type Task,
   type TaskLifecycle,
   type TaskPriority,
@@ -50,11 +58,73 @@ const uniqueIdListSchema = z
     }
   });
 
-const createTaskFieldsSchema = createTaskInputSchema.omit({
-  projectId: true,
-  expectedVersion: true,
-  idempotencyKey: true,
+export const bulkTaskCustomFieldValueSchema = z.strictObject({
+  fieldId: opaqueIdSchema,
+  value: customFieldValueSchema,
 });
+export type BulkTaskCustomFieldValue = z.infer<typeof bulkTaskCustomFieldValueSchema>;
+
+function uniqueCustomFieldValues(
+  values: readonly { readonly fieldId: string }[],
+  context: z.core.$RefinementCtx,
+) {
+  const seen = new Set<string>();
+  for (const [index, entry] of values.entries()) {
+    if (seen.has(entry.fieldId)) {
+      context.addIssue({
+        code: "custom",
+        message: `Custom field ${entry.fieldId} may only appear once.`,
+        path: [index, "fieldId"],
+        input: entry.fieldId,
+      });
+    }
+    seen.add(entry.fieldId);
+  }
+}
+
+const bulkTaskCustomFieldValuesSchema = z
+  .array(bulkTaskCustomFieldValueSchema)
+  .max(MAX_CUSTOM_FIELD_DEFINITIONS)
+  .superRefine(uniqueCustomFieldValues);
+
+export const bulkTaskCustomFieldChangesSchema = z
+  .strictObject({
+    set: bulkTaskCustomFieldValuesSchema.optional().default([]),
+    clear: z
+      .array(opaqueIdSchema)
+      .max(MAX_CUSTOM_FIELD_DEFINITIONS)
+      .superRefine((values, context) =>
+        uniqueCustomFieldValues(
+          values.map((fieldId) => ({ fieldId })),
+          context,
+        ),
+      )
+      .optional()
+      .default([]),
+  })
+  .superRefine((changes, context) => {
+    const overlap = overlappingValues(
+      changes.set.map(({ fieldId }) => fieldId),
+      changes.clear,
+    );
+    if (overlap.length > 0) {
+      context.addIssue({
+        code: "custom",
+        message: `Custom fields cannot be set and cleared together: ${overlap.join(", ")}.`,
+      });
+    }
+  });
+export type BulkTaskCustomFieldChanges = z.infer<typeof bulkTaskCustomFieldChangesSchema>;
+
+const createTaskFieldsSchema = createTaskInputSchema
+  .omit({
+    projectId: true,
+    expectedVersion: true,
+    idempotencyKey: true,
+  })
+  .extend({
+    customFields: bulkTaskCustomFieldValuesSchema.optional().default([]),
+  });
 
 export const bulkTaskCreateItemSchema = z.strictObject({
   clientId: opaqueIdSchema,
@@ -97,6 +167,7 @@ export const bulkTaskUpdatePatchSchema = z
     dueAt: taskDateSchema.nullable().optional(),
     tags: optionalIdChangesSchema.optional(),
     capabilities: optionalCapabilityChangesSchema.optional(),
+    customFields: bulkTaskCustomFieldChangesSchema.optional(),
   })
   .superRefine((patch, context) => {
     const hasScalarChange = ["lifecycle", "priority", "notBefore", "dueAt"].some((field) =>
@@ -107,6 +178,10 @@ export const bulkTaskUpdatePatchSchema = z
       Boolean(
         patch.capabilities &&
         (patch.capabilities.add.length > 0 || patch.capabilities.remove.length > 0),
+      ) ||
+      Boolean(
+        patch.customFields &&
+        (patch.customFields.set.length > 0 || patch.customFields.clear.length > 0),
       );
     if (!hasScalarChange && !hasSetChange) {
       context.addIssue({
@@ -212,6 +287,9 @@ export const bulkTaskValidationCodeSchema = z.enum([
   "tag_not_found",
   "exclusive_tag_conflict",
   "tag_definition_conflict",
+  "custom_field_not_found",
+  "custom_field_retired",
+  "custom_field_invalid_value",
   "invalid_parent",
   "invalid_path",
   "no_changes",
@@ -236,6 +314,7 @@ export const bulkTaskProjectedChangeSchema = z.strictObject({
     "dueAt",
     "tags",
     "requiredCapabilities",
+    "customFields",
   ]),
   before: jsonValueSchema,
   after: jsonValueSchema,
@@ -308,6 +387,7 @@ export const bulkTaskPreviewStateSchema = z.strictObject({
     }),
   ),
   tagDefinitionsHash: hashSchema,
+  customFieldDefinitionsHash: hashSchema,
   sequenceBase: z.number().int().nonnegative().nullable(),
 });
 export type BulkTaskPreviewState = z.infer<typeof bulkTaskPreviewStateSchema>;
@@ -331,6 +411,9 @@ function canonicalCreateTask(task: BulkTaskCreateItem["task"]) {
       ? normalizeCapabilities(task.requiredCapabilities)
       : undefined,
     referencedPaths: task.referencedPaths ? sortedUnique(task.referencedPaths) : undefined,
+    customFields: [...task.customFields].toSorted((left, right) =>
+      left.fieldId.localeCompare(right.fieldId),
+    ),
   };
 }
 
@@ -373,6 +456,16 @@ export function canonicalizeBulkTaskIntent(input: unknown): BulkTaskIntent {
             capabilities: {
               add: normalizeCapabilities(intent.patch.capabilities.add),
               remove: normalizeCapabilities(intent.patch.capabilities.remove),
+            },
+          }
+        : {}),
+      ...(intent.patch.customFields
+        ? {
+            customFields: {
+              set: [...intent.patch.customFields.set].toSorted((left, right) =>
+                left.fieldId.localeCompare(right.fieldId),
+              ),
+              clear: sortedUnique(intent.patch.customFields.clear),
             },
           }
         : {}),
@@ -487,6 +580,125 @@ export function validateBulkTaskCreateParent(
   return null;
 }
 
+function compareCustomFieldDefinitions(left: CustomFieldDefinition, right: CustomFieldDefinition) {
+  return left.position - right.position || left.id.localeCompare(right.id);
+}
+
+function explicitCustomFieldValues(assignments: readonly TaskCustomFieldAssignment[]) {
+  return new Map<string, CustomFieldValue>(
+    assignments.flatMap((assignment) =>
+      assignment.source === "explicit" && assignment.value !== null
+        ? [[assignment.definition.id, assignment.value] as const]
+        : [],
+    ),
+  );
+}
+
+function effectiveCustomFieldAssignments(
+  definitionsInput: readonly CustomFieldDefinition[],
+  explicitValues: ReadonlyMap<string, CustomFieldValue>,
+) {
+  return [...definitionsInput]
+    .toSorted(compareCustomFieldDefinitions)
+    .filter((definition) => definition.retiredAt === null || explicitValues.has(definition.id))
+    .map((definition) => {
+      const explicit = explicitValues.get(definition.id);
+      const value = explicit ?? definition.defaultValue;
+      return taskCustomFieldAssignmentSchema.parse({
+        definition,
+        value,
+        source: explicit ? "explicit" : value === null ? "unset" : "default",
+      });
+    });
+}
+
+function customFieldValueFailures(
+  values: readonly BulkTaskCustomFieldValue[],
+  clear: readonly string[],
+  definitions: readonly CustomFieldDefinition[],
+  options: Pick<BulkTaskValidationFailure, "targetKey"> &
+    Partial<Pick<BulkTaskValidationFailure, "taskId">>,
+) {
+  const failures: BulkTaskValidationFailure[] = [];
+  const definitionsById = new Map(definitions.map((definition) => [definition.id, definition]));
+  for (const entry of [
+    ...values.map(({ fieldId, value }) => ({ fieldId, value })),
+    ...clear.map((fieldId) => ({ fieldId, value: null })),
+  ]) {
+    const definition = definitionsById.get(entry.fieldId);
+    if (!definition) {
+      failures.push(
+        failure(
+          "custom_field_not_found",
+          `Custom field ${entry.fieldId} does not belong to this project.`,
+          { ...options, field: "customFields" },
+        ),
+      );
+      continue;
+    }
+    if (definition.retiredAt !== null) {
+      failures.push(
+        failure(
+          "custom_field_retired",
+          `Custom field ${definition.key} is retired and cannot be changed.`,
+          { ...options, field: "customFields" },
+        ),
+      );
+      continue;
+    }
+    if (entry.value === null) continue;
+    const issues = validateCustomFieldValue(definition, entry.value);
+    if (issues.length > 0) {
+      failures.push(
+        failure("custom_field_invalid_value", issues.map(({ message }) => message).join(" "), {
+          ...options,
+          field: "customFields",
+        }),
+      );
+    }
+  }
+  return failures;
+}
+
+export type BulkTaskCreateCustomFieldProjection = {
+  readonly projected: readonly TaskCustomFieldAssignment[];
+  readonly failures: readonly BulkTaskValidationFailure[];
+};
+
+export function projectBulkTaskCreateCustomFields(
+  item: BulkTaskCreateItem,
+  definitions: readonly CustomFieldDefinition[],
+): BulkTaskCreateCustomFieldProjection {
+  const failures = customFieldValueFailures(item.task.customFields, [], definitions, {
+    targetKey: item.clientId,
+  });
+  const definitionsById = new Map(definitions.map((definition) => [definition.id, definition]));
+  const validValues = new Map(
+    item.task.customFields
+      .filter(({ fieldId, value }) => {
+        const definition = definitionsById.get(fieldId);
+        return (
+          definition !== undefined &&
+          definition.retiredAt === null &&
+          validateCustomFieldValue(definition, value).length === 0
+        );
+      })
+      .map(({ fieldId, value }) => [fieldId, value] as const),
+  );
+  return {
+    projected: effectiveCustomFieldAssignments(definitions, validValues),
+    failures,
+  };
+}
+
+export function bulkTaskCustomFieldsJson(
+  assignments: readonly TaskCustomFieldAssignment[],
+): JsonValue {
+  return Object.fromEntries(
+    assignments.map(({ definition, value, source }) => [definition.id, { value, source }]),
+  );
+}
+
 export type BulkTaskProjectedFields = {
   readonly lifecycle: TaskLifecycle;
   readonly priority: TaskPriority;
@@ -494,6 +706,7 @@ export type BulkTaskProjectedFields = {
   readonly dueAt: string | null;
   readonly tags: readonly TaskTag[];
   readonly requiredCapabilities: readonly string[];
+  readonly customFields: readonly TaskCustomFieldAssignment[];
 };
 
 export type BulkTaskUpdateProjection = {
@@ -522,6 +735,7 @@ export function projectBulkTaskUpdate(
   task: Task,
   patchInput: BulkTaskUpdatePatch,
   tagDefinitions: readonly TaskTag[],
+  customFieldDefinitions: readonly CustomFieldDefinition[] = [],
 ): BulkTaskUpdateProjection {
   const patch = bulkTaskUpdatePatchSchema.parse(patchInput);
   const failures: BulkTaskValidationFailure[] = [];
@@ -583,6 +797,45 @@ export function projectBulkTaskUpdate(
     ),
     ...(patch.capabilities?.add ?? []),
   ]);
+  const customDefinitionsById = new Map(
+    task.customFields.map(({ definition }) => [definition.id, definition]),
+  );
+  for (const definition of customFieldDefinitions) {
+    customDefinitionsById.set(definition.id, definition);
+  }
+  const effectiveCustomDefinitions = [...customDefinitionsById.values()];
+  const customFieldFailures = customFieldValueFailures(
+    patch.customFields?.set ?? [],
+    patch.customFields?.clear ?? [],
+    effectiveCustomDefinitions,
+    targetOptions,
+  );
+  failures.push(...customFieldFailures);
+  const validCustomFieldIds = new Set(
+    effectiveCustomDefinitions.filter(({ retiredAt }) => retiredAt === null).map(({ id }) => id),
+  );
+  const initialExplicitCustomFields = explicitCustomFieldValues(task.customFields);
+  const beforeCustomFieldAssignments = effectiveCustomFieldAssignments(
+    effectiveCustomDefinitions,
+    initialExplicitCustomFields,
+  );
+  const finalExplicitCustomFields = new Map(initialExplicitCustomFields);
+  for (const fieldId of patch.customFields?.clear ?? []) {
+    if (validCustomFieldIds.has(fieldId)) finalExplicitCustomFields.delete(fieldId);
+  }
+  for (const { fieldId, value } of patch.customFields?.set ?? []) {
+    const definition = customDefinitionsById.get(fieldId);
+    if (
+      definition?.retiredAt === null &&
+      validateCustomFieldValue(definition, value).length === 0
+    ) {
+      finalExplicitCustomFields.set(fieldId, value);
+    }
+  }
+  const finalCustomFields = effectiveCustomFieldAssignments(
+    effectiveCustomDefinitions,
+    finalExplicitCustomFields,
+  );
   const projected: BulkTaskProjectedFields = {
     lifecycle: patch.lifecycle ?? task.lifecycle,
     priority: patch.priority ?? task.priority,
@@ -594,6 +847,7 @@ export function projectBulkTaskUpdate(
       : task.dueAt,
     tags: finalTags,
     requiredCapabilities: finalCapabilities,
+    customFields: finalCustomFields,
   };
 
   if (patch.lifecycle === "ready" && task.lifecycle !== "ready") {
@@ -629,6 +883,11 @@ export function projectBulkTaskUpdate(
   if (!sameJson(beforeCapabilities, finalCapabilities)) {
     changes.push(change("requiredCapabilities", beforeCapabilities, finalCapabilities));
   }
+  const beforeCustomFields = bulkTaskCustomFieldsJson(beforeCustomFieldAssignments);
+  const afterCustomFields = bulkTaskCustomFieldsJson(finalCustomFields);
+  if (!sameJson(beforeCustomFields, afterCustomFields)) {
+    changes.push(change("customFields", beforeCustomFields, afterCustomFields));
+  }
 
   return { projected, changes, failures };
 }
@@ -653,8 +912,5 @@ export function canonicalBulkTaskPreviewStateJson(input: BulkTaskPreviewState) {
 }
 
 export type BulkTaskActor = Actor;
-export type BulkCreateTaskFields = Omit<
-  CreateTaskInput,
-  "projectId" | "expectedVersion" | "idempotencyKey"
->;
+export type BulkCreateTaskFields = BulkTaskCreateItem["task"];
 export type BulkTaskFilter = TaskFilterV1;

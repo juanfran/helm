@@ -1,6 +1,13 @@
 import { z } from "zod";
 
 import {
+  customFieldDateValueSchema,
+  customFieldNumberValueSchema,
+  customFieldTextValueSchema,
+  customFieldValueSchema,
+  type CustomFieldType,
+} from "./customization";
+import {
   capabilityNameSchema,
   taskDateSchema,
   taskLifecycleSchema,
@@ -119,6 +126,96 @@ export const taskFilterRelationClauseSchema = z.strictObject({
 });
 export type TaskFilterRelationClause = z.infer<typeof taskFilterRelationClauseSchema>;
 
+const customFieldClauseBase = { fieldId: opaqueIdSchema };
+
+const taskFilterCustomFieldPresenceClauseSchema = z.strictObject({
+  ...customFieldClauseBase,
+  operator: z.enum(["present", "missing"]),
+});
+
+const taskFilterCustomFieldEqualityClauseSchema = z.strictObject({
+  ...customFieldClauseBase,
+  operator: z.enum(["equals", "not_equals"]),
+  value: customFieldValueSchema,
+});
+
+const taskFilterCustomFieldTextClauseSchema = z.strictObject({
+  ...customFieldClauseBase,
+  operator: z.enum(["contains", "not_contains", "starts_with", "ends_with"]),
+  value: customFieldTextValueSchema,
+});
+
+const taskFilterCustomFieldNumberClauseSchema = z.strictObject({
+  ...customFieldClauseBase,
+  operator: z.enum(["greater_than", "greater_than_or_equal", "less_than", "less_than_or_equal"]),
+  value: customFieldNumberValueSchema,
+});
+
+const taskFilterCustomFieldNumberBetweenClauseSchema = z
+  .strictObject({
+    ...customFieldClauseBase,
+    operator: z.literal("between"),
+    from: customFieldNumberValueSchema,
+    to: customFieldNumberValueSchema,
+  })
+  .superRefine((clause, context) => {
+    if (clause.from.value > clause.to.value) {
+      context.addIssue({
+        code: "custom",
+        message: "The beginning of a number range must not exceed its end.",
+        path: ["to"],
+        input: clause.to,
+      });
+    }
+  });
+
+const taskFilterCustomFieldDateClauseSchema = z.strictObject({
+  ...customFieldClauseBase,
+  operator: z.enum(["before", "on_or_before", "after", "on_or_after"]),
+  value: customFieldDateValueSchema,
+});
+
+const taskFilterCustomFieldDateBetweenClauseSchema = z
+  .strictObject({
+    ...customFieldClauseBase,
+    operator: z.literal("between"),
+    from: customFieldDateValueSchema,
+    to: customFieldDateValueSchema,
+  })
+  .superRefine((clause, context) => {
+    if (clause.from.value > clause.to.value) {
+      context.addIssue({
+        code: "custom",
+        message: "The beginning of a date range must not be after its end.",
+        path: ["to"],
+        input: clause.to,
+      });
+    }
+  });
+
+/**
+ * Custom-field operands reuse the tagged value contract used by task mutations and projections.
+ * Presence works across all field types; every other operator carries its expected field type.
+ */
+export const taskFilterCustomFieldClauseSchema = z.union([
+  taskFilterCustomFieldPresenceClauseSchema,
+  taskFilterCustomFieldEqualityClauseSchema,
+  taskFilterCustomFieldTextClauseSchema,
+  taskFilterCustomFieldNumberClauseSchema,
+  taskFilterCustomFieldNumberBetweenClauseSchema,
+  taskFilterCustomFieldDateClauseSchema,
+  taskFilterCustomFieldDateBetweenClauseSchema,
+]);
+export type TaskFilterCustomFieldClause = z.infer<typeof taskFilterCustomFieldClauseSchema>;
+
+export function taskFilterCustomFieldOperandType(
+  clause: TaskFilterCustomFieldClause,
+): CustomFieldType | null {
+  if ("value" in clause) return clause.value.type;
+  if ("from" in clause) return clause.from.type;
+  return null;
+}
+
 const taskFilterTagsSchema = z.strictObject({
   operator: taskFilterSetOperatorSchema,
   values: z.array(opaqueIdSchema).min(1).max(100),
@@ -153,6 +250,7 @@ export const taskFilterV1Schema = z.strictObject({
   actor: taskFilterActorSchema.optional(),
   dates: z.array(taskFilterDateClauseSchema).min(1).max(24).optional(),
   relations: z.array(taskFilterRelationClauseSchema).min(1).max(24).optional(),
+  customFields: z.array(taskFilterCustomFieldClauseSchema).min(1).max(24).optional(),
 });
 export type TaskFilterV1 = z.infer<typeof taskFilterV1Schema>;
 
@@ -262,6 +360,27 @@ function canonicalizeRelationClause(relation: TaskFilterRelationClause): TaskFil
   };
 }
 
+function normalizeCustomFieldText(value: string) {
+  return value.normalize("NFKC").toLocaleLowerCase("en-US");
+}
+
+function canonicalizeCustomFieldClause(
+  clause: TaskFilterCustomFieldClause,
+): TaskFilterCustomFieldClause {
+  if (
+    clause.operator !== "contains" &&
+    clause.operator !== "not_contains" &&
+    clause.operator !== "starts_with" &&
+    clause.operator !== "ends_with"
+  ) {
+    return clause;
+  }
+  return {
+    ...clause,
+    value: { type: "text", value: normalizeCustomFieldText(clause.value.value) },
+  };
+}
+
 export function canonicalizeTaskFilter(input: unknown): TaskFilterV1 {
   const filter = taskFilterV1Schema.parse(input);
   const canonical = {
@@ -295,6 +414,13 @@ export function canonicalizeTaskFilter(input: unknown): TaskFilterV1 {
     ...(filter.relations
       ? {
           relations: uniqueByCanonicalJson(filter.relations.map(canonicalizeRelationClause)),
+        }
+      : {}),
+    ...(filter.customFields
+      ? {
+          customFields: uniqueByCanonicalJson(
+            filter.customFields.map(canonicalizeCustomFieldClause),
+          ),
         }
       : {}),
   };
@@ -425,6 +551,68 @@ function matchesRelationClause(task: Task, clause: TaskFilterRelationClause) {
   return clause.operator === "exists" ? exists : !exists;
 }
 
+function matchesCustomFieldClause(task: Task, clause: TaskFilterCustomFieldClause) {
+  const assignment = task.customFields.find(({ definition }) => definition.id === clause.fieldId);
+  const current = assignment?.value ?? null;
+  if (clause.operator === "missing") return assignment !== undefined && current === null;
+  if (clause.operator === "present") return current !== null;
+  if (current === null) return false;
+
+  if (clause.operator === "equals" || clause.operator === "not_equals") {
+    if (current.type !== clause.value.type) return false;
+    const equal = stableCanonicalJson(current) === stableCanonicalJson(clause.value);
+    return clause.operator === "equals" ? equal : !equal;
+  }
+  if (current.type !== taskFilterCustomFieldOperandType(clause)) return false;
+
+  switch (clause.operator) {
+    case "contains":
+      return (
+        current.type === "text" &&
+        normalizeCustomFieldText(current.value).includes(clause.value.value)
+      );
+    case "not_contains":
+      return (
+        current.type === "text" &&
+        !normalizeCustomFieldText(current.value).includes(clause.value.value)
+      );
+    case "starts_with":
+      return (
+        current.type === "text" &&
+        normalizeCustomFieldText(current.value).startsWith(clause.value.value)
+      );
+    case "ends_with":
+      return (
+        current.type === "text" &&
+        normalizeCustomFieldText(current.value).endsWith(clause.value.value)
+      );
+    case "greater_than":
+      return current.type === "number" && current.value > clause.value.value;
+    case "greater_than_or_equal":
+      return current.type === "number" && current.value >= clause.value.value;
+    case "less_than":
+      return current.type === "number" && current.value < clause.value.value;
+    case "less_than_or_equal":
+      return current.type === "number" && current.value <= clause.value.value;
+    case "before":
+      return current.type === "date" && current.value < clause.value.value;
+    case "on_or_before":
+      return current.type === "date" && current.value <= clause.value.value;
+    case "after":
+      return current.type === "date" && current.value > clause.value.value;
+    case "on_or_after":
+      return current.type === "date" && current.value >= clause.value.value;
+    case "between":
+      return (
+        current.type === clause.from.type &&
+        current.value >= clause.from.value &&
+        current.value <= clause.to.value
+      );
+  }
+
+  return false;
+}
+
 export function matchesStructuredTaskFilter(
   task: Task,
   input: TaskFilterV1,
@@ -472,5 +660,6 @@ export function matchesStructuredTaskFilter(
   }
   if (filter.dates?.some((clause) => !matchesDateClause(task, clause))) return false;
   if (filter.relations?.some((clause) => !matchesRelationClause(task, clause))) return false;
+  if (filter.customFields?.some((clause) => !matchesCustomFieldClause(task, clause))) return false;
   return true;
 }

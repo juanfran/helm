@@ -58,6 +58,36 @@ export const savedViews = sqliteTable(
   ],
 );
 
+export const customFieldDefinitions = sqliteTable(
+  "custom_field_definitions",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id),
+    fieldKey: text("field_key").notNull(),
+    type: text("type", {
+      enum: ["text", "number", "boolean", "date", "single_select"],
+    }).notNull(),
+    validationJson: text("validation_json").notNull().default("{}"),
+    defaultValueJson: text("default_value_json"),
+    displayLabel: text("display_label").notNull(),
+    description: text("description").notNull().default(""),
+    position: integer("position").notNull().default(0),
+    retiredAt: text("retired_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("custom_field_definitions_project_key_unique").on(table.projectId, table.fieldKey),
+    index("custom_field_definitions_project_position_index").on(
+      table.projectId,
+      table.retiredAt,
+      table.position,
+    ),
+  ],
+);
+
 export const tasks = sqliteTable(
   "tasks",
   {
@@ -84,6 +114,7 @@ export const tasks = sqliteTable(
     acceptanceCriteria: text("acceptance_criteria").notNull(),
     agentContext: text("agent_context").notNull(),
     checklistJson: text("checklist_json").notNull(),
+    reviewModeOverride: text("review_mode_override", { enum: ["required", "direct"] }),
     reviewAttemptId: text("review_attempt_id"),
     cancelledFromLifecycle: text("cancelled_from_lifecycle", {
       enum: ["backlog", "ready", "in_progress", "review"],
@@ -106,6 +137,24 @@ export const tasks = sqliteTable(
       table.dueAt,
       table.sequence,
     ),
+  ],
+);
+
+export const taskCustomFieldValues = sqliteTable(
+  "task_custom_field_values",
+  {
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id),
+    definitionId: text("definition_id")
+      .notNull()
+      .references(() => customFieldDefinitions.id),
+    valueJson: text("value_json").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.taskId, table.definitionId] }),
+    index("task_custom_field_values_definition_index").on(table.definitionId),
   ],
 );
 
@@ -145,6 +194,7 @@ export const tags = sqliteTable(
     description: text("description").notNull(),
     color: text("color").notNull(),
     exclusiveGroup: text("exclusive_group"),
+    reviewModeOverride: text("review_mode_override", { enum: ["required", "direct"] }),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
@@ -408,7 +458,9 @@ export const idempotencyRecords = sqliteTable("idempotency_records", {
 export const schema = {
   projects,
   savedViews,
+  customFieldDefinitions,
   tasks,
+  taskCustomFieldValues,
   tags,
   taskTags,
   taskCapabilityRequirements,

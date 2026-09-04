@@ -13,11 +13,13 @@ import {
   compiledBulkTaskPreviewSchema,
   compiledExecuteBulkTasksInputSchema,
   executeBulkTasksInputSchema,
+  projectBulkTaskCreateCustomFields,
   projectBulkTaskUpdate,
   validateBulkTaskCreateItem,
   validateBulkTaskCreateParent,
   validateBulkTaskCreateTagDefinitions,
 } from "./bulk-tasks";
+import { customFieldDefinitionSchema, type CustomFieldDefinition } from "./customization";
 import { taskSchema, type Task, type TaskTag } from "./tasks";
 
 const frontendTag: TaskTag = {
@@ -26,6 +28,7 @@ const frontendTag: TaskTag = {
   description: "Browser work",
   color: "#2563eb",
   exclusiveGroup: "area",
+  reviewModeOverride: null,
 };
 
 const backendTag: TaskTag = {
@@ -34,7 +37,31 @@ const backendTag: TaskTag = {
   description: "Server work",
   color: "#16a34a",
   exclusiveGroup: "area",
+  reviewModeOverride: null,
 };
+
+function numberField(
+  overrides: Partial<{
+    id: string;
+    key: string;
+    retiredAt: string | null;
+  }> = {},
+): CustomFieldDefinition {
+  return customFieldDefinitionSchema.parse({
+    id: "field-estimate",
+    projectId: "project-1",
+    key: "estimate",
+    type: "number",
+    validation: { min: 0, max: 10, integer: true },
+    defaultValue: { type: "number", value: 3 },
+    display: { label: "Estimate", description: "Whole points" },
+    position: 0,
+    retiredAt: null,
+    createdAt: "2026-09-04T12:00:00.000Z",
+    updatedAt: "2026-09-04T12:00:00.000Z",
+    ...overrides,
+  });
+}
 
 function task(overrides: Partial<Task> = {}) {
   return taskSchema.parse({
@@ -181,6 +208,205 @@ describe("bulk task contract", () => {
         patch: { tags: { add: ["tag-a"], remove: ["tag-a"] } },
       }),
     ).toThrow(/cannot be added and removed/);
+    expect(() =>
+      bulkTaskIntentSchema.parse({
+        ...base,
+        patch: { reviewModeOverride: "direct" },
+      }),
+    ).toThrow();
+    expect(() =>
+      bulkTaskIntentSchema.parse({
+        ...base,
+        patch: {
+          customFields: {
+            set: [
+              {
+                fieldId: "field-estimate",
+                value: { type: "number", value: 5 },
+              },
+            ],
+            clear: ["field-estimate"],
+          },
+        },
+      }),
+    ).toThrow(/cannot be set and cleared/);
+  });
+
+  it("canonicalizes and projects typed custom-field set and clear changes", () => {
+    const definition = numberField();
+    const current = task({
+      customFields: [{ definition, value: definition.defaultValue, source: "default" }],
+    });
+    const intent = canonicalizeBulkTaskIntent({
+      ...updateIntent(),
+      patch: {
+        customFields: {
+          set: [
+            {
+              fieldId: definition.id,
+              value: { type: "number", value: 5 },
+            },
+          ],
+          clear: [],
+        },
+      },
+    });
+    if (intent.kind !== "update") throw new Error("Expected an update intent.");
+
+    const setProjection = projectBulkTaskUpdate(current, intent.patch, [], [definition]);
+    expect(setProjection.failures).toEqual([]);
+    expect(setProjection.projected.customFields).toMatchObject([
+      {
+        definition: { id: definition.id },
+        value: { type: "number", value: 5 },
+        source: "explicit",
+      },
+    ]);
+    expect(setProjection.changes).toEqual([
+      {
+        field: "customFields",
+        before: {
+          [definition.id]: {
+            value: { type: "number", value: 3 },
+            source: "default",
+          },
+        },
+        after: {
+          [definition.id]: {
+            value: { type: "number", value: 5 },
+            source: "explicit",
+          },
+        },
+      },
+    ]);
+
+    const explicit = task({
+      customFields: [...setProjection.projected.customFields],
+    });
+    const clearProjection = projectBulkTaskUpdate(
+      explicit,
+      { customFields: { set: [], clear: [definition.id] } },
+      [],
+      [definition],
+    );
+    expect(clearProjection.projected.customFields).toMatchObject([
+      {
+        value: { type: "number", value: 3 },
+        source: "default",
+      },
+    ]);
+    expect(clearProjection.changes.map(({ field }) => field)).toEqual(["customFields"]);
+  });
+
+  it("validates missing, retired, mismatched, and rule-invalid custom fields", () => {
+    const definition = numberField();
+    const retired = numberField({
+      id: "field-retired",
+      key: "retired_estimate",
+      retiredAt: "2026-09-04T13:00:00.000Z",
+    });
+    const projection = projectBulkTaskUpdate(
+      task(),
+      {
+        customFields: {
+          set: [
+            {
+              fieldId: "field-missing",
+              value: { type: "number", value: 1 },
+            },
+            {
+              fieldId: retired.id,
+              value: { type: "number", value: 1 },
+            },
+            {
+              fieldId: definition.id,
+              value: { type: "number", value: 2.5 },
+            },
+          ],
+          clear: [],
+        },
+      },
+      [],
+      [definition, retired],
+    );
+    expect(projection.failures.map(({ code }) => code)).toEqual([
+      "custom_field_not_found",
+      "custom_field_retired",
+      "custom_field_invalid_value",
+    ]);
+    expect(projection.failures[2]?.message).toMatch(/whole number/);
+
+    const mismatch = projectBulkTaskUpdate(
+      task(),
+      {
+        customFields: {
+          set: [
+            {
+              fieldId: definition.id,
+              value: { type: "text", value: "five" },
+            },
+          ],
+          clear: [],
+        },
+      },
+      [],
+      [definition],
+    );
+    expect(mismatch.failures).toMatchObject([
+      {
+        code: "custom_field_invalid_value",
+        message: expect.stringMatching(/number value/),
+      },
+    ]);
+  });
+
+  it("projects defaults for bulk creates while persisting only valid explicit values", () => {
+    const definition = numberField();
+    const valid = bulkTaskCreateItemSchema.parse({
+      clientId: "draft-custom",
+      task: {
+        parentTaskId: null,
+        lifecycle: "backlog",
+        title: "Custom field task",
+        description: emptyRichTextDocument,
+        expectedOutcome: "",
+        acceptanceCriteria: "",
+        agentContext: "",
+        checklist: [],
+        referencedPaths: [],
+        customFields: [
+          {
+            fieldId: definition.id,
+            value: { type: "number", value: 7 },
+          },
+        ],
+      },
+    });
+    expect(projectBulkTaskCreateCustomFields(valid, [definition])).toMatchObject({
+      failures: [],
+      projected: [
+        {
+          value: { type: "number", value: 7 },
+          source: "explicit",
+        },
+      ],
+    });
+
+    const invalid = bulkTaskCreateItemSchema.parse({
+      ...valid,
+      task: {
+        ...valid.task,
+        customFields: [
+          {
+            fieldId: definition.id,
+            value: { type: "number", value: 11 },
+          },
+        ],
+      },
+    });
+    expect(projectBulkTaskCreateCustomFields(invalid, [definition]).failures).toMatchObject([
+      { code: "custom_field_invalid_value", targetKey: invalid.clientId },
+    ]);
   });
 
   it("requires explicit removal before adding another exclusive-group tag", () => {
@@ -235,6 +461,7 @@ describe("bulk task contract", () => {
           agentContext: "",
           checklist: [],
           referencedPaths: [],
+          customFields: [],
         },
       }),
     ).toMatchObject([{ code: "task_not_prepared", targetKey: "draft-1" }]);

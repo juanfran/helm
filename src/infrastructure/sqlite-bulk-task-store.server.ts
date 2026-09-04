@@ -21,12 +21,14 @@ import {
   type BulkTaskStore,
 } from "../application/bulk-tasks";
 import {
+  customFieldDefinitions,
   events,
   idempotencyRecords,
   projects,
   schema,
   tags,
   taskCapabilityRequirements,
+  taskCustomFieldValues,
   taskReferencedPaths,
   tasks,
   taskTags,
@@ -35,15 +37,18 @@ import { importanceForEventKind, normalizeEventChangeHints } from "../domain/act
 import {
   MAX_BULK_UPDATE_TARGETS,
   bulkTaskExecutionResultSchema,
+  bulkTaskCustomFieldsJson,
   bulkTaskPreviewSchema,
   canonicalBulkTaskIntentJson,
   canonicalBulkTaskPreviewStateJson,
   canonicalizeBulkTaskIntent,
+  projectBulkTaskCreateCustomFields,
   projectBulkTaskUpdate,
   validateBulkTaskCreateItem,
   validateBulkTaskCreateParent,
   validateBulkTaskCreateTagDefinitions,
   type BulkTaskCreateItem,
+  type BulkTaskCustomFieldChanges,
   type BulkTaskExecutionResult,
   type BulkTaskIntent,
   type BulkTaskPreview,
@@ -52,6 +57,12 @@ import {
   type BulkTaskValidationFailure,
   type ExecuteBulkTasksInput,
 } from "../domain/bulk-tasks";
+import {
+  customFieldDefinitionSchema,
+  resolveReviewPolicy,
+  type CustomFieldDefinition,
+  type TaskCustomFieldAssignment,
+} from "../domain/customization";
 import { stableCanonicalJson } from "../domain/task-filters";
 import {
   normalizeCapabilities,
@@ -72,11 +83,13 @@ import { resolveSqliteTaskQueryItems } from "./sqlite-task-query-store.server";
 type DrizzleDatabase = ReturnType<typeof drizzle<typeof schema>>;
 type TaskRow = typeof tasks.$inferSelect;
 type TagRow = typeof tags.$inferSelect;
+type CustomFieldDefinitionRow = typeof customFieldDefinitions.$inferSelect;
 
 type CreatePlan = {
   readonly item: BulkTaskCreateItem;
   readonly sequence: number;
   readonly referencedPaths: readonly string[];
+  readonly customFields: readonly TaskCustomFieldAssignment[];
   readonly failures: readonly BulkTaskValidationFailure[];
 };
 
@@ -141,7 +154,27 @@ function taskTag(row: TagRow): TaskTag {
     description: row.description,
     color: row.color,
     exclusiveGroup: row.exclusiveGroup,
+    reviewModeOverride: row.reviewModeOverride,
   };
+}
+
+function customFieldDefinition(row: CustomFieldDefinitionRow): CustomFieldDefinition {
+  return customFieldDefinitionSchema.parse({
+    id: row.id,
+    projectId: row.projectId,
+    key: row.fieldKey,
+    type: row.type,
+    validation: JSON.parse(row.validationJson),
+    defaultValue: row.defaultValueJson === null ? null : JSON.parse(row.defaultValueJson),
+    display: {
+      label: row.displayLabel,
+      description: row.description,
+    },
+    position: row.position,
+    retiredAt: row.retiredAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
 }
 
 function projectRow(db: DrizzleDatabase, projectId: string) {
@@ -154,6 +187,15 @@ function projectTags(db: DrizzleDatabase, projectId: string) {
     .from(tags)
     .where(eq(tags.projectId, projectId))
     .orderBy(asc(tags.name), asc(tags.id))
+    .all();
+}
+
+function projectCustomFields(db: DrizzleDatabase, projectId: string) {
+  return db
+    .select()
+    .from(customFieldDefinitions)
+    .where(eq(customFieldDefinitions.projectId, projectId))
+    .orderBy(asc(customFieldDefinitions.position), asc(customFieldDefinitions.id))
     .all();
 }
 
@@ -187,12 +229,13 @@ function relevantTagHash(
     );
     const rows = tagRows
       .filter((row) => names.has(row.name))
-      .map(({ id, name, description, color, exclusiveGroup, updatedAt }) => ({
+      .map(({ id, name, description, color, exclusiveGroup, reviewModeOverride, updatedAt }) => ({
         id,
         name,
         description,
         color,
         exclusiveGroup,
+        reviewModeOverride,
         updatedAt,
       }));
     const found = new Set(rows.map(({ name }) => name));
@@ -213,26 +256,33 @@ function relevantTagHash(
     stableCanonicalJson(
       tagRows
         .filter(({ id }) => relevantIds.has(id))
-        .map(({ id, name, description, color, exclusiveGroup, updatedAt }) => ({
+        .map(({ id, name, description, color, exclusiveGroup, reviewModeOverride, updatedAt }) => ({
           id,
           name,
           description,
           color,
           exclusiveGroup,
+          reviewModeOverride,
           updatedAt,
         })),
     ),
   );
 }
 
+function relevantCustomFieldHash(rows: readonly CustomFieldDefinitionRow[]) {
+  return hash(stableCanonicalJson(rows.map(customFieldDefinition)));
+}
+
 function relevantStateHash(
   tagDefinitionsHash: string,
+  customFieldDefinitionsHash: string,
   targets: readonly BulkTaskPreviewTarget[],
   failures: readonly BulkTaskValidationFailure[],
 ) {
   return hash(
     stableCanonicalJson({
       tagDefinitionsHash,
+      customFieldDefinitionsHash,
       outcome: {
         targets: targets.map(({ targetKey, changed, changes, failures: targetFailures }) => ({
           targetKey,
@@ -256,6 +306,8 @@ function createPreviewAnalysis(
   const sequenceBase = currentSequence(db, intent.projectId);
   const tagRows = projectTags(db, intent.projectId);
   const tagDefinitions = tagRows.map(taskTag);
+  const customFieldRows = projectCustomFields(db, intent.projectId);
+  const customDefinitions = customFieldRows.map(customFieldDefinition);
   const tagFailures = validateBulkTaskCreateTagDefinitions(intent.items, tagDefinitions);
   const parentIds = [
     ...new Set(
@@ -267,9 +319,11 @@ function createPreviewAnalysis(
     ? []
     : [validationFailure("wrong_project", "The requested project does not exist.")];
   const createPlans: CreatePlan[] = intent.items.map((item, index) => {
+    const customFieldProjection = projectBulkTaskCreateCustomFields(item, customDefinitions);
     const failures = [
       ...validateBulkTaskCreateItem(item),
       ...tagFailures.filter(({ targetKey }) => targetKey === item.clientId),
+      ...customFieldProjection.failures,
     ];
     const parentFailure = validateBulkTaskCreateParent(
       item,
@@ -304,6 +358,7 @@ function createPreviewAnalysis(
       item,
       sequence: sequenceBase + index + 1,
       referencedPaths,
+      customFields: customFieldProjection.projected,
       failures,
     };
   });
@@ -334,6 +389,7 @@ function createPreviewAnalysis(
             parentTaskId: item.task.parentTaskId,
             tags: (item.task.tags ?? []).map(({ name }) => name).toSorted(),
             requiredCapabilities: normalizeCapabilities(item.task.requiredCapabilities),
+            customFields: bulkTaskCustomFieldsJson(plan.customFields),
           },
         },
       ],
@@ -363,6 +419,7 @@ function createPreviewAnalysis(
       })),
   ];
   const intentHash = hash(canonicalBulkTaskIntentJson(intent));
+  const customFieldDefinitionsHash = relevantCustomFieldHash(customFieldRows);
   const stateHash = hash(
     canonicalBulkTaskPreviewStateJson({
       schemaVersion: 1,
@@ -375,9 +432,11 @@ function createPreviewAnalysis(
       targets: stateTargets,
       tagDefinitionsHash: relevantStateHash(
         relevantTagHash(intent, selectedTasks, tagRows),
+        customFieldDefinitionsHash,
         targets,
         topFailures,
       ),
+      customFieldDefinitionsHash,
       sequenceBase,
     }),
   );
@@ -451,6 +510,8 @@ function updatePreviewAnalysis(
   const project = projectRow(db, intent.projectId);
   const tagRows = projectTags(db, intent.projectId);
   const tagDefinitions = tagRows.map(taskTag);
+  const customFieldRows = projectCustomFields(db, intent.projectId);
+  const customDefinitions = customFieldRows.map(customFieldDefinition);
   const selection = updateSelection(database, db, intent, context);
   const selectedById = new Map(selection.selected.map((task) => [task.id, task]));
   const topFailures: BulkTaskValidationFailure[] = [];
@@ -472,7 +533,12 @@ function updatePreviewAnalysis(
     for (const taskId of selection.requestedIds) {
       const task = selectedById.get(taskId);
       if (task) {
-        const projection = projectBulkTaskUpdate(task, intent.patch, tagDefinitions);
+        const projection = projectBulkTaskUpdate(
+          task,
+          intent.patch,
+          tagDefinitions,
+          customDefinitions,
+        );
         updatePlans.push({ task, projection });
         const changed = projection.failures.length === 0 && projection.changes.length > 0;
         targets.push({
@@ -534,6 +600,7 @@ function updatePreviewAnalysis(
     };
   });
   const intentHash = hash(canonicalBulkTaskIntentJson(intent));
+  const customFieldDefinitionsHash = relevantCustomFieldHash(customFieldRows);
   const stateHash = hash(
     canonicalBulkTaskPreviewStateJson({
       schemaVersion: 1,
@@ -546,9 +613,11 @@ function updatePreviewAnalysis(
       targets: stateTargets,
       tagDefinitionsHash: relevantStateHash(
         relevantTagHash(intent, selection.selected, tagRows),
+        customFieldDefinitionsHash,
         targets,
         topFailures,
       ),
+      customFieldDefinitionsHash,
       sequenceBase: null,
     }),
   );
@@ -715,11 +784,14 @@ function replaceCreateAssignments(
   tagInputs: readonly TagInput[],
   capabilities: readonly string[],
   referencedPaths: readonly string[],
+  customFields: readonly BulkTaskCreateItem["task"]["customFields"][number][],
   occurredAt: string,
 ) {
+  const assignedTags: TagRow[] = [];
   for (const tagInput of tagInputs) {
     const tag = resolveOrCreateTag(db, projectId, tagInput, occurredAt);
     db.insert(taskTags).values({ taskId, tagId: tag.id }).run();
+    assignedTags.push(tag);
   }
   for (const capability of normalizeCapabilities(capabilities)) {
     db.insert(taskCapabilityRequirements).values({ taskId, capability }).run();
@@ -727,6 +799,17 @@ function replaceCreateAssignments(
   for (const path of [...new Set(referencedPaths)].toSorted()) {
     db.insert(taskReferencedPaths).values({ taskId, path }).run();
   }
+  for (const { fieldId, value } of customFields) {
+    db.insert(taskCustomFieldValues)
+      .values({
+        taskId,
+        definitionId: fieldId,
+        valueJson: JSON.stringify(value),
+        updatedAt: occurredAt,
+      })
+      .run();
+  }
+  return assignedTags;
 }
 
 function executeCreates(
@@ -749,6 +832,8 @@ function executeCreates(
     occurredAt,
   );
   const items: BulkTaskExecutionResult["items"][number][] = [];
+  const project = projectRow(db, analysis.intent.projectId);
+  if (!project) throw new Error("The bulk-create project does not exist.");
 
   for (const { plan, taskId } of generated) {
     const { task } = plan.item;
@@ -780,15 +865,27 @@ function executeCreates(
         updatedAt: occurredAt,
       })
       .run();
-    replaceCreateAssignments(
+    const assignedTags = replaceCreateAssignments(
       db,
       taskId,
       analysis.intent.projectId,
       task.tags ?? [],
       task.requiredCapabilities ?? [],
       plan.referencedPaths,
+      task.customFields,
       occurredAt,
     );
+    const reviewPolicy = resolveReviewPolicy({
+      projectId: project.id,
+      projectMode: project.reviewMode,
+      taskId,
+      taskOverride: null,
+      tags: assignedTags.map(({ id, name, reviewModeOverride }) => ({
+        id,
+        name,
+        reviewModeOverride,
+      })),
+    });
     appendEvent(db, {
       projectId: analysis.intent.projectId,
       kind: "task.created",
@@ -805,6 +902,11 @@ function executeCreates(
         lifecycle: task.lifecycle,
         priority,
         parentTaskId: task.parentTaskId,
+        tags: assignedTags.map(taskTag),
+        requiredCapabilities: normalizeCapabilities(task.requiredCapabilities ?? []),
+        customFields: task.customFields,
+        reviewModeOverride: null,
+        reviewPolicy,
         referencedPaths: [...plan.referencedPaths],
       },
       taskIds: [taskId],
@@ -838,6 +940,8 @@ function replaceUpdateAssignments(
   projection: BulkTaskUpdateProjection,
   changeTags: boolean,
   changeCapabilities: boolean,
+  customFields: BulkTaskCustomFieldChanges | undefined,
+  occurredAt: string,
 ) {
   if (changeTags) {
     db.delete(taskTags).where(eq(taskTags.taskId, taskId)).run();
@@ -851,6 +955,36 @@ function replaceUpdateAssignments(
       .run();
     for (const capability of projection.projected.requiredCapabilities) {
       db.insert(taskCapabilityRequirements).values({ taskId, capability }).run();
+    }
+  }
+  if (customFields) {
+    for (const definitionId of customFields.clear) {
+      db.delete(taskCustomFieldValues)
+        .where(
+          and(
+            eq(taskCustomFieldValues.taskId, taskId),
+            eq(taskCustomFieldValues.definitionId, definitionId),
+          ),
+        )
+        .run();
+    }
+    for (const { fieldId, value } of customFields.set) {
+      db.delete(taskCustomFieldValues)
+        .where(
+          and(
+            eq(taskCustomFieldValues.taskId, taskId),
+            eq(taskCustomFieldValues.definitionId, fieldId),
+          ),
+        )
+        .run();
+      db.insert(taskCustomFieldValues)
+        .values({
+          taskId,
+          definitionId: fieldId,
+          valueJson: JSON.stringify(value),
+          updatedAt: occurredAt,
+        })
+        .run();
     }
   }
 }
@@ -905,6 +1039,8 @@ function executeUpdates(
         projection,
         Boolean(analysis.intent.patch.tags),
         Boolean(analysis.intent.patch.capabilities),
+        analysis.intent.patch.customFields,
+        occurredAt,
       );
       appendEvent(db, {
         projectId: analysis.intent.projectId,

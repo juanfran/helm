@@ -1,6 +1,10 @@
 import { Effect } from "effect";
 
 import {
+  compiledSetTaskReviewModeOverrideInputSchema,
+  type SetTaskReviewModeOverrideInput,
+} from "../domain/customization";
+import {
   compiledApproveTaskReviewInputSchema,
   compiledArchiveTaskInputSchema,
   compiledCancelTaskInputSchema,
@@ -86,6 +90,11 @@ export interface TaskStore {
   ): Effect.Effect<Task, TaskCommandError>;
   prepare(
     input: PrepareTaskInput,
+    actor: Actor,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<Task, TaskCommandError>;
+  setReviewModeOverride(
+    input: SetTaskReviewModeOverrideInput,
     actor: Actor,
     context: TaskEvaluationContext,
   ): Effect.Effect<Task, TaskCommandError>;
@@ -299,7 +308,7 @@ export function updateTaskPlanning(
   return Effect.flatMap(
     parseInput(() => compiledUpdateTaskPlanningInputSchema.parse(input)),
     (parsed) =>
-      Effect.flatMap(validateTagConstraints(parsed), () =>
+      Effect.flatMap(Effect.all([validateTagConstraints(parsed)]), () =>
         services.store.updatePlanning(
           parsed,
           actor,
@@ -347,6 +356,35 @@ function requireHuman(actor: Actor) {
           message: "Only the local human can perform this task transition.",
         }),
       );
+}
+
+function requireLocalHuman(actor: Actor) {
+  return actor.type === "human" && actor.id === "local-human"
+    ? Effect.void
+    : Effect.fail(
+        new TaskAuthorizationError({
+          message: "Only the local human can change a task review policy override.",
+        }),
+      );
+}
+
+export function setTaskReviewModeOverride(
+  input: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
+  return Effect.flatMap(
+    parseInput(() => compiledSetTaskReviewModeOverrideInputSchema.parse(input)),
+    (parsed) =>
+      Effect.flatMap(requireLocalHuman(actor), () =>
+        services.store.setReviewModeOverride(
+          parsed,
+          actor,
+          evaluationContext(services, agentCapabilities),
+        ),
+      ),
+  );
 }
 
 export function approveTaskReview(

@@ -9,6 +9,7 @@ import {
   TaskAlreadyArchivedError,
   TaskAuthorizationError,
   TaskClaimUnavailableError,
+  TaskCustomFieldError,
   TaskDiscoveryCursorStaleError,
   TaskIdempotencyConflictError,
   TaskLifecycleError,
@@ -36,6 +37,7 @@ import {
   agentRuns,
   activityEntries,
   attempts,
+  customFieldDefinitions,
   events,
   idempotencyRecords,
   leases,
@@ -44,11 +46,21 @@ import {
   schema,
   tags,
   taskCapabilityRequirements,
+  taskCustomFieldValues,
   taskReferencedPaths,
   taskRelations,
   tasks,
   taskTags,
 } from "../db/schema";
+import {
+  customFieldDefinitionSchema,
+  customFieldValueSchema,
+  resolveReviewPolicy,
+  taskCustomFieldAssignmentSchema,
+  validateCustomFieldValue,
+  type CustomFieldDefinition,
+  type SetTaskReviewModeOverrideInput,
+} from "../domain/customization";
 import {
   activityEntrySchema,
   importanceForEventKind,
@@ -106,6 +118,7 @@ import {
   type TaskLeaseGrant,
   type TaskLeaseMutationResult,
   type TaskRelation,
+  type TaskCustomFieldValueInput,
   type UpdateTaskPlanningInput,
 } from "../domain/tasks";
 import type { JsonValue } from "../domain/rich-text";
@@ -387,6 +400,10 @@ function candidateFromTask(
           downstreamRelations: task.downstreamRelations,
         }
       : {}),
+    ...(selectedFields.has("customFields") ? { customFields: task.customFields } : {}),
+    ...(selectedFields.has("reviewPolicy") && task.reviewPolicy
+      ? { reviewPolicy: task.reviewPolicy }
+      : {}),
     ...(referencedPaths ? { referencedPaths } : {}),
     ...(selectedFields.has("timestamps")
       ? { createdAt: task.createdAt, updatedAt: task.updatedAt }
@@ -513,6 +530,168 @@ function activityEntriesForTask(db: DatabaseSession, taskId: string) {
     );
 }
 
+function customFieldDefinitionFromRow(
+  row: typeof customFieldDefinitions.$inferSelect,
+): CustomFieldDefinition {
+  return customFieldDefinitionSchema.parse({
+    id: row.id,
+    projectId: row.projectId,
+    key: row.fieldKey,
+    type: row.type,
+    validation: JSON.parse(row.validationJson),
+    defaultValue: row.defaultValueJson === null ? null : JSON.parse(row.defaultValueJson),
+    display: {
+      label: row.displayLabel,
+      description: row.description,
+    },
+    position: row.position,
+    retiredAt: row.retiredAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
+}
+
+function customFieldAssignmentsForTask(db: DatabaseSession, row: TaskRow) {
+  const definitions = db
+    .select()
+    .from(customFieldDefinitions)
+    .where(eq(customFieldDefinitions.projectId, row.projectId))
+    .orderBy(asc(customFieldDefinitions.position), asc(customFieldDefinitions.id))
+    .all()
+    .map(customFieldDefinitionFromRow);
+  const explicitValues = new Map(
+    db
+      .select()
+      .from(taskCustomFieldValues)
+      .where(eq(taskCustomFieldValues.taskId, row.id))
+      .all()
+      .map((entry) => [
+        entry.definitionId,
+        customFieldValueSchema.parse(JSON.parse(entry.valueJson)),
+      ]),
+  );
+
+  return definitions
+    .filter(
+      (definition) =>
+        definition.retiredAt === null ||
+        explicitValues.has(definition.id) ||
+        Date.parse(row.createdAt) <= Date.parse(definition.retiredAt),
+    )
+    .map((definition) => {
+      const explicit = explicitValues.get(definition.id);
+      const value = explicit ?? definition.defaultValue;
+      return taskCustomFieldAssignmentSchema.parse({
+        definition,
+        value,
+        source: explicit ? "explicit" : value === null ? "unset" : "default",
+      });
+    });
+}
+
+function reviewPolicyForTask(
+  db: DatabaseSession,
+  row: TaskRow,
+  assignedTags: readonly (typeof tags.$inferSelect)[],
+) {
+  const project = db
+    .select({ reviewMode: projects.reviewMode })
+    .from(projects)
+    .where(eq(projects.id, row.projectId))
+    .limit(1)
+    .get();
+  if (!project) throw new Error("The task project does not exist.");
+  return resolveReviewPolicy({
+    projectId: row.projectId,
+    projectMode: projectReviewModeSchema.parse(project.reviewMode),
+    taskId: row.id,
+    taskOverride: row.reviewModeOverride,
+    tags: assignedTags.map((tag) => ({
+      id: tag.id,
+      name: tag.name,
+      reviewModeOverride: tag.reviewModeOverride,
+    })),
+  });
+}
+
+function replaceCustomFieldValues(
+  db: DatabaseSession,
+  taskId: string,
+  projectId: string,
+  values: readonly TaskCustomFieldValueInput[],
+  now: string,
+) {
+  for (const entry of values) {
+    const row = db
+      .select()
+      .from(customFieldDefinitions)
+      .where(eq(customFieldDefinitions.id, entry.fieldId))
+      .limit(1)
+      .get();
+    if (!row) {
+      throw new TaskCustomFieldError({
+        taskId,
+        fieldId: entry.fieldId,
+        reason: "not_found",
+        issues: [],
+        message: `Custom field ${entry.fieldId} does not exist.`,
+      });
+    }
+    if (row.projectId !== projectId) {
+      throw new TaskCustomFieldError({
+        taskId,
+        fieldId: entry.fieldId,
+        reason: "wrong_project",
+        issues: [],
+        message: `Custom field ${entry.fieldId} does not belong to this task's project.`,
+      });
+    }
+    const definition = customFieldDefinitionFromRow(row);
+    if (definition.retiredAt !== null) {
+      throw new TaskCustomFieldError({
+        taskId,
+        fieldId: entry.fieldId,
+        reason: "retired",
+        issues: [],
+        message: `Custom field ${definition.display.label} is retired and read-only.`,
+      });
+    }
+    if (entry.value === null) {
+      db.delete(taskCustomFieldValues)
+        .where(
+          and(
+            eq(taskCustomFieldValues.taskId, taskId),
+            eq(taskCustomFieldValues.definitionId, entry.fieldId),
+          ),
+        )
+        .run();
+      continue;
+    }
+    const issues = validateCustomFieldValue(definition, entry.value);
+    if (issues.length > 0) {
+      throw new TaskCustomFieldError({
+        taskId,
+        fieldId: entry.fieldId,
+        reason: "invalid_value",
+        issues: issues.map((issue) => issue.message),
+        message: issues.map((issue) => issue.message).join(" "),
+      });
+    }
+    db.insert(taskCustomFieldValues)
+      .values({
+        taskId,
+        definitionId: entry.fieldId,
+        valueJson: JSON.stringify(entry.value),
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [taskCustomFieldValues.taskId, taskCustomFieldValues.definitionId],
+        set: { valueJson: JSON.stringify(entry.value), updatedAt: now },
+      })
+      .run();
+  }
+}
+
 function taskFromRow(db: DatabaseSession, row: TaskRow, context?: TaskEvaluationContext): Task {
   const { upstreamRelations, downstreamRelations } = relationsForTask(db, row.id);
   const blockingTaskIds = incompleteBlockingDependencies(db, row.id).map((task) => task.id);
@@ -524,6 +703,8 @@ function taskFromRow(db: DatabaseSession, row: TaskRow, context?: TaskEvaluation
     .orderBy(asc(tags.name))
     .all()
     .map((entry) => entry.tag);
+  const parsedTags = assignedTags.map((tag) => tagSchema.parse(tag));
+  const reviewPolicy = reviewPolicyForTask(db, row, assignedTags);
   const requiredCapabilities = db
     .select()
     .from(taskCapabilityRequirements)
@@ -545,7 +726,10 @@ function taskFromRow(db: DatabaseSession, row: TaskRow, context?: TaskEvaluation
     notBefore: row.notBefore,
     dueAt: row.dueAt,
     size: row.size,
-    tags: assignedTags,
+    tags: parsedTags,
+    customFields: customFieldAssignmentsForTask(db, row),
+    reviewModeOverride: row.reviewModeOverride,
+    reviewPolicy,
     requiredCapabilities,
     referencedPaths: referencedPathsForTask(db, row.id),
     claim: context ? activeClaimForTask(db, row.id, context.now) : null,
@@ -622,6 +806,7 @@ function replaceTagAssignments(
       description: tag.description,
       color: tag.color.toLocaleLowerCase("en-US"),
       exclusiveGroup: tag.exclusiveGroup ?? null,
+      reviewModeOverride: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -1115,6 +1300,20 @@ function taskContextFromInput(db: DatabaseSession, input: TaskContextQuery): Tas
     acceptanceCriteria: task.acceptanceCriteria,
     agentContext: task.agentContext,
     checklist: task.checklist,
+    customFields: task.customFields,
+    reviewPolicy:
+      task.reviewPolicy ??
+      reviewPolicyForTask(
+        db,
+        row,
+        db
+          .select({ tag: tags })
+          .from(taskTags)
+          .innerJoin(tags, eq(taskTags.tagId, tags.id))
+          .where(eq(taskTags.taskId, row.id))
+          .all()
+          .map(({ tag }) => tag),
+      ),
     relations: {
       upstream: task.upstreamRelations,
       downstream: task.downstreamRelations,
@@ -1154,6 +1353,7 @@ function commandError(error: unknown): TaskCommandError {
     error instanceof TaskAlreadyArchivedError ||
     error instanceof TaskAuthorizationError ||
     error instanceof TaskClaimUnavailableError ||
+    error instanceof TaskCustomFieldError ||
     error instanceof TaskDiscoveryCursorStaleError ||
     error instanceof TaskIdempotencyConflictError ||
     error instanceof TaskLifecycleError ||
@@ -2219,6 +2419,9 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
               dueAt: planning.dueAt,
               size: planning.size,
               tags: [],
+              customFields: [],
+              reviewModeOverride: null,
+              reviewPolicy: null,
               requiredCapabilities: [],
               referencedPaths: [],
               claim: null,
@@ -2256,6 +2459,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
                 acceptanceCriteria: task.acceptanceCriteria,
                 agentContext: task.agentContext,
                 checklistJson: JSON.stringify(task.checklist),
+                reviewModeOverride: null,
                 version: task.version,
                 archivedAt: task.archivedAt,
                 createdAt: task.createdAt,
@@ -2265,6 +2469,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
             replaceTagAssignments(tx, task.id, task.projectId, planning.tags, now);
             replaceRequiredCapabilities(tx, task.id, planning.requiredCapabilities);
             replaceReferencedPaths(tx, task.id, referencedPaths);
+            replaceCustomFieldValues(tx, task.id, task.projectId, input.customFields ?? [], now);
             const created = taskFromRow(tx, currentTask(tx, task.id), context);
             recordMutation(tx, input, command, hash, created, actor, {
               kind: "task.created",
@@ -2274,6 +2479,11 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
                 lifecycle: created.lifecycle,
                 priority: created.priority,
                 parentTaskId: created.parentTaskId,
+                tags: created.tags,
+                requiredCapabilities: created.requiredCapabilities,
+                customFields: created.customFields,
+                reviewModeOverride: created.reviewModeOverride,
+                reviewPolicy: created.reviewPolicy,
                 referencedPaths: created.referencedPaths,
               },
             });
@@ -2337,6 +2547,9 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
             if (input.requiredCapabilities) {
               replaceRequiredCapabilities(tx, row.id, input.requiredCapabilities);
             }
+            if (input.customFields) {
+              replaceCustomFieldValues(tx, row.id, row.projectId, input.customFields, now);
+            }
             replaceReferencedPaths(tx, row.id, referencedPaths);
             const task = taskFromRow(tx, currentTask(tx, row.id), context);
             recordMutation(tx, input, command, hash, task, actor, {
@@ -2346,7 +2559,66 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
                 version: task.version,
                 lifecycle: task.lifecycle,
                 priority: task.priority,
+                tags: task.tags,
+                requiredCapabilities: task.requiredCapabilities,
+                customFields: task.customFields,
+                reviewModeOverride: task.reviewModeOverride,
+                reviewPolicy: task.reviewPolicy,
                 referencedPaths: task.referencedPaths,
+              },
+            });
+            return task;
+          }),
+        catch: commandError,
+      });
+    },
+    setReviewModeOverride(
+      input: SetTaskReviewModeOverrideInput,
+      actor: Actor,
+      context: TaskEvaluationContext,
+    ) {
+      return Effect.try({
+        try: () =>
+          db.transaction((tx) => {
+            const command = "task.review_policy.override.set";
+            const hash = inputHash(command, withoutIdempotencyKey(input));
+            const existing = findIdempotentResult(tx, command, input.idempotencyKey, hash, context);
+            if (existing) return existing;
+            const row = currentTask(tx, input.taskId);
+            if (row.projectId !== input.projectId) {
+              throw new TaskNotFoundError({
+                taskId: input.taskId,
+                message: "That task does not belong to the requested project.",
+              });
+            }
+            assertExpectedVersion(row, input.expectedTaskVersion);
+            if (row.archivedAt || (row.lifecycle !== "backlog" && row.lifecycle !== "ready")) {
+              throw new TaskLifecycleError({
+                taskId: row.id,
+                lifecycle: row.lifecycle,
+                message: "Only active backlog or ready tasks can change review policy.",
+              });
+            }
+
+            const now = new Date().toISOString();
+            tx.update(tasks)
+              .set({
+                reviewModeOverride: input.reviewModeOverride,
+                version: row.version + 1,
+                updatedAt: now,
+              })
+              .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
+              .run();
+            const task = taskFromRow(tx, currentTask(tx, row.id), context);
+            recordMutation(tx, input, command, hash, task, actor, {
+              kind: "task.review_policy.override.changed",
+              payload: {
+                previousVersion: row.version,
+                version: task.version,
+                previousReviewModeOverride: row.reviewModeOverride,
+                reviewModeOverride: task.reviewModeOverride,
+                reviewPolicy: task.reviewPolicy,
+                reason: input.reason,
               },
             });
             return task;
@@ -2393,6 +2665,9 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
               .run();
             replaceTagAssignments(tx, row.id, row.projectId, input.tags, now);
             replaceRequiredCapabilities(tx, row.id, input.requiredCapabilities);
+            if (input.customFields) {
+              replaceCustomFieldValues(tx, row.id, row.projectId, input.customFields, now);
+            }
             const task = taskFromRow(tx, currentTask(tx, row.id), context);
             recordMutation(tx, input, command, hash, task, actor, {
               kind: "task.planning.updated",
@@ -2411,6 +2686,9 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
                   exclusiveGroup,
                 })),
                 requiredCapabilities: task.requiredCapabilities,
+                customFields: task.customFields,
+                reviewModeOverride: task.reviewModeOverride,
+                reviewPolicy: task.reviewPolicy,
               },
             });
             return task;
@@ -2455,15 +2733,16 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
                 lease,
                 task: row,
               } = activeAttemptForReport(tx, input, claimant, committedContext);
-              const project = tx
-                .select({ reviewMode: projects.reviewMode })
-                .from(projects)
-                .where(eq(projects.id, row.projectId))
-                .limit(1)
-                .get();
-              if (!project) throw new Error("The task project does not exist.");
-              const reviewMode = projectReviewModeSchema.parse(project.reviewMode);
-              const destination = reviewMode === "required" ? "review" : "done";
+              const assignedTags = tx
+                .select({ tag: tags })
+                .from(taskTags)
+                .innerJoin(tags, eq(taskTags.tagId, tags.id))
+                .where(eq(taskTags.taskId, row.id))
+                .all()
+                .map(({ tag }) => tag);
+              const policy = reviewPolicyForTask(tx, row, assignedTags);
+              const reviewMode = policy.mode;
+              const destination = policy.destination;
               const attemptUpdate = tx
                 .update(attempts)
                 .set({
@@ -2539,6 +2818,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
                   previousVersion: row.version,
                   version: task.version,
                   reviewModeApplied: reviewMode,
+                  reviewPolicy: policy,
                   destination,
                   summary: input.report.resultSummary,
                   changedAreas: input.report.changedAreas,
@@ -2558,7 +2838,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
                 attempt: attemptSummaryFromRow(tx, completedAttempt),
                 claim,
                 event,
-                routing: { reviewMode, destination },
+                routing: { reviewMode, destination, policy },
               });
               recordResultSnapshot(tx, input, command, hash, snapshot, committedContext.now);
               return snapshot;

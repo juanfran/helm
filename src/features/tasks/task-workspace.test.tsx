@@ -34,6 +34,9 @@ const backlog: Task = {
   dueAt: null,
   size: null,
   tags: [],
+  customFields: [],
+  reviewModeOverride: null,
+  reviewPolicy: null,
   requiredCapabilities: [],
   referencedPaths: [],
   claim: null,
@@ -103,6 +106,7 @@ function props(tasks: readonly Task[] = [backlog]) {
     onCreateTask: vi.fn(),
     onPrepareTask: vi.fn(),
     onUpdateTaskPlanning: vi.fn(),
+    onSetTaskReviewModeOverride: vi.fn(),
     onApproveTaskReview: vi.fn(),
     onRequestTaskChanges: vi.fn(),
     onCancelTask: vi.fn(),
@@ -391,6 +395,7 @@ describe("task workspace", () => {
       description: "Browser work",
       color: "#7c3aed",
       exclusiveGroup: "area",
+      reviewModeOverride: null,
     };
     const workspace = { ...props(), tagDefinitions: [canonicalTag] };
     workspace.onUpdateTaskPlanning.mockResolvedValue({ ok: true, task: backlog });
@@ -661,6 +666,77 @@ describe("task workspace", () => {
     expect(await screen.findByRole("alert")).toHaveProperty(
       "textContent",
       "The claim changed before confirmation.",
+    );
+  });
+
+  it("edits typed project fields and shows the effective review-policy explanation", async () => {
+    const user = userEvent.setup();
+    const customized: Task = {
+      ...backlog,
+      customFields: [
+        {
+          definition: {
+            id: "field-owner",
+            projectId: project.id,
+            key: "owner",
+            type: "text",
+            validation: { minLength: 0, maxLength: 80 },
+            defaultValue: { type: "text", value: "unassigned" },
+            display: { label: "Owner", description: "Person responsible for the outcome." },
+            position: 0,
+            retiredAt: null,
+            createdAt: "2026-09-03T10:00:00.000Z",
+            updatedAt: "2026-09-03T10:00:00.000Z",
+          },
+          value: { type: "text", value: "unassigned" },
+          source: "default",
+        },
+      ],
+      reviewPolicy: {
+        mode: "required",
+        destination: "review",
+        source: { level: "project", projectId: project.id },
+        applicableTagRules: [],
+        tagConflict: false,
+        explanation:
+          "Project policy requires human review because no task or tag override applies.",
+      },
+    };
+    const workspace = props([customized]);
+    workspace.onUpdateTaskPlanning.mockResolvedValue({ ok: true, task: customized });
+    workspace.onSetTaskReviewModeOverride.mockResolvedValue({
+      ok: true,
+      task: { ...customized, reviewModeOverride: "direct", version: 2 },
+    });
+    render(<TaskWorkspace {...workspace} />);
+
+    expect(screen.getByRole("region", { name: "Effective review policy" })).toHaveProperty(
+      "textContent",
+      expect.stringContaining("Project policy requires human review"),
+    );
+    const owner = screen.getByRole("textbox", { name: "Custom field: Owner" });
+    expect(owner).toHaveProperty("placeholder", "unassigned");
+    await user.type(owner, "Ada");
+    await user.selectOptions(screen.getByLabelText("Task review policy override"), "direct");
+    await user.type(screen.getByLabelText("Review policy change reason"), "Trusted task route.");
+    await user.click(screen.getByRole("button", { name: "Apply review policy" }));
+    expect(workspace.onSetTaskReviewModeOverride).toHaveBeenCalledWith({
+      projectId: project.id,
+      taskId: customized.id,
+      reviewModeOverride: "direct",
+      expectedTaskVersion: customized.version,
+      reason: "Trusted task route.",
+      idempotencyKey: expect.any(String),
+    });
+    await user.click(screen.getByRole("button", { name: "Save planning" }));
+
+    expect(workspace.onUpdateTaskPlanning).toHaveBeenCalledWith(
+      expect.objectContaining({
+        customFields: [{ fieldId: "field-owner", value: { type: "text", value: "Ada" } }],
+      }),
+    );
+    expect(workspace.onUpdateTaskPlanning).not.toHaveBeenCalledWith(
+      expect.objectContaining({ reviewModeOverride: expect.anything() }),
     );
   });
 

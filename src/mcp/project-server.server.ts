@@ -185,6 +185,14 @@ const taskErrorSchema = z.discriminatedUnion("type", [
     tagName: z.string(),
   }),
   z.object({
+    type: z.literal("TaskCustomFieldError"),
+    message: z.string(),
+    taskId: z.string().optional(),
+    fieldId: z.string(),
+    customFieldReason: z.enum(["not_found", "wrong_project", "retired", "invalid_value"]),
+    issues: z.array(z.string()),
+  }),
+  z.object({
     type: z.literal("TaskPathError"),
     message: z.string(),
     path: z.string(),

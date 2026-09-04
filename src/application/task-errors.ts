@@ -76,6 +76,14 @@ export class TaskTagDefinitionConflictError extends Data.TaggedError(
   readonly message: string;
 }> {}
 
+export class TaskCustomFieldError extends Data.TaggedError("TaskCustomFieldError")<{
+  readonly taskId?: string;
+  readonly fieldId: string;
+  readonly reason: "not_found" | "wrong_project" | "retired" | "invalid_value";
+  readonly issues: readonly string[];
+  readonly message: string;
+}> {}
+
 export class TaskPathError extends Data.TaggedError("TaskPathError")<{
   readonly path: string;
   readonly message: string;
@@ -130,6 +138,7 @@ export type TaskCommandError =
   | TaskIdempotencyConflictError
   | TaskTagConstraintError
   | TaskTagDefinitionConflictError
+  | TaskCustomFieldError
   | TaskPathError
   | TaskDiscoveryCursorStaleError
   | TaskClaimUnavailableError
@@ -147,6 +156,9 @@ export type TaskErrorDto = {
   group?: string;
   tagNames?: readonly string[];
   tagName?: string;
+  fieldId?: string;
+  customFieldReason?: TaskCustomFieldError["reason"];
+  issues?: readonly string[];
   key?: string;
   path?: string;
   cursorRevision?: number;
@@ -227,6 +239,15 @@ export function toTaskErrorDto(error: TaskCommandError): TaskErrorDto {
         type: error["_tag"],
         message: error.message,
         tagName: error.tagName,
+      };
+    case "TaskCustomFieldError":
+      return {
+        type: error["_tag"],
+        message: error.message,
+        taskId: error.taskId,
+        fieldId: error.fieldId,
+        customFieldReason: error.reason,
+        issues: error.issues,
       };
     case "TaskPathError":
       return { type: error["_tag"], message: error.message, path: error.path };

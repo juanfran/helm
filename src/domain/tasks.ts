@@ -3,6 +3,11 @@ import { z } from "zod";
 import { richTextDocumentSchema } from "./rich-text";
 import { activityEntrySchema, manualBlockerSchema, projectEventSchema } from "./activity";
 import { projectReviewModeSchema } from "./projects";
+import {
+  customFieldValueSchema,
+  reviewPolicyResolutionSchema,
+  taskCustomFieldAssignmentSchema,
+} from "./customization";
 
 export {
   emptyRichTextDocument,
@@ -165,6 +170,7 @@ export const tagSchema = z.object({
   description: z.string(),
   color: z.string(),
   exclusiveGroup: z.string().nullable(),
+  reviewModeOverride: projectReviewModeSchema.nullable().default(null),
 });
 export type TaskTag = z.infer<typeof tagSchema>;
 
@@ -193,6 +199,30 @@ const tagAssignmentsSchema = z
         });
       }
       names.add(tag.name);
+    }
+  });
+
+export const taskCustomFieldValueInputSchema = z.strictObject({
+  fieldId: z.string().trim().min(1).max(200),
+  value: customFieldValueSchema.nullable(),
+});
+export type TaskCustomFieldValueInput = z.infer<typeof taskCustomFieldValueInputSchema>;
+
+export const taskCustomFieldValuesInputSchema = z
+  .array(taskCustomFieldValueInputSchema)
+  .max(50)
+  .superRefine((values, context) => {
+    const identifiers = new Set<string>();
+    for (const [index, entry] of values.entries()) {
+      if (identifiers.has(entry.fieldId)) {
+        context.addIssue({
+          code: "custom",
+          message: `Custom field ${entry.fieldId} may only appear once.`,
+          path: [index, "fieldId"],
+          input: entry.fieldId,
+        });
+      }
+      identifiers.add(entry.fieldId);
     }
   });
 
@@ -252,6 +282,9 @@ export const taskSchema = z.object({
   dueAt: taskDateSchema.nullable().default(null),
   size: taskSizeSchema.nullable().default(null),
   tags: z.array(tagSchema).default([]),
+  customFields: z.array(taskCustomFieldAssignmentSchema).default([]),
+  reviewModeOverride: projectReviewModeSchema.nullable().default(null),
+  reviewPolicy: reviewPolicyResolutionSchema.nullable().default(null),
   requiredCapabilities: z.array(capabilityNameSchema).default([]),
   referencedPaths: taskReferencedPathsSchema.default([]),
   claim: taskClaimSchema.nullable().default(null),
@@ -297,6 +330,8 @@ export const taskContextPackageSchema = z.object({
   acceptanceCriteria: z.string(),
   agentContext: z.string(),
   checklist: z.array(checklistItemSchema),
+  customFields: z.array(taskCustomFieldAssignmentSchema),
+  reviewPolicy: reviewPolicyResolutionSchema,
   relations: z.object({
     upstream: z.array(taskRelationSchema),
     downstream: z.array(taskRelationSchema),
@@ -323,6 +358,8 @@ export const taskCandidateFieldSchema = z.enum([
   "agentContext",
   "checklist",
   "relations",
+  "customFields",
+  "reviewPolicy",
   "referencedPaths",
   "timestamps",
 ]);
@@ -340,6 +377,8 @@ export const taskCandidateSchema = z.object({
   dueAt: taskDateSchema.nullable(),
   size: taskSizeSchema.nullable(),
   tags: z.array(tagSchema),
+  customFields: z.array(taskCustomFieldAssignmentSchema).optional(),
+  reviewPolicy: reviewPolicyResolutionSchema.optional(),
   requiredCapabilities: z.array(capabilityNameSchema),
   claim: taskClaimSchema.nullable(),
   eligibility: taskEligibilitySchema,
@@ -380,6 +419,7 @@ const optionalTaskPlanningFieldsSchema = z.object({
   dueAt: taskDateSchema.nullable().optional(),
   size: taskSizeSchema.nullable().optional(),
   tags: tagAssignmentsSchema.optional(),
+  customFields: taskCustomFieldValuesInputSchema.optional(),
   requiredCapabilities: z.array(capabilityNameSchema).max(50).optional(),
 });
 
@@ -509,6 +549,7 @@ export const taskCompletionResultSchema = z.object({
   routing: z.object({
     reviewMode: projectReviewModeSchema,
     destination: z.enum(["review", "done"]),
+    policy: reviewPolicyResolutionSchema.optional(),
   }),
 });
 export type TaskCompletionResult = z.infer<typeof taskCompletionResultSchema>;
@@ -533,6 +574,7 @@ export const updateTaskPlanningInputSchema = z.object({
   dueAt: taskDateSchema.nullable(),
   size: taskSizeSchema.nullable(),
   tags: tagAssignmentsSchema,
+  customFields: taskCustomFieldValuesInputSchema.optional(),
   requiredCapabilities: z.array(capabilityNameSchema).max(50),
   expectedVersion: z.number().int().positive(),
   idempotencyKey: z.string().trim().min(1).max(200),

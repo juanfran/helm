@@ -18,6 +18,11 @@ import {
 } from "../features/activity/project-sync-coordinator";
 import { reconcileOptimisticCommand } from "../features/activity/optimistic-reconciliation";
 import { ProjectLanding } from "../features/projects/project-landing";
+import { ProjectCustomizationControl } from "../features/projects/project-customization-control";
+import {
+  projectCustomizationQueryOptions,
+  refreshProjectCustomization,
+} from "../features/projects/project-customization-query";
 import { executeProjectChange } from "../features/projects/project-navigation";
 import { ProjectSwitcher } from "../features/projects/project-switcher";
 import { activeAgentRunsQueryOptions } from "../features/dashboard/agent-runs-query";
@@ -35,6 +40,12 @@ import {
   resolveHumanManualBlocker,
   withdrawHumanActivity,
 } from "../server/activity-functions";
+import {
+  addHumanCustomFieldDefinition,
+  changeHumanTagReviewModeOverride,
+  reorderHumanCustomFieldDefinitions,
+  retireHumanCustomFieldDefinition,
+} from "../server/customization-functions";
 import {
   changeProjectReviewMode,
   changeTheme,
@@ -58,6 +69,7 @@ import {
   reopenHumanTask,
   requestHumanTaskChanges,
   restoreCancelledHumanTask,
+  setHumanTaskReviewModeOverride,
   updateHumanTaskPlanning,
 } from "../server/task-functions";
 import { applyThemeOptimistically } from "../styles/theme";
@@ -122,6 +134,7 @@ export const Route = createFileRoute("/")({
             ? importantEventCollection.utils.refetch({ throwOnError: true })
             : importantEventCollection.preload(),
           context.queryClient.ensureQueryData(taskTagsQueryOptions(projectId)),
+          context.queryClient.fetchQuery(projectCustomizationQueryOptions(projectId)),
         ]),
       );
     }
@@ -217,6 +230,7 @@ function ActiveProjectHome({
     query: (query) => query.from({ event: importantEventCollection }),
   });
   const { data: tagDefinitions } = useSuspenseQuery(taskTagsQueryOptions(project.id));
+  const { data: customization } = useSuspenseQuery(projectCustomizationQueryOptions(project.id));
   const { data: activeAgentRuns } = useSuspenseQuery(activeAgentRunsQueryOptions());
 
   const refetchProjectCollections = useCallback(
@@ -340,11 +354,20 @@ function ActiveProjectHome({
             }
           });
           if (event.changes.scopes.includes("projects")) {
+            await refreshProjectCustomization(queryClient, project.id);
             await router.invalidate({ sync: true });
           }
         },
       }),
-    [eventCursor, eventProjector, project.id, refetchProjectCollections, router, syncCoordinator],
+    [
+      eventCursor,
+      eventProjector,
+      project.id,
+      queryClient,
+      refetchProjectCollections,
+      router,
+      syncCoordinator,
+    ],
   );
 
   async function refreshTaskRows(taskIds: readonly string[]) {
@@ -377,6 +400,19 @@ function ActiveProjectHome({
         await refetchProjectCollections().catch(() => undefined);
       }
     });
+  }
+
+  async function applyCustomizationResponse<
+    T extends Awaited<ReturnType<typeof addHumanCustomFieldDefinition>>,
+  >(response: T) {
+    if (response.ok) {
+      queryClient.setQueryData(
+        projectCustomizationQueryOptions(project.id).queryKey,
+        response.customization,
+      );
+      await router.invalidate({ sync: true });
+    }
+    return response;
   }
 
   async function applyTransitionResponse(
@@ -536,6 +572,24 @@ function ActiveProjectHome({
           }
         />
       }
+      customizationControl={
+        <ProjectCustomizationControl
+          customization={customization}
+          tagDefinitions={tagDefinitions}
+          onAddFieldDefinition={(input) =>
+            addHumanCustomFieldDefinition({ data: input }).then(applyCustomizationResponse)
+          }
+          onRetireFieldDefinition={(input) =>
+            retireHumanCustomFieldDefinition({ data: input }).then(applyCustomizationResponse)
+          }
+          onReorderFieldDefinitions={(input) =>
+            reorderHumanCustomFieldDefinitions({ data: input }).then(applyCustomizationResponse)
+          }
+          onChangeTagReviewModeOverride={(input) =>
+            changeHumanTagReviewModeOverride({ data: input }).then(applyCustomizationResponse)
+          }
+        />
+      }
       renderSearchLink={(props) => (
         <Link to="/search" search={emptyTaskSearchParams} {...props}>
           Search
@@ -545,6 +599,9 @@ function ActiveProjectHome({
       onPrepareTask={(input) => prepareHumanTask({ data: input }).then(applyTaskResponse)}
       onUpdateTaskPlanning={(input) =>
         updateHumanTaskPlanning({ data: input }).then(applyTaskResponse)
+      }
+      onSetTaskReviewModeOverride={(input) =>
+        setHumanTaskReviewModeOverride({ data: input }).then(applyTaskResponse)
       }
       onApproveTaskReview={(input) =>
         approveHumanTaskReview({ data: input }).then(applyTransitionResponse)
@@ -601,7 +658,10 @@ function ActiveProjectHome({
       }}
       onChangeProjectReviewMode={async (input) => {
         const response = await changeProjectReviewMode({ data: input });
-        if (response.ok) await router.invalidate({ sync: true });
+        if (response.ok) {
+          await refreshProjectCustomization(queryClient, project.id);
+          await router.invalidate({ sync: true });
+        }
         return response;
       }}
     />

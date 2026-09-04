@@ -40,6 +40,10 @@ const migrationNamesThrough0009 = [
   "0009_supreme_blue_shield.sql",
 ] as const;
 const migrationNamesThrough0010 = [...migrationNamesThrough0009, "0010_polite_bishop.sql"] as const;
+const migrationNamesThrough0011 = [
+  ...migrationNamesThrough0010,
+  "0011_lush_lady_bullseye.sql",
+] as const;
 
 function temporaryDirectory(prefix: string) {
   const path = mkdtempSync(join(tmpdir(), prefix));
@@ -813,6 +817,223 @@ describe("SQLite forward migrations", () => {
           .prepare(
             `select json_extract(result_json, '$.activeProjectVersion')
              from idempotency_records where key = 'legacy-theme'`,
+          )
+          .pluck()
+          .get(),
+      ).toBe(1);
+    } finally {
+      projectStore.close();
+    }
+  });
+
+  it("adds custom field storage and nullable review overrides without changing 0011 rows", () => {
+    const root = temporaryDirectory("helm-customization-migration-fixture-");
+    const databasePath = join(root, "helm.db");
+    const previousMigrations = createPreviousMigrationFolder(migrationNamesThrough0011);
+    const legacyDatabase = new Database(databasePath);
+    legacyDatabase.pragma("foreign_keys = ON");
+    migrate(drizzle(legacyDatabase), { migrationsFolder: previousMigrations });
+    const createdAt = "2026-08-01T10:00:00.000Z";
+
+    legacyDatabase
+      .prepare(
+        `insert into projects (
+          id, sequence, name, repository_root, review_mode, version, created_at, updated_at
+        ) values ('legacy-project', 1, 'legacy', ?, 'required', 1, ?, ?)`,
+      )
+      .run(root, createdAt, createdAt);
+    legacyDatabase
+      .prepare(
+        `insert into tasks (
+          id, project_id, sequence, parent_task_id, title, lifecycle, priority, position,
+          not_before, due_at, size, description_json, description_text, expected_outcome,
+          acceptance_criteria, agent_context, checklist_json, review_attempt_id,
+          cancelled_from_lifecycle, version, archived_at, created_at, updated_at
+        ) values (
+          'legacy-task', 'legacy-project', 1, null, 'Preserved task', 'backlog', 'normal', 1,
+          null, null, null, ?, '', '', '', '', '[]', null, null, 1, null, ?, ?
+        )`,
+      )
+      .run(JSON.stringify(emptyRichTextDocument), createdAt, createdAt);
+    legacyDatabase
+      .prepare(
+        `insert into tags (
+          id, project_id, name, description, color, exclusive_group, created_at, updated_at
+        ) values (
+          'legacy-tag', 'legacy-project', 'legacy', 'Preserved tag', '#2563eb', null, ?, ?
+        )`,
+      )
+      .run(createdAt, createdAt);
+    legacyDatabase.close();
+
+    const projectStore = createSqliteProjectStore(databasePath);
+    try {
+      const migratedTask = projectStore.database
+        .prepare<[], { title: string; reviewModeOverride: string | null }>(
+          `select title, review_mode_override as reviewModeOverride
+           from tasks where id = 'legacy-task'`,
+        )
+        .get();
+      const migratedTag = projectStore.database
+        .prepare<[], { description: string; reviewModeOverride: string | null }>(
+          `select description, review_mode_override as reviewModeOverride
+           from tags where id = 'legacy-tag'`,
+        )
+        .get();
+
+      expect(migratedTask).toEqual({ title: "Preserved task", reviewModeOverride: null });
+      expect(migratedTag).toEqual({ description: "Preserved tag", reviewModeOverride: null });
+
+      projectStore.database
+        .prepare(
+          `insert into custom_field_definitions (
+            id, project_id, field_key, type, validation_json, default_value_json,
+            display_label, description, position, created_at, updated_at
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "field-risk",
+          "legacy-project",
+          "risk_score",
+          "number",
+          '{"minimum":0,"maximum":5}',
+          "3",
+          "Risk score",
+          "Delivery risk from zero to five.",
+          10,
+          createdAt,
+          createdAt,
+        );
+      projectStore.database
+        .prepare(
+          `insert into custom_field_definitions (
+            id, project_id, field_key, type, display_label, created_at, updated_at
+          ) values (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run("field-owner", "legacy-project", "owner", "text", "Owner", createdAt, createdAt);
+
+      expect(
+        projectStore.database
+          .prepare<
+            [],
+            {
+              validationJson: string;
+              defaultValueJson: string | null;
+              description: string;
+              position: number;
+              retiredAt: string | null;
+            }
+          >(
+            `select validation_json as validationJson,
+                    default_value_json as defaultValueJson,
+                    description,
+                    position,
+                    retired_at as retiredAt
+             from custom_field_definitions where id = 'field-owner'`,
+          )
+          .get(),
+      ).toEqual({
+        validationJson: "{}",
+        defaultValueJson: null,
+        description: "",
+        position: 0,
+        retiredAt: null,
+      });
+      expect(
+        projectStore.database
+          .prepare(
+            `select validation_json, default_value_json
+             from custom_field_definitions where id = 'field-risk'`,
+          )
+          .get(),
+      ).toEqual({
+        validation_json: '{"minimum":0,"maximum":5}',
+        default_value_json: "3",
+      });
+
+      projectStore.database
+        .prepare(
+          `insert into task_custom_field_values (task_id, definition_id, value_json, updated_at)
+           values ('legacy-task', 'field-risk', '4', ?)`,
+        )
+        .run(createdAt);
+      projectStore.database
+        .prepare(
+          `update custom_field_definitions
+           set position = 20, retired_at = ?, updated_at = ?
+           where id = 'field-risk'`,
+        )
+        .run("2026-08-02T10:00:00.000Z", "2026-08-02T10:00:00.000Z");
+      expect(
+        projectStore.database
+          .prepare(
+            `select value_json, updated_at
+             from task_custom_field_values
+             where task_id = 'legacy-task' and definition_id = 'field-risk'`,
+          )
+          .get(),
+      ).toEqual({ value_json: "4", updated_at: createdAt });
+
+      projectStore.database
+        .prepare("update tasks set review_mode_override = 'direct' where id = 'legacy-task'")
+        .run();
+      projectStore.database
+        .prepare("update tags set review_mode_override = 'required' where id = 'legacy-tag'")
+        .run();
+      expect(
+        projectStore.database
+          .prepare(
+            `select
+               (select review_mode_override from tasks where id = 'legacy-task') as taskOverride,
+               (select review_mode_override from tags where id = 'legacy-tag') as tagOverride`,
+          )
+          .get(),
+      ).toEqual({ taskOverride: "direct", tagOverride: "required" });
+
+      expect(() =>
+        projectStore.database
+          .prepare(
+            `insert into custom_field_definitions (
+              id, project_id, field_key, type, display_label, created_at, updated_at
+            ) values ('field-duplicate', 'legacy-project', 'risk_score', 'number', 'Duplicate', ?, ?)`,
+          )
+          .run(createdAt, createdAt),
+      ).toThrow(/UNIQUE constraint failed/);
+      expect(() =>
+        projectStore.database
+          .prepare(
+            `insert into custom_field_definitions (
+              id, project_id, field_key, type, display_label, created_at, updated_at
+            ) values ('field-orphan', 'missing-project', 'orphan', 'text', 'Orphan', ?, ?)`,
+          )
+          .run(createdAt, createdAt),
+      ).toThrow(/FOREIGN KEY constraint failed/);
+      expect(() =>
+        projectStore.database
+          .prepare(
+            `insert into task_custom_field_values (task_id, definition_id, value_json, updated_at)
+             values ('missing-task', 'field-risk', '1', ?)`,
+          )
+          .run(createdAt),
+      ).toThrow(/FOREIGN KEY constraint failed/);
+      expect(() =>
+        projectStore.database
+          .prepare(
+            `insert into task_custom_field_values (task_id, definition_id, value_json, updated_at)
+             values ('legacy-task', 'missing-definition', '1', ?)`,
+          )
+          .run(createdAt),
+      ).toThrow(/FOREIGN KEY constraint failed/);
+      expect(() =>
+        projectStore.database
+          .prepare("delete from custom_field_definitions where id = 'field-risk'")
+          .run(),
+      ).toThrow(/FOREIGN KEY constraint failed/);
+      expect(
+        projectStore.database
+          .prepare(
+            `select count(*) from sqlite_master
+             where type = 'index' and name = 'task_custom_field_values_definition_index'`,
           )
           .pluck()
           .get(),

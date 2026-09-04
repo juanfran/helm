@@ -104,14 +104,35 @@ The query result includes eligibility facts and a short ordering explanation. Du
 Claiming is a single SQLite transaction that verifies eligibility, creates an attempt, creates the lease,
 changes lifecycle to `in_progress`, increments the task version, and appends events. Completion and
 failure require that attempt's active lease token and the current task version. A completion report is
-stored immutably on the attempt; the project review mode is read in the same transaction and routes the
-task to `review` or `done`. Failure stores a classified report and returns the task to `ready`.
+stored immutably on the attempt; the effective review policy is resolved in the same transaction and
+routes the task to `review` or `done`. Failure stores a classified report and returns the task to `ready`.
+
+Review policy has three fixed scopes. A task override wins over tag overrides, and tag overrides win
+over the project default. When several assigned tags disagree, `required` wins so adding a tag can make
+review stricter but cannot silently bypass it; tag names and IDs provide a stable order for the
+explanation returned with the task context and completion result. Only the local human may change an
+override. Policy changes never add lifecycle states or weaken the normal version, lease, and transition
+checks.
 
 Lease renewal requires the lease token, current task version, and active run. Expiration makes the task
 claimable again and closes the attempt as abandoned when cleanup observes it. Lease invalidation returns
 work to ready; human task cancellation is a distinct attributed command that moves the task to
 `cancelled`, closes active execution without success, and invalidates the token immediately. Late results
 from any invalid lease are rejected without changing task or attempt history.
+
+## Typed project fields
+
+Project custom-field definitions use a fixed set of value types: text, number, boolean, ISO date, and
+single select. Each definition owns its validation, optional default, display metadata, and stable
+project-local key. The type and key are immutable after creation. Defaults are resolved at read time;
+they do not rewrite every task row. Clearing an explicit task value therefore reveals its current
+default (or an unset value).
+
+Definitions can be reordered or retired. Retirement prevents new values but preserves the definition
+and every historical task value, so old work, saved views, and audit evidence remain readable. The same
+tagged value representation is used by task commands, structured filters, bulk previews, the UI, and
+MCP context. Customization extends task metadata only: Helm's lifecycle enum and transition invariants
+remain closed.
 
 ## MCP boundary
 

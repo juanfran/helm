@@ -67,6 +67,48 @@ function runSearch(taskFilter: TaskFilterV1, limit = 50, cursor: string | null =
   return Effect.runPromise(searchTasks({ filter: taskFilter, limit, cursor }, [], queryServices));
 }
 
+function insertCustomFieldDefinition(input: {
+  readonly id: string;
+  readonly key: string;
+  readonly type: "text" | "number" | "boolean" | "date" | "single_select";
+  readonly validation: unknown;
+  readonly defaultValue?: unknown;
+  readonly position: number;
+  readonly retiredAt?: string | null;
+}) {
+  projectStore.database
+    .prepare(
+      `insert into custom_field_definitions (
+        id, project_id, field_key, type, validation_json, default_value_json,
+        display_label, description, position, retired_at, created_at, updated_at
+      ) values (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)`,
+    )
+    .run(
+      input.id,
+      projectId,
+      input.key,
+      input.type,
+      JSON.stringify(input.validation),
+      input.defaultValue === undefined || input.defaultValue === null
+        ? null
+        : JSON.stringify(input.defaultValue),
+      input.key,
+      input.position,
+      input.retiredAt ?? null,
+      now,
+      now,
+    );
+}
+
+function setExplicitCustomFieldValue(taskId: string, definitionId: string, value: unknown) {
+  projectStore.database
+    .prepare(
+      `insert into task_custom_field_values (task_id, definition_id, value_json, updated_at)
+       values (?, ?, ?, ?)`,
+    )
+    .run(taskId, definitionId, JSON.stringify(value), now);
+}
+
 beforeEach(async () => {
   temporaryRoot = await mkdtemp(join(tmpdir(), "helm-task-query-test-"));
   const repositoryRoot = join(temporaryRoot, "repository");
@@ -357,6 +399,255 @@ describe("task query application seam", () => {
     );
     expect(page.items.map(({ task }) => task.id)).toEqual([target.id]);
     expect(page.items[0]?.task.eligibility?.status).toBe("blocked");
+  });
+
+  it("queries explicit, effective-default, missing, and retired historical custom-field values", async () => {
+    const explicit = await Effect.runPromise(
+      createTask(taskInput("custom-explicit"), human, taskServices),
+    );
+    const inherited = await Effect.runPromise(
+      createTask(taskInput("custom-default"), human, taskServices),
+    );
+    insertCustomFieldDefinition({
+      id: "field-summary",
+      key: "summary",
+      type: "text",
+      validation: { minLength: 0, maxLength: 20_000 },
+      defaultValue: { type: "text", value: "Default backlog" },
+      position: 0,
+    });
+    insertCustomFieldDefinition({
+      id: "field-score",
+      key: "score",
+      type: "number",
+      validation: { min: null, max: null, integer: false },
+      position: 1,
+    });
+    insertCustomFieldDefinition({
+      id: "field-retired",
+      key: "retired_evidence",
+      type: "text",
+      validation: { minLength: 0, maxLength: 20_000 },
+      position: 2,
+      retiredAt: "2026-09-04T09:00:00.000Z",
+    });
+    setExplicitCustomFieldValue(explicit.id, "field-summary", {
+      type: "text",
+      value: "Urgent customer queue",
+    });
+    setExplicitCustomFieldValue(explicit.id, "field-score", { type: "number", value: 7 });
+    setExplicitCustomFieldValue(explicit.id, "field-retired", {
+      type: "text",
+      value: "Legacy evidence",
+    });
+
+    const contains = await runSearch(
+      filter({
+        customFields: [
+          {
+            fieldId: "field-summary",
+            operator: "contains",
+            value: { type: "text", value: "CUSTOMER" },
+          },
+        ],
+      }),
+    );
+    expect(contains.items.map(({ task }) => task.id)).toEqual([explicit.id]);
+
+    const inheritedDefault = await runSearch(
+      filter({
+        customFields: [
+          {
+            fieldId: "field-summary",
+            operator: "equals",
+            value: { type: "text", value: "Default backlog" },
+          },
+        ],
+      }),
+    );
+    expect(inheritedDefault.items.map(({ task }) => task.id)).toEqual([inherited.id]);
+    expect(inheritedDefault.items[0]?.task.customFields[0]).toMatchObject({ source: "default" });
+
+    const numeric = await runSearch(
+      filter({
+        customFields: [
+          {
+            fieldId: "field-score",
+            operator: "greater_than",
+            value: { type: "number", value: 5 },
+          },
+        ],
+      }),
+    );
+    expect(numeric.items.map(({ task }) => task.id)).toEqual([explicit.id]);
+
+    const missing = await runSearch(
+      filter({ customFields: [{ fieldId: "field-score", operator: "missing" }] }),
+    );
+    expect(missing.items.map(({ task }) => task.id)).toEqual([inherited.id]);
+
+    const historical = await runSearch(
+      filter({
+        customFields: [
+          {
+            fieldId: "field-retired",
+            operator: "equals",
+            value: { type: "text", value: "Legacy evidence" },
+          },
+        ],
+      }),
+    );
+    expect(historical.items.map(({ task }) => task.id)).toEqual([explicit.id]);
+    expect(historical.items[0]?.task.customFields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          definition: expect.objectContaining({
+            id: "field-retired",
+            retiredAt: expect.any(String),
+          }),
+          source: "explicit",
+        }),
+      ]),
+    );
+
+    const savedFilter = filter({
+      customFields: [
+        {
+          fieldId: "field-summary",
+          operator: "equals",
+          value: { type: "text", value: "Default backlog" },
+        },
+      ],
+    });
+    const savedView = await Effect.runPromise(
+      createSavedView(
+        {
+          projectId,
+          name: "Default backlog",
+          definition: {
+            schemaVersion: 1,
+            filter: savedFilter,
+            order: defaultTaskSearchOrder(savedFilter),
+            grouping: { type: "none" },
+            visibleFields: ["title", "lifecycle", "priority"],
+            presentation: "list",
+          },
+          idempotencyKey: "saved-custom-field-view",
+        },
+        human,
+        queryServices,
+      ),
+    );
+    const retiredAfterTasks = new Date(
+      Math.max(Date.parse(explicit.createdAt), Date.parse(inherited.createdAt)) + 1_000,
+    ).toISOString();
+    projectStore.database
+      .prepare(
+        "update custom_field_definitions set retired_at = ?, updated_at = ? where id = 'field-summary'",
+      )
+      .run(retiredAfterTasks, retiredAfterTasks);
+    const [persistedView] = await Effect.runPromise(listSavedViews({ projectId }, queryServices));
+    expect(persistedView?.id).toBe(savedView.id);
+    await expect(runSearch(persistedView!.definition.filter)).resolves.toMatchObject({
+      items: [{ task: expect.objectContaining({ id: inherited.id }) }],
+    });
+  });
+
+  it("rejects unknown, type-mismatched, and unknown-option field clauses", async () => {
+    const task = await Effect.runPromise(
+      createTask(taskInput("custom-validation"), human, taskServices),
+    );
+    insertCustomFieldDefinition({
+      id: "field-score",
+      key: "score",
+      type: "number",
+      validation: { min: null, max: null, integer: false },
+      position: 0,
+    });
+    insertCustomFieldDefinition({
+      id: "field-retired-history",
+      key: "retired_history",
+      type: "text",
+      validation: { minLength: 0, maxLength: 20_000 },
+      position: 1,
+      retiredAt: "2026-09-04T09:00:00.000Z",
+    });
+    insertCustomFieldDefinition({
+      id: "field-retired-empty",
+      key: "retired_empty",
+      type: "text",
+      validation: { minLength: 0, maxLength: 20_000 },
+      position: 2,
+      retiredAt: "2026-09-04T09:00:00.000Z",
+    });
+    insertCustomFieldDefinition({
+      id: "field-risk",
+      key: "risk",
+      type: "single_select",
+      validation: { options: [{ id: "high", label: "High" }] },
+      position: 3,
+    });
+    setExplicitCustomFieldValue(task.id, "field-retired-history", {
+      type: "text",
+      value: "Preserved",
+    });
+
+    const invalidFilters: Array<{
+      readonly clause: NonNullable<TaskFilterV1["customFields"]>[number];
+      readonly issue: RegExp;
+    }> = [
+      {
+        clause: { fieldId: "field-unknown", operator: "present" },
+        issue: /does not exist/i,
+      },
+      {
+        clause: {
+          fieldId: "field-score",
+          operator: "equals",
+          value: { type: "text", value: "seven" },
+        },
+        issue: /type number, not text/i,
+      },
+      {
+        clause: {
+          fieldId: "field-risk",
+          operator: "equals",
+          value: { type: "single_select", value: "unknown" },
+        },
+        issue: /does not define option unknown/i,
+      },
+    ];
+
+    const results = await Promise.all(
+      invalidFilters.map(({ clause }) =>
+        Effect.runPromise(
+          Effect.either(
+            searchTasks({ filter: filter({ customFields: [clause] }) }, [], queryServices),
+          ),
+        ),
+      ),
+    );
+    for (const [index, result] of results.entries()) {
+      expect(Either.isLeft(result) && result.left).toMatchObject({
+        _tag: "InvalidTaskQueryError",
+        issues: [expect.stringMatching(invalidFilters[index]!.issue)],
+      });
+    }
+
+    await expect(
+      runSearch(
+        filter({
+          customFields: [{ fieldId: "field-retired-history", operator: "missing" }],
+        }),
+      ),
+    ).resolves.toMatchObject({ items: [] });
+    await expect(
+      runSearch(
+        filter({
+          customFields: [{ fieldId: "field-retired-empty", operator: "present" }],
+        }),
+      ),
+    ).resolves.toMatchObject({ items: [] });
   });
 
   it("paginates deterministically and rejects mismatched or stale cursors", async () => {
