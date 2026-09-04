@@ -1,62 +1,20 @@
 import { z } from "zod";
 
+import { richTextDocumentSchema } from "./rich-text";
+import { activityEntrySchema, manualBlockerSchema } from "./activity";
+
+export {
+  emptyRichTextDocument,
+  richTextDocumentSchema,
+  richTextToPlainText,
+  type RichTextDocument,
+} from "./rich-text";
+
 export const actorSchema = z.object({
   type: z.enum(["human", "agent", "system"]),
   id: z.string().trim().min(1),
 });
 export type Actor = z.infer<typeof actorSchema>;
-
-type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
-
-const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
-  z.union([
-    z.string(),
-    z.number(),
-    z.boolean(),
-    z.null(),
-    z.array(jsonValueSchema),
-    z.record(z.string(), jsonValueSchema),
-  ]),
-);
-
-type TipTapNode = {
-  type: string;
-  text?: string;
-  attrs?: Record<string, JsonValue>;
-  marks?: Array<{ type: string; attrs?: Record<string, JsonValue> }>;
-  content?: TipTapNode[];
-};
-
-const tipTapNodeSchema: z.ZodType<TipTapNode> = z.lazy(() =>
-  z.object({
-    type: z.string(),
-    text: z.string().optional(),
-    attrs: z.record(z.string(), jsonValueSchema).optional(),
-    marks: z
-      .array(
-        z.object({
-          type: z.string(),
-          attrs: z.record(z.string(), jsonValueSchema).optional(),
-        }),
-      )
-      .optional(),
-    content: z.array(tipTapNodeSchema).optional(),
-  }),
-);
-
-export const richTextDocumentSchema = z.object({
-  version: z.literal(1),
-  doc: z.object({
-    type: z.literal("doc"),
-    content: z.array(tipTapNodeSchema).optional(),
-  }),
-});
-export type RichTextDocument = z.infer<typeof richTextDocumentSchema>;
-
-export const emptyRichTextDocument: RichTextDocument = {
-  version: 1,
-  doc: { type: "doc", content: [] },
-};
 
 export const checklistItemSchema = z.object({
   id: z.string().trim().min(1),
@@ -238,6 +196,7 @@ export const taskEligibilitySchema = z.object({
   orderingExplanation: z.string(),
   missingCapabilities: z.array(z.string()),
   blockingTaskIds: z.array(z.string()).default([]),
+  manualBlockerIds: z.array(z.string()).optional(),
 });
 export type TaskEligibility = z.infer<typeof taskEligibilitySchema>;
 
@@ -260,6 +219,7 @@ export const taskSchema = z.object({
   claim: taskClaimSchema.nullable().default(null),
   upstreamRelations: z.array(taskRelationSchema).default([]),
   downstreamRelations: z.array(taskRelationSchema).default([]),
+  manualBlockers: z.array(manualBlockerSchema).optional(),
   eligibility: taskEligibilitySchema.optional(),
   description: richTextDocumentSchema,
   descriptionText: z.string(),
@@ -315,6 +275,7 @@ export const taskContextPackageSchema = z.object({
     referencedPaths: z.array(z.string()),
   }),
   priorAttempts: z.array(taskAttemptSummarySchema),
+  entries: z.array(activityEntrySchema),
   projectInstructions: z.array(
     z.object({
       path: z.string(),
@@ -460,6 +421,7 @@ export type CreateTaskRelationInput = z.infer<typeof createTaskRelationInputSche
 export const listTasksInputSchema = z.object({
   projectId: z.string().trim().min(1),
   includeArchived: z.boolean().optional().default(false),
+  taskIds: z.array(z.string().trim().min(1)).min(1).max(200).optional(),
 });
 export type ListTasksInput = z.infer<typeof listTasksInputSchema>;
 
@@ -552,27 +514,6 @@ export const compiledRenewTaskLeaseInputSchema = z.compile(renewTaskLeaseInputSc
 export const compiledReleaseTaskLeaseInputSchema = z.compile(releaseTaskLeaseInputSchema);
 export const compiledInvalidateTaskClaimInputSchema = z.compile(invalidateTaskClaimInputSchema);
 
-function nodePlainText(value: unknown): string {
-  const parsed = tipTapNodeSchema.safeParse(value);
-  if (!parsed.success) return "";
-  if (parsed.data.type === "hardBreak") return "\n";
-  if (parsed.data.text) return parsed.data.text;
-  const children = parsed.data.content ?? [];
-  const separator = ["doc", "bulletList", "orderedList", "listItem", "blockquote"].includes(
-    parsed.data.type,
-  )
-    ? "\n"
-    : "";
-  return children.map(nodePlainText).filter(Boolean).join(separator);
-}
-
-export function richTextToPlainText(document: RichTextDocument) {
-  return nodePlainText(document.doc)
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
 export const readyPreparationFields = [
   "expectedOutcome",
   "acceptanceCriteria",
@@ -646,12 +587,14 @@ export function evaluateTaskEligibility(
   task: Task,
   context: TaskEvaluationContext,
   blockingTaskIds: readonly string[],
+  manualBlockers: readonly { id: string; reason: string }[] = task.manualBlockers ?? [],
 ): TaskEligibility {
   const agentCapabilities = new Set(normalizeCapabilities(context.agentCapabilities));
   const missingCapabilities = task.requiredCapabilities.filter(
     (capability) => !agentCapabilities.has(capability.toLocaleLowerCase("en-US")),
   );
   const orderingExplanation = taskOrderingExplanation(task);
+  const manualBlockerIds = manualBlockers.map((blocker) => blocker.id);
 
   if (task.archivedAt) {
     return {
@@ -661,6 +604,7 @@ export function evaluateTaskEligibility(
       orderingExplanation,
       missingCapabilities,
       blockingTaskIds: [...blockingTaskIds],
+      manualBlockerIds,
     };
   }
   if (task.lifecycle === "done") {
@@ -671,6 +615,7 @@ export function evaluateTaskEligibility(
       orderingExplanation,
       missingCapabilities,
       blockingTaskIds: [...blockingTaskIds],
+      manualBlockerIds,
     };
   }
   if (task.claim) {
@@ -681,6 +626,7 @@ export function evaluateTaskEligibility(
       orderingExplanation,
       missingCapabilities,
       blockingTaskIds: [...blockingTaskIds],
+      manualBlockerIds,
     };
   }
   if (task.lifecycle !== "ready") {
@@ -691,6 +637,7 @@ export function evaluateTaskEligibility(
       orderingExplanation,
       missingCapabilities,
       blockingTaskIds: [...blockingTaskIds],
+      manualBlockerIds,
     };
   }
   if (task.notBefore && task.notBefore > context.today) {
@@ -701,6 +648,7 @@ export function evaluateTaskEligibility(
       orderingExplanation,
       missingCapabilities,
       blockingTaskIds: [...blockingTaskIds],
+      manualBlockerIds,
     };
   }
   if (blockingTaskIds.length > 0) {
@@ -711,6 +659,18 @@ export function evaluateTaskEligibility(
       orderingExplanation,
       missingCapabilities,
       blockingTaskIds: [...blockingTaskIds],
+      manualBlockerIds,
+    };
+  }
+  if (manualBlockers.length > 0) {
+    return {
+      claimable: false,
+      status: "blocked",
+      reasons: [`Manually blocked: ${manualBlockers.map((blocker) => blocker.reason).join("; ")}.`],
+      orderingExplanation,
+      missingCapabilities,
+      blockingTaskIds: [...blockingTaskIds],
+      manualBlockerIds,
     };
   }
   if (missingCapabilities.length > 0) {
@@ -721,6 +681,7 @@ export function evaluateTaskEligibility(
       orderingExplanation,
       missingCapabilities,
       blockingTaskIds: [...blockingTaskIds],
+      manualBlockerIds,
     };
   }
   return {
@@ -730,6 +691,7 @@ export function evaluateTaskEligibility(
     orderingExplanation,
     missingCapabilities,
     blockingTaskIds: [...blockingTaskIds],
+    manualBlockerIds,
   };
 }
 

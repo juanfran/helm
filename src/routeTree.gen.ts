@@ -10,11 +10,17 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiEventsRouteImport } from './routes/api/events'
 import { Route as ApiMcpRouteImport } from './routes/api/mcp'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiEventsRoute = ApiEventsRouteImport.update({
+  id: '/api/events',
+  path: '/api/events',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiMcpRoute = ApiMcpRouteImport.update({
@@ -25,27 +31,31 @@ const ApiMcpRoute = ApiMcpRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/api/events': typeof ApiEventsRoute
   '/api/mcp': typeof ApiMcpRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/api/events': typeof ApiEventsRoute
   '/api/mcp': typeof ApiMcpRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/api/events': typeof ApiEventsRoute
   '/api/mcp': typeof ApiMcpRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/api/mcp'
+  fullPaths: '/' | '/api/events' | '/api/mcp'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/api/mcp'
-  id: '__root__' | '/' | '/api/mcp'
+  to: '/' | '/api/events' | '/api/mcp'
+  id: '__root__' | '/' | '/api/events' | '/api/mcp'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ApiEventsRoute: typeof ApiEventsRoute
   ApiMcpRoute: typeof ApiMcpRoute
 }
 
@@ -56,6 +66,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/events': {
+      id: '/api/events'
+      path: '/api/events'
+      fullPath: '/api/events'
+      preLoaderRoute: typeof ApiEventsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/mcp': {
@@ -70,6 +87,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ApiEventsRoute: ApiEventsRoute,
   ApiMcpRoute: ApiMcpRoute,
 }
 export const routeTree = rootRouteImport

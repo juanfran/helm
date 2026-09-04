@@ -17,6 +17,15 @@ import {
 } from "lucide-react";
 
 import { Button } from "../../components/ui/button";
+import type {
+  ActivityEntry,
+  CreateHumanActivityEntryInput,
+  CreateManualBlockerInput,
+  ManualBlocker,
+  ProjectEvent,
+  ResolveManualBlockerInput,
+  WithdrawActivityEntryInput,
+} from "../../domain/activity";
 import { themeSchema, type Project, type Theme } from "../../domain/projects";
 import {
   emptyRichTextDocument,
@@ -41,11 +50,17 @@ import {
   type UpdateTaskPlanningInput,
 } from "../../domain/tasks";
 import type {
+  ActivityEntryCommandResponse,
+  ManualBlockerCommandResponse,
+} from "../../server/activity-adapter";
+import type {
   TaskCommandResponse,
   TaskLeaseCommandResponse,
   TaskRelationCommandResponse,
 } from "../../server/task-adapter";
 import { tokens } from "../../styles/tokens.stylex";
+import { ProjectActivityFeed } from "../activity/project-activity-feed";
+import { TaskCollaboration } from "../activity/task-collaboration";
 import { RichTextEditor } from "./rich-text-editor";
 
 type TaskWorkspaceProps = {
@@ -53,6 +68,10 @@ type TaskWorkspaceProps = {
   theme: Theme;
   tasks: readonly Task[];
   tagDefinitions: readonly TaskTag[];
+  activityEntries: readonly ActivityEntry[];
+  manualBlockers: readonly ManualBlocker[];
+  projectEvents: readonly ProjectEvent[];
+  liveStatus: "connecting" | "live" | "retrying";
   onCreateTask: (input: CreateTaskInput) => Promise<TaskCommandResponse>;
   onPrepareTask: (input: PrepareTaskInput) => Promise<TaskCommandResponse>;
   onUpdateTaskPlanning: (input: UpdateTaskPlanningInput) => Promise<TaskCommandResponse>;
@@ -61,6 +80,16 @@ type TaskWorkspaceProps = {
   onCreateTaskRelation: (input: CreateTaskRelationInput) => Promise<TaskRelationCommandResponse>;
   onArchiveTask: (input: ArchiveTaskInput) => Promise<TaskCommandResponse>;
   onInvalidateClaim: (input: InvalidateTaskClaimInput) => Promise<TaskLeaseCommandResponse>;
+  onCreateActivityEntry: (
+    input: CreateHumanActivityEntryInput,
+  ) => Promise<ActivityEntryCommandResponse>;
+  onWithdrawActivityEntry: (
+    input: WithdrawActivityEntryInput,
+  ) => Promise<ActivityEntryCommandResponse>;
+  onCreateManualBlocker: (input: CreateManualBlockerInput) => Promise<ManualBlockerCommandResponse>;
+  onResolveManualBlocker: (
+    input: ResolveManualBlockerInput,
+  ) => Promise<ManualBlockerCommandResponse>;
   onChangeTheme: (theme: Theme) => Promise<void>;
 };
 
@@ -71,6 +100,10 @@ export function TaskWorkspace({
   theme,
   tasks,
   tagDefinitions,
+  activityEntries,
+  manualBlockers,
+  projectEvents,
+  liveStatus,
   onCreateTask,
   onPrepareTask,
   onUpdateTaskPlanning,
@@ -79,10 +112,15 @@ export function TaskWorkspace({
   onCreateTaskRelation,
   onArchiveTask,
   onInvalidateClaim,
+  onCreateActivityEntry,
+  onWithdrawActivityEntry,
+  onCreateManualBlocker,
+  onResolveManualBlocker,
   onChangeTheme,
 }: TaskWorkspaceProps) {
   const orderedTasks = useMemo(() => tasks.toSorted(compareTaskOrder), [tasks]);
   const [captureTitle, setCaptureTitle] = useState("");
+  const [workspaceView, setWorkspaceView] = useState<"tasks" | "activity">("tasks");
   const [selectedId, setSelectedId] = useState<string | null>(orderedTasks[0]?.id ?? null);
   const [pendingCapture, setPendingCapture] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
@@ -143,6 +181,41 @@ export function TaskWorkspace({
             <span {...stylex.props(styles.projectName)}>{project.name}</span>
           </div>
         </div>
+        <nav aria-label="Workspace views" {...stylex.props(styles.viewNavigation)}>
+          <button
+            type="button"
+            aria-pressed={workspaceView === "tasks"}
+            onClick={() => setWorkspaceView("tasks")}
+            {...stylex.props(
+              styles.viewButton,
+              workspaceView === "tasks" && styles.viewButtonActive,
+            )}
+          >
+            Tasks
+          </button>
+          <button
+            type="button"
+            aria-pressed={workspaceView === "activity"}
+            onClick={() => setWorkspaceView("activity")}
+            {...stylex.props(
+              styles.viewButton,
+              workspaceView === "activity" && styles.viewButtonActive,
+            )}
+          >
+            Activity
+          </button>
+        </nav>
+        <span
+          aria-live="polite"
+          {...stylex.props(styles.liveStatus, liveStatus === "live" && styles.liveStatusReady)}
+        >
+          <span {...stylex.props(styles.liveDot)} aria-hidden="true" />
+          {liveStatus === "live"
+            ? "Live"
+            : liveStatus === "retrying"
+              ? "Reconnecting"
+              : "Connecting"}
+        </span>
         <label {...stylex.props(styles.appearance)}>
           <span>Appearance</span>
           <select
@@ -215,7 +288,10 @@ export function TaskWorkspace({
               <button
                 key={task.id}
                 type="button"
-                onClick={() => setSelectedId(task.id)}
+                onClick={() => {
+                  setSelectedId(task.id);
+                  setWorkspaceView("tasks");
+                }}
                 aria-current={task.id === selectedTask?.id ? "true" : undefined}
                 {...stylex.props(
                   styles.taskRow,
@@ -248,12 +324,20 @@ export function TaskWorkspace({
         </aside>
 
         <section {...stylex.props(styles.detail)}>
-          {selectedTask ? (
+          {workspaceView === "activity" ? (
+            <ProjectActivityFeed
+              events={projectEvents}
+              tasks={orderedTasks}
+              entries={activityEntries}
+            />
+          ) : selectedTask ? (
             <PreparationPanel
               key={`${selectedTask.id}:${selectedTask.version}`}
               task={selectedTask}
               tasks={orderedTasks}
               tagDefinitions={tagDefinitions}
+              activityEntries={activityEntries}
+              manualBlockers={manualBlockers}
               onCreateTask={onCreateTask}
               onPrepare={onPrepareTask}
               onUpdatePlanning={onUpdateTaskPlanning}
@@ -262,6 +346,10 @@ export function TaskWorkspace({
               onCreateRelation={onCreateTaskRelation}
               onArchive={onArchiveTask}
               onInvalidateClaim={onInvalidateClaim}
+              onCreateActivityEntry={onCreateActivityEntry}
+              onWithdrawActivityEntry={onWithdrawActivityEntry}
+              onCreateManualBlocker={onCreateManualBlocker}
+              onResolveManualBlocker={onResolveManualBlocker}
             />
           ) : (
             <div {...stylex.props(styles.empty)}>
@@ -280,6 +368,8 @@ function PreparationPanel({
   task,
   tasks,
   tagDefinitions,
+  activityEntries,
+  manualBlockers,
   onCreateTask,
   onPrepare,
   onUpdatePlanning,
@@ -288,10 +378,16 @@ function PreparationPanel({
   onCreateRelation,
   onArchive,
   onInvalidateClaim,
+  onCreateActivityEntry,
+  onWithdrawActivityEntry,
+  onCreateManualBlocker,
+  onResolveManualBlocker,
 }: {
   task: Task;
   tasks: readonly Task[];
   tagDefinitions: readonly TaskTag[];
+  activityEntries: readonly ActivityEntry[];
+  manualBlockers: readonly ManualBlocker[];
   onCreateTask: TaskWorkspaceProps["onCreateTask"];
   onPrepare: TaskWorkspaceProps["onPrepareTask"];
   onUpdatePlanning: TaskWorkspaceProps["onUpdateTaskPlanning"];
@@ -300,6 +396,10 @@ function PreparationPanel({
   onCreateRelation: TaskWorkspaceProps["onCreateTaskRelation"];
   onArchive: TaskWorkspaceProps["onArchiveTask"];
   onInvalidateClaim: TaskWorkspaceProps["onInvalidateClaim"];
+  onCreateActivityEntry: TaskWorkspaceProps["onCreateActivityEntry"];
+  onWithdrawActivityEntry: TaskWorkspaceProps["onWithdrawActivityEntry"];
+  onCreateManualBlocker: TaskWorkspaceProps["onCreateManualBlocker"];
+  onResolveManualBlocker: TaskWorkspaceProps["onResolveManualBlocker"];
 }) {
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState<RichTextDocument>(task.description);
@@ -586,423 +686,441 @@ function PreparationPanel({
   }
 
   return (
-    <form onSubmit={prepare} {...stylex.props(styles.form)} aria-label="Prepare task">
-      <div {...stylex.props(styles.detailHeader)}>
-        <div>
-          <p {...stylex.props(styles.eyebrow)}>Task #{task.sequence}</p>
-          <p {...stylex.props(styles.version)}>Version {task.version}</p>
-        </div>
-        <span {...stylex.props(styles.headerActions)}>
-          {task.lifecycle === "done" ? (
-            <Button type="button" variant="quiet" disabled={pending} onClick={() => void reopen()}>
-              <RotateCcw size={15} aria-hidden="true" /> Reopen
-            </Button>
-          ) : task.lifecycle === "ready" ? (
-            <Button
-              type="button"
-              variant="quiet"
-              disabled={pending}
-              onClick={() => void complete()}
-            >
-              <CheckCircle2 size={15} aria-hidden="true" /> Done
-            </Button>
-          ) : null}
-          <Button
-            type="button"
-            variant="quiet"
-            disabled={pending || executionReadOnly}
-            onClick={() => void archive()}
-          >
-            <Archive size={15} aria-hidden="true" /> Archive
-          </Button>
-        </span>
-      </div>
-      {task.claim ? (
-        <section
-          aria-label="Current claim"
-          aria-live="polite"
-          aria-busy={claimPendingDisposition !== null}
-          {...stylex.props(styles.claimCard)}
-        >
-          <ClaimLeaseSummary claim={task.claim} />
-          <fieldset disabled={pending} {...stylex.props(styles.claimActions)}>
-            <legend {...stylex.props(styles.fieldLabel)}>Change current claim</legend>
-            <label htmlFor={`claim-reason-${task.id}`} {...stylex.props(styles.claimReasonLabel)}>
-              Reason
-            </label>
-            <textarea
-              id={`claim-reason-${task.id}`}
-              value={claimReason}
-              onChange={(event) => setClaimReason(event.target.value)}
-              aria-describedby={`claim-warning-${task.id}`}
-              rows={2}
-              maxLength={1_000}
-              required
-              {...stylex.props(styles.textarea)}
-            />
-            <p id={`claim-warning-${task.id}`} {...stylex.props(styles.hint)}>
-              Both actions immediately invalidate the agent lease and mark its current attempt
-              abandoned. The task returns to Ready.
-            </p>
-            <div {...stylex.props(styles.claimActionButtons)}>
-              <Button
-                type="button"
-                variant="quiet"
-                disabled={pending || claimReason.trim().length === 0}
-                onClick={() => void invalidateClaim("cancelled")}
-              >
-                {claimPendingDisposition === "cancelled" ? "Cancelling claim…" : "Cancel claim"}
-              </Button>
-              <Button
-                type="button"
-                disabled={pending || claimReason.trim().length === 0}
-                onClick={() => void invalidateClaim("reassigned")}
-              >
-                {claimPendingDisposition === "reassigned"
-                  ? "Making available…"
-                  : "Make available for reassignment"}
-              </Button>
-            </div>
-          </fieldset>
-        </section>
-      ) : null}
-      <section {...stylex.props(styles.relations)} aria-label="Task relations">
-        <div>
-          <p {...stylex.props(styles.fieldLabel)}>Hierarchy</p>
-          <p {...stylex.props(styles.hint)}>
-            Parent: {parentTask ? `#${parentTask.sequence} ${parentTask.title}` : "None"}
-          </p>
-          <p {...stylex.props(styles.hint)}>
-            Children:{" "}
-            {childTasks.length > 0
-              ? childTasks.map((child) => `#${child.sequence} ${child.title}`).join(", ")
-              : "None"}
-          </p>
-        </div>
-        <div>
-          <p {...stylex.props(styles.fieldLabel)}>Upstream</p>
-          <RelationList
-            empty="No upstream relations"
-            relations={task.upstreamRelations.map(
-              (relation) =>
-                `${relation.type} from #${relation.sourceSequence} ${relation.sourceTitle}`,
-            )}
-          />
-        </div>
-        <div>
-          <p {...stylex.props(styles.fieldLabel)}>Downstream</p>
-          <RelationList
-            empty="No downstream relations"
-            relations={task.downstreamRelations.map(
-              (relation) =>
-                `${relation.type} to #${relation.targetSequence} ${relation.targetTitle}`,
-            )}
-          />
-        </div>
-      </section>
-      <fieldset
-        disabled={executionReadOnly}
-        {...stylex.props(styles.taskActions, executionReadOnly && styles.readOnlyGroup)}
-      >
-        <legend {...stylex.props(styles.srOnly)}>Task structure actions</legend>
-        <div {...stylex.props(styles.inlineForm)}>
-          <input
-            aria-label="Child task title"
-            value={childTitle}
-            onChange={(event) => setChildTitle(event.target.value)}
-            placeholder="Child task title"
-            maxLength={300}
-            {...stylex.props(styles.input)}
-          />
-          <Button
-            type="button"
-            disabled={pending || childTitle.trim().length === 0}
-            onClick={() => void createChild()}
-          >
-            <GitBranch size={16} aria-hidden="true" />
-            Add child
-          </Button>
-        </div>
-        <div {...stylex.props(styles.inlineForm)}>
-          <select
-            aria-label="Relation type"
-            value={relationType}
-            onChange={(event) => setRelationType(event.target.value)}
-            {...stylex.props(styles.select, styles.fullWidth)}
-          >
-            <option value="blocks">Blocks</option>
-            <option value="related_to">Related to</option>
-            <option value="duplicates">Duplicates</option>
-            <option value="discovered_from">Discovered from</option>
-          </select>
-          <select
-            aria-label="Relation target"
-            value={relationTargetId}
-            onChange={(event) => setRelationTargetId(event.target.value)}
-            {...stylex.props(styles.select, styles.fullWidth)}
-          >
-            <option value="">Select target</option>
-            {tasks
-              .filter((candidate) => candidate.id !== task.id)
-              .map((candidate) => (
-                <option key={candidate.id} value={candidate.id}>
-                  #{candidate.sequence} {candidate.title}
-                </option>
-              ))}
-          </select>
-          <Button
-            type="button"
-            disabled={pending || !relationTargetId}
-            onClick={() => void createRelation()}
-          >
-            <Link2 size={16} aria-hidden="true" />
-            Add relation
-          </Button>
-        </div>
-      </fieldset>
-      <fieldset
-        disabled={!editable}
-        {...stylex.props(styles.editableFields, !editable && styles.readOnlyGroup)}
-      >
-        <legend {...stylex.props(styles.srOnly)}>Editable task details</legend>
-        <Field label="Title" required>
-          <input
-            aria-label="Title"
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            maxLength={300}
-            required
-            {...stylex.props(styles.input)}
-          />
-        </Field>
-        <Field label="Description" hint="Rich text is saved as a versioned TipTap document.">
-          <RichTextEditor value={description} onChange={setDescription} editable={editable} />
-        </Field>
-        <div {...stylex.props(styles.planningGrid)}>
-          <Field label="Priority">
-            <select
-              aria-label="Priority"
-              value={priority}
-              onChange={(event) => setPriority(taskPrioritySchema.parse(event.target.value))}
-              {...stylex.props(styles.select, styles.fullWidth)}
-            >
-              <option value="urgent">Urgent</option>
-              <option value="high">High</option>
-              <option value="normal">Normal</option>
-              <option value="low">Low</option>
-            </select>
-          </Field>
-          <Field label="Position">
-            <input
-              aria-label="Position"
-              type="number"
-              min={0}
-              value={position}
-              onChange={(event) => setPosition(event.target.value)}
-              {...stylex.props(styles.input)}
-            />
-          </Field>
-          <Field label="Start date">
-            <input
-              aria-label="Start date"
-              type="date"
-              value={notBefore}
-              onChange={(event) => setNotBefore(event.target.value)}
-              {...stylex.props(styles.input)}
-            />
-          </Field>
-          <Field label="Due date">
-            <input
-              aria-label="Due date"
-              type="date"
-              value={dueAt}
-              onChange={(event) => setDueAt(event.target.value)}
-              {...stylex.props(styles.input)}
-            />
-          </Field>
-          <Field label="Size">
-            <select
-              aria-label="Size"
-              value={size}
-              onChange={(event) => setSize(event.target.value)}
-              {...stylex.props(styles.select, styles.fullWidth)}
-            >
-              <option value="">Unestimated</option>
-              <option value="xs">XS</option>
-              <option value="s">S</option>
-              <option value="m">M</option>
-              <option value="l">L</option>
-              <option value="xl">XL</option>
-            </select>
-          </Field>
-        </div>
-        <Field
-          label="Tags"
-          hint="Tag definitions are shared across the project. Existing metadata stays canonical."
-        >
-          <fieldset {...stylex.props(styles.tagEditor)}>
-            <legend {...stylex.props(styles.srOnly)}>Tags</legend>
-            {tagInputs.map((tag, index) => {
-              const known = knownTags.has(tag.name);
-              return (
-                <div key={tag.draftId} {...stylex.props(styles.tagRow)}>
-                  <input
-                    aria-label={`Tag ${index + 1} name`}
-                    value={tag.name}
-                    onChange={(event) => updateTagName(index, event.target.value)}
-                    placeholder="Tag name"
-                    maxLength={80}
-                    {...stylex.props(styles.input)}
-                  />
-                  <input
-                    aria-label={`Tag ${index + 1} description`}
-                    value={tag.description}
-                    onChange={(event) => updateTag(index, { description: event.target.value })}
-                    placeholder="Description"
-                    maxLength={1_000}
-                    disabled={known}
-                    {...stylex.props(styles.input)}
-                  />
-                  <input
-                    aria-label={`Tag ${index + 1} color`}
-                    type="color"
-                    value={tag.color}
-                    onChange={(event) => updateTag(index, { color: event.target.value })}
-                    disabled={known}
-                    {...stylex.props(styles.colorInput)}
-                  />
-                  <input
-                    aria-label={`Tag ${index + 1} exclusive group`}
-                    value={tag.exclusiveGroup ?? ""}
-                    onChange={(event) =>
-                      updateTag(index, { exclusiveGroup: event.target.value || null })
-                    }
-                    placeholder="Exclusive group"
-                    maxLength={80}
-                    disabled={known}
-                    {...stylex.props(styles.input)}
-                  />
-                  <Button
-                    type="button"
-                    variant="quiet"
-                    aria-label={`Remove tag ${tag.name || index + 1}`}
-                    disabled={pending}
-                    onClick={() =>
-                      setTagInputs((current) => current.filter((_, tagIndex) => tagIndex !== index))
-                    }
-                  >
-                    <X size={15} aria-hidden="true" />
-                  </Button>
-                </div>
-              );
-            })}
-            <Button type="button" variant="quiet" disabled={pending} onClick={addTag}>
-              <Plus size={15} aria-hidden="true" /> Add tag
-            </Button>
-          </fieldset>
-        </Field>
-        <Field label="Required capabilities">
-          <textarea
-            aria-label="Required capabilities"
-            value={requiredCapabilities}
-            onChange={(event) => setRequiredCapabilities(event.target.value)}
-            rows={3}
-            {...stylex.props(styles.textarea)}
-          />
-        </Field>
-        <Field
-          label="Referenced paths"
-          hint="One normalized repository-relative file or directory path per line."
-        >
-          <textarea
-            aria-label="Referenced paths"
-            value={referencedPaths}
-            onChange={(event) => setReferencedPaths(event.target.value)}
-            rows={3}
-            placeholder="src/domain/tasks.ts"
-            {...stylex.props(styles.textarea)}
-          />
-        </Field>
-        {task.eligibility ? (
-          <p {...stylex.props(styles.hint)}>
-            {task.eligibility.status}: {task.eligibility.reasons.join(" ")}{" "}
-            {task.eligibility.orderingExplanation}
-          </p>
-        ) : null}
-        <Field label="Expected outcome" required>
-          <textarea
-            aria-label="Expected outcome"
-            value={expectedOutcome}
-            onChange={(event) => setExpectedOutcome(event.target.value)}
-            rows={3}
-            required
-            {...stylex.props(styles.textarea)}
-          />
-        </Field>
-        <Field label="Acceptance criteria" required>
-          <textarea
-            aria-label="Acceptance criteria"
-            value={acceptanceCriteria}
-            onChange={(event) => setAcceptanceCriteria(event.target.value)}
-            rows={4}
-            required
-            {...stylex.props(styles.textarea)}
-          />
-        </Field>
-        <Field label="Agent context" hint="Paths, constraints, and execution-specific guidance.">
-          <textarea
-            aria-label="Agent context"
-            value={agentContext}
-            onChange={(event) => setAgentContext(event.target.value)}
-            rows={3}
-            {...stylex.props(styles.textarea)}
-          />
-        </Field>
-        <Field label="Checklist" hint="One required verification step per line." required>
-          <textarea
-            aria-label="Checklist"
-            value={checklist}
-            onChange={(event) => setChecklist(event.target.value)}
-            rows={4}
-            required
-            {...stylex.props(styles.textarea)}
-          />
-        </Field>
-      </fieldset>
-      {error ? (
-        <p role="alert" {...stylex.props(styles.error)}>
-          {error}
-        </p>
-      ) : null}
-      <div {...stylex.props(styles.formFooter)}>
-        <p>Ready requires an outcome, acceptance criteria, and at least one checklist item.</p>
-        <span {...stylex.props(styles.footerActions)}>
-          {editable ? (
-            <>
+    <div {...stylex.props(styles.detailStack)}>
+      <form onSubmit={prepare} {...stylex.props(styles.form)} aria-label="Prepare task">
+        <div {...stylex.props(styles.detailHeader)}>
+          <div>
+            <p {...stylex.props(styles.eyebrow)}>Task #{task.sequence}</p>
+            <p {...stylex.props(styles.version)}>Version {task.version}</p>
+          </div>
+          <span {...stylex.props(styles.headerActions)}>
+            {task.lifecycle === "done" ? (
               <Button
                 type="button"
                 variant="quiet"
                 disabled={pending}
-                onClick={() => void updatePlanning()}
+                onClick={() => void reopen()}
               >
-                <SlidersHorizontal size={16} aria-hidden="true" />
-                Save planning
+                <RotateCcw size={15} aria-hidden="true" /> Reopen
               </Button>
-              <Button type="submit" disabled={pending}>
-                <CheckCircle2 size={16} aria-hidden="true" />
-                {pending
-                  ? "Saving…"
-                  : task.lifecycle === "ready"
-                    ? "Save preparation"
-                    : "Move to ready"}
+            ) : task.lifecycle === "ready" ? (
+              <Button
+                type="button"
+                variant="quiet"
+                disabled={pending}
+                onClick={() => void complete()}
+              >
+                <CheckCircle2 size={15} aria-hidden="true" /> Done
               </Button>
-            </>
-          ) : (
-            <span {...stylex.props(styles.hint)}>{readOnlyExplanation(task.lifecycle)}</span>
-          )}
-        </span>
-      </div>
-    </form>
+            ) : null}
+            <Button
+              type="button"
+              variant="quiet"
+              disabled={pending || executionReadOnly}
+              onClick={() => void archive()}
+            >
+              <Archive size={15} aria-hidden="true" /> Archive
+            </Button>
+          </span>
+        </div>
+        {task.claim ? (
+          <section
+            aria-label="Current claim"
+            aria-live="polite"
+            aria-busy={claimPendingDisposition !== null}
+            {...stylex.props(styles.claimCard)}
+          >
+            <ClaimLeaseSummary claim={task.claim} />
+            <fieldset disabled={pending} {...stylex.props(styles.claimActions)}>
+              <legend {...stylex.props(styles.fieldLabel)}>Change current claim</legend>
+              <label htmlFor={`claim-reason-${task.id}`} {...stylex.props(styles.claimReasonLabel)}>
+                Reason
+              </label>
+              <textarea
+                id={`claim-reason-${task.id}`}
+                value={claimReason}
+                onChange={(event) => setClaimReason(event.target.value)}
+                aria-describedby={`claim-warning-${task.id}`}
+                rows={2}
+                maxLength={1_000}
+                required
+                {...stylex.props(styles.textarea)}
+              />
+              <p id={`claim-warning-${task.id}`} {...stylex.props(styles.hint)}>
+                Both actions immediately invalidate the agent lease and mark its current attempt
+                abandoned. The task returns to Ready.
+              </p>
+              <div {...stylex.props(styles.claimActionButtons)}>
+                <Button
+                  type="button"
+                  variant="quiet"
+                  disabled={pending || claimReason.trim().length === 0}
+                  onClick={() => void invalidateClaim("cancelled")}
+                >
+                  {claimPendingDisposition === "cancelled" ? "Cancelling claim…" : "Cancel claim"}
+                </Button>
+                <Button
+                  type="button"
+                  disabled={pending || claimReason.trim().length === 0}
+                  onClick={() => void invalidateClaim("reassigned")}
+                >
+                  {claimPendingDisposition === "reassigned"
+                    ? "Making available…"
+                    : "Make available for reassignment"}
+                </Button>
+              </div>
+            </fieldset>
+          </section>
+        ) : null}
+        <section {...stylex.props(styles.relations)} aria-label="Task relations">
+          <div>
+            <p {...stylex.props(styles.fieldLabel)}>Hierarchy</p>
+            <p {...stylex.props(styles.hint)}>
+              Parent: {parentTask ? `#${parentTask.sequence} ${parentTask.title}` : "None"}
+            </p>
+            <p {...stylex.props(styles.hint)}>
+              Children:{" "}
+              {childTasks.length > 0
+                ? childTasks.map((child) => `#${child.sequence} ${child.title}`).join(", ")
+                : "None"}
+            </p>
+          </div>
+          <div>
+            <p {...stylex.props(styles.fieldLabel)}>Upstream</p>
+            <RelationList
+              empty="No upstream relations"
+              relations={task.upstreamRelations.map(
+                (relation) =>
+                  `${relation.type} from #${relation.sourceSequence} ${relation.sourceTitle}`,
+              )}
+            />
+          </div>
+          <div>
+            <p {...stylex.props(styles.fieldLabel)}>Downstream</p>
+            <RelationList
+              empty="No downstream relations"
+              relations={task.downstreamRelations.map(
+                (relation) =>
+                  `${relation.type} to #${relation.targetSequence} ${relation.targetTitle}`,
+              )}
+            />
+          </div>
+        </section>
+        <fieldset
+          disabled={executionReadOnly}
+          {...stylex.props(styles.taskActions, executionReadOnly && styles.readOnlyGroup)}
+        >
+          <legend {...stylex.props(styles.srOnly)}>Task structure actions</legend>
+          <div {...stylex.props(styles.inlineForm)}>
+            <input
+              aria-label="Child task title"
+              value={childTitle}
+              onChange={(event) => setChildTitle(event.target.value)}
+              placeholder="Child task title"
+              maxLength={300}
+              {...stylex.props(styles.input)}
+            />
+            <Button
+              type="button"
+              disabled={pending || childTitle.trim().length === 0}
+              onClick={() => void createChild()}
+            >
+              <GitBranch size={16} aria-hidden="true" />
+              Add child
+            </Button>
+          </div>
+          <div {...stylex.props(styles.inlineForm)}>
+            <select
+              aria-label="Relation type"
+              value={relationType}
+              onChange={(event) => setRelationType(event.target.value)}
+              {...stylex.props(styles.select, styles.fullWidth)}
+            >
+              <option value="blocks">Blocks</option>
+              <option value="related_to">Related to</option>
+              <option value="duplicates">Duplicates</option>
+              <option value="discovered_from">Discovered from</option>
+            </select>
+            <select
+              aria-label="Relation target"
+              value={relationTargetId}
+              onChange={(event) => setRelationTargetId(event.target.value)}
+              {...stylex.props(styles.select, styles.fullWidth)}
+            >
+              <option value="">Select target</option>
+              {tasks
+                .filter((candidate) => candidate.id !== task.id)
+                .map((candidate) => (
+                  <option key={candidate.id} value={candidate.id}>
+                    #{candidate.sequence} {candidate.title}
+                  </option>
+                ))}
+            </select>
+            <Button
+              type="button"
+              disabled={pending || !relationTargetId}
+              onClick={() => void createRelation()}
+            >
+              <Link2 size={16} aria-hidden="true" />
+              Add relation
+            </Button>
+          </div>
+        </fieldset>
+        <fieldset
+          disabled={!editable}
+          {...stylex.props(styles.editableFields, !editable && styles.readOnlyGroup)}
+        >
+          <legend {...stylex.props(styles.srOnly)}>Editable task details</legend>
+          <Field label="Title" required>
+            <input
+              aria-label="Title"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              maxLength={300}
+              required
+              {...stylex.props(styles.input)}
+            />
+          </Field>
+          <Field label="Description" hint="Rich text is saved as a versioned TipTap document.">
+            <RichTextEditor value={description} onChange={setDescription} editable={editable} />
+          </Field>
+          <div {...stylex.props(styles.planningGrid)}>
+            <Field label="Priority">
+              <select
+                aria-label="Priority"
+                value={priority}
+                onChange={(event) => setPriority(taskPrioritySchema.parse(event.target.value))}
+                {...stylex.props(styles.select, styles.fullWidth)}
+              >
+                <option value="urgent">Urgent</option>
+                <option value="high">High</option>
+                <option value="normal">Normal</option>
+                <option value="low">Low</option>
+              </select>
+            </Field>
+            <Field label="Position">
+              <input
+                aria-label="Position"
+                type="number"
+                min={0}
+                value={position}
+                onChange={(event) => setPosition(event.target.value)}
+                {...stylex.props(styles.input)}
+              />
+            </Field>
+            <Field label="Start date">
+              <input
+                aria-label="Start date"
+                type="date"
+                value={notBefore}
+                onChange={(event) => setNotBefore(event.target.value)}
+                {...stylex.props(styles.input)}
+              />
+            </Field>
+            <Field label="Due date">
+              <input
+                aria-label="Due date"
+                type="date"
+                value={dueAt}
+                onChange={(event) => setDueAt(event.target.value)}
+                {...stylex.props(styles.input)}
+              />
+            </Field>
+            <Field label="Size">
+              <select
+                aria-label="Size"
+                value={size}
+                onChange={(event) => setSize(event.target.value)}
+                {...stylex.props(styles.select, styles.fullWidth)}
+              >
+                <option value="">Unestimated</option>
+                <option value="xs">XS</option>
+                <option value="s">S</option>
+                <option value="m">M</option>
+                <option value="l">L</option>
+                <option value="xl">XL</option>
+              </select>
+            </Field>
+          </div>
+          <Field
+            label="Tags"
+            hint="Tag definitions are shared across the project. Existing metadata stays canonical."
+          >
+            <fieldset {...stylex.props(styles.tagEditor)}>
+              <legend {...stylex.props(styles.srOnly)}>Tags</legend>
+              {tagInputs.map((tag, index) => {
+                const known = knownTags.has(tag.name);
+                return (
+                  <div key={tag.draftId} {...stylex.props(styles.tagRow)}>
+                    <input
+                      aria-label={`Tag ${index + 1} name`}
+                      value={tag.name}
+                      onChange={(event) => updateTagName(index, event.target.value)}
+                      placeholder="Tag name"
+                      maxLength={80}
+                      {...stylex.props(styles.input)}
+                    />
+                    <input
+                      aria-label={`Tag ${index + 1} description`}
+                      value={tag.description}
+                      onChange={(event) => updateTag(index, { description: event.target.value })}
+                      placeholder="Description"
+                      maxLength={1_000}
+                      disabled={known}
+                      {...stylex.props(styles.input)}
+                    />
+                    <input
+                      aria-label={`Tag ${index + 1} color`}
+                      type="color"
+                      value={tag.color}
+                      onChange={(event) => updateTag(index, { color: event.target.value })}
+                      disabled={known}
+                      {...stylex.props(styles.colorInput)}
+                    />
+                    <input
+                      aria-label={`Tag ${index + 1} exclusive group`}
+                      value={tag.exclusiveGroup ?? ""}
+                      onChange={(event) =>
+                        updateTag(index, { exclusiveGroup: event.target.value || null })
+                      }
+                      placeholder="Exclusive group"
+                      maxLength={80}
+                      disabled={known}
+                      {...stylex.props(styles.input)}
+                    />
+                    <Button
+                      type="button"
+                      variant="quiet"
+                      aria-label={`Remove tag ${tag.name || index + 1}`}
+                      disabled={pending}
+                      onClick={() =>
+                        setTagInputs((current) =>
+                          current.filter((_, tagIndex) => tagIndex !== index),
+                        )
+                      }
+                    >
+                      <X size={15} aria-hidden="true" />
+                    </Button>
+                  </div>
+                );
+              })}
+              <Button type="button" variant="quiet" disabled={pending} onClick={addTag}>
+                <Plus size={15} aria-hidden="true" /> Add tag
+              </Button>
+            </fieldset>
+          </Field>
+          <Field label="Required capabilities">
+            <textarea
+              aria-label="Required capabilities"
+              value={requiredCapabilities}
+              onChange={(event) => setRequiredCapabilities(event.target.value)}
+              rows={3}
+              {...stylex.props(styles.textarea)}
+            />
+          </Field>
+          <Field
+            label="Referenced paths"
+            hint="One normalized repository-relative file or directory path per line."
+          >
+            <textarea
+              aria-label="Referenced paths"
+              value={referencedPaths}
+              onChange={(event) => setReferencedPaths(event.target.value)}
+              rows={3}
+              placeholder="src/domain/tasks.ts"
+              {...stylex.props(styles.textarea)}
+            />
+          </Field>
+          {task.eligibility ? (
+            <p {...stylex.props(styles.hint)}>
+              {task.eligibility.status}: {task.eligibility.reasons.join(" ")}{" "}
+              {task.eligibility.orderingExplanation}
+            </p>
+          ) : null}
+          <Field label="Expected outcome" required>
+            <textarea
+              aria-label="Expected outcome"
+              value={expectedOutcome}
+              onChange={(event) => setExpectedOutcome(event.target.value)}
+              rows={3}
+              required
+              {...stylex.props(styles.textarea)}
+            />
+          </Field>
+          <Field label="Acceptance criteria" required>
+            <textarea
+              aria-label="Acceptance criteria"
+              value={acceptanceCriteria}
+              onChange={(event) => setAcceptanceCriteria(event.target.value)}
+              rows={4}
+              required
+              {...stylex.props(styles.textarea)}
+            />
+          </Field>
+          <Field label="Agent context" hint="Paths, constraints, and execution-specific guidance.">
+            <textarea
+              aria-label="Agent context"
+              value={agentContext}
+              onChange={(event) => setAgentContext(event.target.value)}
+              rows={3}
+              {...stylex.props(styles.textarea)}
+            />
+          </Field>
+          <Field label="Checklist" hint="One required verification step per line." required>
+            <textarea
+              aria-label="Checklist"
+              value={checklist}
+              onChange={(event) => setChecklist(event.target.value)}
+              rows={4}
+              required
+              {...stylex.props(styles.textarea)}
+            />
+          </Field>
+        </fieldset>
+        {error ? (
+          <p role="alert" {...stylex.props(styles.error)}>
+            {error}
+          </p>
+        ) : null}
+        <div {...stylex.props(styles.formFooter)}>
+          <p>Ready requires an outcome, acceptance criteria, and at least one checklist item.</p>
+          <span {...stylex.props(styles.footerActions)}>
+            {editable ? (
+              <>
+                <Button
+                  type="button"
+                  variant="quiet"
+                  disabled={pending}
+                  onClick={() => void updatePlanning()}
+                >
+                  <SlidersHorizontal size={16} aria-hidden="true" />
+                  Save planning
+                </Button>
+                <Button type="submit" disabled={pending}>
+                  <CheckCircle2 size={16} aria-hidden="true" />
+                  {pending
+                    ? "Saving…"
+                    : task.lifecycle === "ready"
+                      ? "Save preparation"
+                      : "Move to ready"}
+                </Button>
+              </>
+            ) : (
+              <span {...stylex.props(styles.hint)}>{readOnlyExplanation(task.lifecycle)}</span>
+            )}
+          </span>
+        </div>
+      </form>
+      <TaskCollaboration
+        task={task}
+        entries={activityEntries}
+        blockers={manualBlockers}
+        onCreateEntry={onCreateActivityEntry}
+        onWithdrawEntry={onWithdrawActivityEntry}
+        onCreateBlocker={onCreateManualBlocker}
+        onResolveBlocker={onResolveManualBlocker}
+      />
+    </div>
   );
 }
 
@@ -1119,6 +1237,52 @@ const styles = stylex.create({
     width: 30,
   },
   projectName: { color: tokens.foregroundMuted, fontSize: 12, marginInlineStart: tokens.space2 },
+  viewNavigation: {
+    backgroundColor: tokens.surfaceMuted,
+    borderRadius: tokens.radius2,
+    display: "flex",
+    gap: tokens.space1,
+    padding: tokens.space1,
+  },
+  viewButton: {
+    backgroundColor: "transparent",
+    borderColor: "transparent",
+    borderRadius: 6,
+    borderStyle: "solid",
+    borderWidth: 1,
+    color: tokens.foregroundMuted,
+    cursor: "pointer",
+    font: "inherit",
+    fontSize: 13,
+    fontWeight: 650,
+    minHeight: 30,
+    paddingInline: tokens.space3,
+    ":focus-visible": {
+      outlineColor: tokens.accent,
+      outlineOffset: 1,
+      outlineStyle: "solid",
+      outlineWidth: 2,
+    },
+  },
+  viewButtonActive: {
+    backgroundColor: tokens.surface,
+    borderColor: tokens.border,
+    color: tokens.foreground,
+  },
+  liveStatus: {
+    alignItems: "center",
+    color: tokens.foregroundMuted,
+    display: "inline-flex",
+    fontSize: 12,
+    gap: tokens.space2,
+  },
+  liveStatusReady: { color: tokens.accent },
+  liveDot: {
+    backgroundColor: "currentColor",
+    borderRadius: "50%",
+    height: 7,
+    width: 7,
+  },
   appearance: {
     alignItems: "center",
     color: tokens.foregroundMuted,
@@ -1255,6 +1419,7 @@ const styles = stylex.create({
     textTransform: "uppercase",
   },
   detail: { backgroundColor: tokens.surface, padding: "clamp(24px, 5vw, 64px)" },
+  detailStack: { marginInline: "auto", maxWidth: 960, width: "100%" },
   empty: {
     alignItems: "center",
     color: tokens.foregroundMuted,

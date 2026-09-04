@@ -18,6 +18,7 @@ import type { ProjectStore, RepositoryDetails } from "../application/projects";
 import type { AppState, CreateProjectInput, Project, SetThemeInput } from "../domain/projects";
 import { appStateSchema, projectSchema } from "../domain/projects";
 import { events, idempotencyRecords, preferences, projects, schema } from "../db/schema";
+import { importanceForEventKind, normalizeEventChangeHints } from "../domain/activity";
 
 const PREFERENCES_ID = 1;
 const LOCAL_HUMAN_ID = "local-human";
@@ -162,6 +163,7 @@ export function createSqliteProjectStore(
               .values({
                 projectId: project.id,
                 kind: "project.created",
+                importance: importanceForEventKind("project.created"),
                 actorType: "human",
                 actorId: LOCAL_HUMAN_ID,
                 entityType: "project",
@@ -171,6 +173,12 @@ export function createSqliteProjectStore(
                   repositoryRoot: project.repositoryRoot,
                   selected: true,
                 }),
+                changesJson: JSON.stringify(
+                  normalizeEventChangeHints({
+                    projectIds: [project.id],
+                    scopes: ["projects", "preferences"],
+                  }),
+                ),
                 occurredAt: now,
               })
               .run();
@@ -247,11 +255,18 @@ export function createSqliteProjectStore(
               .values({
                 projectId: state.activeProject?.id ?? null,
                 kind: "preference.theme.changed",
+                importance: importanceForEventKind("preference.theme.changed"),
                 actorType: "human",
                 actorId: LOCAL_HUMAN_ID,
                 entityType: "preferences",
                 entityId: String(PREFERENCES_ID),
                 payloadJson: JSON.stringify({ theme: input.theme }),
+                changesJson: JSON.stringify(
+                  normalizeEventChangeHints({
+                    projectIds: state.activeProject ? [state.activeProject.id] : [],
+                    scopes: ["preferences"],
+                  }),
+                ),
                 occurredAt: now,
               })
               .run();

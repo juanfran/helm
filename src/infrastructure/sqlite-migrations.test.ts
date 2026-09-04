@@ -26,6 +26,10 @@ const migrationNamesThrough0005 = [
   ...migrationNamesThrough0004,
   "0005_majestic_patriot.sql",
 ] as const;
+const migrationNamesThrough0006 = [
+  ...migrationNamesThrough0005,
+  "0006_vengeful_mandroid.sql",
+] as const;
 
 function temporaryDirectory(prefix: string) {
   const path = mkdtempSync(join(tmpdir(), prefix));
@@ -382,6 +386,113 @@ describe("SQLite forward migrations", () => {
             "2026-08-01T10:15:00.000Z",
           ),
       ).toThrow(/UNIQUE constraint failed/);
+    } finally {
+      projectStore.close();
+    }
+  });
+
+  it("preserves event cursors and backfills normalized feed metadata from 0006", () => {
+    const root = temporaryDirectory("helm-activity-migration-fixture-");
+    const databasePath = join(root, "helm.db");
+    const previousMigrations = createPreviousMigrationFolder(migrationNamesThrough0006);
+    const legacyDatabase = new Database(databasePath);
+    legacyDatabase.pragma("foreign_keys = ON");
+    migrate(drizzle(legacyDatabase), { migrationsFolder: previousMigrations });
+    const occurredAt = "2026-08-01T10:00:00.000Z";
+    const legacyResult = legacyTaskResult();
+
+    legacyDatabase
+      .prepare(
+        "insert into projects (id, sequence, name, repository_root, version, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("legacy-project", 1, "legacy", root, 1, occurredAt, occurredAt);
+    legacyDatabase
+      .prepare(
+        `insert into tasks (
+          id, project_id, sequence, parent_task_id, title, lifecycle, priority, position,
+          not_before, due_at, size, description_json, description_text, expected_outcome,
+          acceptance_criteria, agent_context, checklist_json, version, archived_at, created_at, updated_at
+        ) values (
+          @id, @projectId, @sequence, @parentTaskId, @title, @lifecycle, @priority, @position,
+          null, null, @size, @descriptionJson, @descriptionText, @expectedOutcome,
+          @acceptanceCriteria, @agentContext, @checklistJson, @version, @archivedAt, @createdAt, @updatedAt
+        )`,
+      )
+      .run({
+        ...legacyResult,
+        descriptionJson: JSON.stringify(legacyResult.description),
+        checklistJson: JSON.stringify(legacyResult.checklist),
+      });
+    const insertLegacyEvent = legacyDatabase.prepare(
+      "insert into events (cursor, project_id, kind, actor_type, actor_id, entity_type, entity_id, payload_json, occurred_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    insertLegacyEvent.run(
+      41,
+      "legacy-project",
+      "task.created",
+      "human",
+      "local-human",
+      "task",
+      "legacy-task",
+      '{"version":1}',
+      occurredAt,
+    );
+    insertLegacyEvent.run(
+      42,
+      "legacy-project",
+      "task.lease.expired",
+      "system",
+      "helm",
+      "task",
+      "legacy-task",
+      '{"version":2}',
+      occurredAt,
+    );
+    legacyDatabase.close();
+
+    const projectStore = createSqliteProjectStore(databasePath);
+    try {
+      const migratedEvents = projectStore.database
+        .prepare<[], { cursor: number; kind: string; importance: string; changesJson: string }>(
+          "select cursor, kind, importance, changes_json as changesJson from events order by cursor",
+        )
+        .all();
+      expect(migratedEvents.map((event) => event.cursor)).toEqual([41, 42]);
+      expect(migratedEvents.map((event) => event.importance)).toEqual(["routine", "attention"]);
+      for (const event of migratedEvents) {
+        expect(JSON.parse(event.changesJson)).toEqual({
+          projectIds: ["legacy-project"],
+          taskIds: ["legacy-task"],
+          activityEntryIds: [],
+          agentRunIds: [],
+          scopes: ["tasks"],
+        });
+      }
+      projectStore.database
+        .prepare(
+          "insert into events (project_id, kind, actor_type, actor_id, entity_type, entity_id, payload_json, occurred_at) values (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          "legacy-project",
+          "migration.cursor.checked",
+          "system",
+          "helm",
+          "task",
+          "legacy-task",
+          "{}",
+          occurredAt,
+        );
+      expect(projectStore.database.prepare("select max(cursor) from events").pluck().get()).toBe(
+        43,
+      );
+      expect(
+        projectStore.database
+          .prepare(
+            "select count(*) from sqlite_master where type = 'table' and name in ('activity_entries', 'manual_blockers')",
+          )
+          .pluck()
+          .get(),
+      ).toBe(2);
     } finally {
       projectStore.close();
     }

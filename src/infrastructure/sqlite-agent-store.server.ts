@@ -25,6 +25,7 @@ import {
 } from "../domain/agents";
 import { agentProfiles, agentRuns, events, idempotencyRecords, schema } from "../db/schema";
 import { normalizeCapabilities } from "../domain/tasks";
+import { importanceForEventKind, normalizeEventChangeHints } from "../domain/activity";
 
 type DrizzleDatabase = ReturnType<typeof drizzle<typeof schema>>;
 type DrizzleTransaction = Parameters<Parameters<DrizzleDatabase["transaction"]>[0]>[0];
@@ -88,6 +89,7 @@ function recordRunEvent(
     .values({
       projectId: null,
       kind,
+      importance: importanceForEventKind(kind),
       actorType: options.actorType ?? "agent",
       actorId: options.actorId ?? run.id,
       entityType: "agent_run",
@@ -98,6 +100,9 @@ function recordRunEvent(
         status: kind === "agent.run.closed" ? "closed" : "active",
         ...(options.reason ? { reason: options.reason } : {}),
       }),
+      changesJson: JSON.stringify(
+        normalizeEventChangeHints({ agentRunIds: [run.id], scopes: ["agents"] }),
+      ),
       occurredAt,
     })
     .run();

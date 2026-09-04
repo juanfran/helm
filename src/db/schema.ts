@@ -250,6 +250,72 @@ export const leases = sqliteTable(
   ],
 );
 
+export const activityEntries = sqliteTable(
+  "activity_entries",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id),
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id),
+    attemptId: text("attempt_id").references(() => attempts.id),
+    kind: text("kind", {
+      enum: ["comment", "progress", "decision", "change_request", "system"],
+    }).notNull(),
+    authorType: text("author_type", { enum: ["human", "agent", "system"] }).notNull(),
+    authorId: text("author_id").notNull(),
+    authorDisplayName: text("author_display_name").notNull(),
+    agentProfileId: text("agent_profile_id").references(() => agentProfiles.id),
+    agentRunId: text("agent_run_id").references(() => agentRuns.id),
+    contentJson: text("content_json").notNull(),
+    contentText: text("content_text").notNull(),
+    createdAt: text("created_at").notNull(),
+    withdrawnAt: text("withdrawn_at"),
+    withdrawnByType: text("withdrawn_by_type", {
+      enum: ["human", "agent", "system"],
+    }),
+    withdrawnById: text("withdrawn_by_id"),
+    withdrawalReason: text("withdrawal_reason"),
+  },
+  (table) => [
+    index("activity_entries_project_created_index").on(table.projectId, table.createdAt, table.id),
+    index("activity_entries_task_created_index").on(table.taskId, table.createdAt, table.id),
+    index("activity_entries_attempt_index").on(table.attemptId),
+  ],
+);
+
+export const manualBlockers = sqliteTable(
+  "manual_blockers",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id),
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id),
+    reason: text("reason").notNull(),
+    status: text("status", { enum: ["active", "resolved"] }).notNull(),
+    createdByType: text("created_by_type", { enum: ["human", "agent", "system"] }).notNull(),
+    createdById: text("created_by_id").notNull(),
+    createdAt: text("created_at").notNull(),
+    resolvedByType: text("resolved_by_type", { enum: ["human", "agent", "system"] }),
+    resolvedById: text("resolved_by_id"),
+    resolvedAt: text("resolved_at"),
+    resolution: text("resolution"),
+  },
+  (table) => [
+    index("manual_blockers_task_status_index").on(table.taskId, table.status, table.createdAt),
+    index("manual_blockers_project_status_index").on(
+      table.projectId,
+      table.status,
+      table.createdAt,
+    ),
+  ],
+);
+
 export const preferences = sqliteTable("preferences", {
   id: integer("id").primaryKey(),
   activeProjectId: text("active_project_id").references(() => projects.id),
@@ -265,11 +331,17 @@ export const events = sqliteTable(
     cursor: integer("cursor").primaryKey({ autoIncrement: true }),
     projectId: text("project_id").references(() => projects.id),
     kind: text("kind").notNull(),
+    importance: text("importance", { enum: ["routine", "attention", "critical"] })
+      .notNull()
+      .default("routine"),
     actorType: text("actor_type", { enum: ["human", "agent", "system"] }).notNull(),
     actorId: text("actor_id").notNull(),
     entityType: text("entity_type").notNull(),
     entityId: text("entity_id").notNull(),
     payloadJson: text("payload_json").notNull(),
+    changesJson: text("changes_json")
+      .notNull()
+      .default('{"projectIds":[],"taskIds":[],"activityEntryIds":[],"agentRunIds":[],"scopes":[]}'),
     occurredAt: text("occurred_at").notNull(),
   },
   (table) => [index("events_project_cursor_index").on(table.projectId, table.cursor)],
@@ -294,6 +366,8 @@ export const schema = {
   agentRuns,
   attempts,
   leases,
+  activityEntries,
+  manualBlockers,
   taskRelations,
   preferences,
   events,

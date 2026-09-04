@@ -4,7 +4,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { readTasks } from "../../server/task-functions";
-import { getTaskCollection, TASK_COLLECTION_REFETCH_INTERVAL_MS } from "./task-collection";
+import { getTaskCollection } from "./task-collection";
 
 vi.mock("../../server/task-functions", () => ({
   readTasks: vi.fn(),
@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 describe("task collection freshness", () => {
-  it("refetches an open collection every five seconds", async () => {
+  it("does not poll because durable project events drive targeted writes", async () => {
     vi.useFakeTimers();
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -28,11 +28,8 @@ describe("task collection freshness", () => {
 
     expect(readTasks).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(TASK_COLLECTION_REFETCH_INTERVAL_MS - 1);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(readTasks).toHaveBeenCalledTimes(1);
-
-    await vi.advanceTimersByTimeAsync(1);
-    expect(readTasks).toHaveBeenCalledTimes(2);
 
     queryClient.clear();
   });

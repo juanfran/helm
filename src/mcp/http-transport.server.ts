@@ -4,6 +4,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { InitializeRequestSchema, isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Effect } from "effect";
 
+import type { ActivityServices } from "../application/activity";
 import { closeAgentRun, type AgentServices } from "../application/agents";
 import type { ProjectServices } from "../application/projects";
 import { cancelTaskLeasesForRun, type TaskServices } from "../application/tasks";
@@ -30,6 +31,7 @@ export function createMcpRequestHandler(
   projectServices: ProjectServices,
   taskServices: TaskServices,
   agentServices: AgentServices,
+  activityServices: ActivityServices,
 ) {
   const sessions = new Map<string, McpHttpSession>();
   const closingSessions = new Set<string>();
@@ -79,10 +81,16 @@ export function createMcpRequestHandler(
       },
       onsessionclosed: closeSession,
     });
-    const server = createHelmMcpServer(projectServices, taskServices, agentServices, {
-      clientName: initializeRequest.params.clientInfo.name,
-      clientVersion: initializeRequest.params.clientInfo.version,
-    });
+    const server = createHelmMcpServer(
+      projectServices,
+      taskServices,
+      agentServices,
+      activityServices,
+      {
+        clientName: initializeRequest.params.clientInfo.name,
+        clientVersion: initializeRequest.params.clientInfo.version,
+      },
+    );
     session = { server, transport };
     // The MCP Transport interface exposes a callback property rather than EventTarget methods.
     // oxlint-disable-next-line unicorn/prefer-add-event-listener

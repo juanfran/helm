@@ -50,6 +50,13 @@
       "when": 1788505708112,
       "tag": "0006_vengeful_mandroid",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1788509181507,
+      "tag": "0007_sturdy_gladiator",
+      "breakpoints": true
     }
   ]
 }

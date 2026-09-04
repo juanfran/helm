@@ -630,8 +630,14 @@ describe("task application commands", () => {
       doc: {
         type: "doc" as const,
         content: [
-          { type: "heading", content: [{ type: "text", text: "Build signal" }] },
-          { type: "paragraph", content: [{ type: "text", text: "Make retries visible." }] },
+          {
+            type: "heading",
+            content: [{ type: "text", text: "Build signal" }],
+          },
+          {
+            type: "paragraph",
+            content: [{ type: "text", text: "Make retries visible." }],
+          },
         ],
       },
     };
@@ -660,7 +666,11 @@ describe("task application commands", () => {
       .get();
 
     expect(retry).toEqual(prepared);
-    expect(prepared).toMatchObject({ lifecycle: "ready", version: 2, description });
+    expect(prepared).toMatchObject({
+      lifecycle: "ready",
+      version: 2,
+      description,
+    });
     expect(prepared.descriptionText).toBe("Build signal\nMake retries visible.");
     expect(row).toEqual({
       descriptionJson: JSON.stringify(description),
@@ -748,7 +758,10 @@ describe("task application commands", () => {
 
     expect(Either.isLeft(stale) && stale.left["_tag"]).toBe("TaskVersionConflictError");
     if (Either.isLeft(stale) && stale.left["_tag"] === "TaskVersionConflictError") {
-      expect(stale.left).toMatchObject({ currentVersion: archived.version, expectedVersion: 1 });
+      expect(stale.left).toMatchObject({
+        currentVersion: archived.version,
+        expectedVersion: 1,
+      });
       expect(stale.left.changeSummary).toContain("archived");
     }
     expect(projectStore.database.prepare("select count(*) from events").pluck().get()).toBe(
@@ -774,7 +787,11 @@ describe("task application commands", () => {
     expect(retry).toEqual(archived);
     expect(visible).toEqual([]);
     expect(history).toEqual([archived]);
-    expect(archived).toMatchObject({ id: backlog.id, title: backlog.title, version: 2 });
+    expect(archived).toMatchObject({
+      id: backlog.id,
+      title: backlog.title,
+      version: 2,
+    });
     expect(archived.archivedAt).not.toBeNull();
     expect(
       projectStore.database
@@ -910,28 +927,44 @@ describe("task application commands", () => {
       urgentLater.id,
       lowDue.id,
     ]);
-    expect(lowDue).toMatchObject({ priority: "low", dueAt: "2026-09-01", size: "s" });
+    expect(lowDue).toMatchObject({
+      priority: "low",
+      dueAt: "2026-09-01",
+      size: "s",
+    });
     expect(candidates[0]?.eligibility?.orderingExplanation).toContain("stable tie-breaker #4");
   });
 
   it("rejects a stale cursor when work changes and restarts without skipping", async () => {
     const first = await Effect.runPromise(
       createTask(
-        readyInput({ title: "First", position: 1, idempotencyKey: "page-first" }),
+        readyInput({
+          title: "First",
+          position: 1,
+          idempotencyKey: "page-first",
+        }),
         human,
         taskServices,
       ),
     );
     const second = await Effect.runPromise(
       createTask(
-        readyInput({ title: "Second", position: 1, idempotencyKey: "page-second" }),
+        readyInput({
+          title: "Second",
+          position: 1,
+          idempotencyKey: "page-second",
+        }),
         human,
         taskServices,
       ),
     );
     const third = await Effect.runPromise(
       createTask(
-        readyInput({ title: "Third", position: 1, idempotencyKey: "page-third" }),
+        readyInput({
+          title: "Third",
+          position: 1,
+          idempotencyKey: "page-third",
+        }),
         human,
         taskServices,
       ),
@@ -978,14 +1011,22 @@ describe("task application commands", () => {
     };
     const first = await Effect.runPromise(
       createTask(
-        readyInput({ title: "Available first", position: 2, idempotencyKey: "dated-first" }),
+        readyInput({
+          title: "Available first",
+          position: 2,
+          idempotencyKey: "dated-first",
+        }),
         human,
         taskServices,
       ),
     );
     const last = await Effect.runPromise(
       createTask(
-        readyInput({ title: "Available last", position: 3, idempotencyKey: "dated-last" }),
+        readyInput({
+          title: "Available last",
+          position: 3,
+          idempotencyKey: "dated-last",
+        }),
         human,
         taskServices,
       ),
@@ -1032,14 +1073,22 @@ describe("task application commands", () => {
   it("binds discovery cursors to normalized agent capabilities", async () => {
     const first = await Effect.runPromise(
       createTask(
-        readyInput({ title: "Open first", position: 2, idempotencyKey: "caps-first" }),
+        readyInput({
+          title: "Open first",
+          position: 2,
+          idempotencyKey: "caps-first",
+        }),
         human,
         taskServices,
       ),
     );
     const last = await Effect.runPromise(
       createTask(
-        readyInput({ title: "Open last", position: 3, idempotencyKey: "caps-last" }),
+        readyInput({
+          title: "Open last",
+          position: 3,
+          idempotencyKey: "caps-last",
+        }),
         human,
         taskServices,
       ),
@@ -1344,7 +1393,11 @@ describe("task application commands", () => {
 
     expect(updated).toMatchObject({ priority: "urgent", version: 2 });
     expect(Either.isLeft(stale) && stale.left["_tag"]).toBe("TaskVersionConflictError");
-    expect(listed[0]).toMatchObject({ priority: "urgent", position: 1, version: 2 });
+    expect(listed[0]).toMatchObject({
+      priority: "urgent",
+      position: 1,
+      version: 2,
+    });
     expect(projectStore.database.prepare("select count(*) from events").pluck().get()).toBe(
       eventCount,
     );
@@ -1557,6 +1610,14 @@ describe("task application commands", () => {
       ),
     );
     const reblocked = await Effect.runPromise(listTasks({ projectId }, taskServices));
+    const lifecycleEventHints = projectStore.database
+      .prepare<[string], { kind: string; changesJson: string }>(
+        `select kind, changes_json as changesJson
+        from events
+        where entity_id = ? and kind in ('task.completed', 'task.reopened')
+        order by cursor`,
+      )
+      .all(blocker.id);
 
     expect(retry).toEqual(blockingRelation);
     expect(blockingRelation).toMatchObject({
@@ -1565,12 +1626,20 @@ describe("task application commands", () => {
       targetSequence: dependent.sequence,
     });
     expect(blockedDependent).toMatchObject({
-      eligibility: { claimable: false, status: "blocked", blockingTaskIds: [blocker.id] },
+      eligibility: {
+        claimable: false,
+        status: "blocked",
+        blockingTaskIds: [blocker.id],
+      },
       upstreamRelations: [expect.objectContaining({ type: "blocks" })],
     });
     expect(blockedCandidates.map((task) => task.id)).not.toContain(dependent.id);
     expect(unblocked.find((task) => task.id === dependent.id)).toMatchObject({
-      eligibility: { claimable: true, status: "claimable", blockingTaskIds: [] },
+      eligibility: {
+        claimable: true,
+        status: "claimable",
+        blockingTaskIds: [],
+      },
       upstreamRelations: [
         expect.objectContaining({ type: "blocks" }),
         expect.objectContaining({ type: "related_to" }),
@@ -1578,21 +1647,41 @@ describe("task application commands", () => {
     });
     expect(reopenedBlocker.lifecycle).toBe("ready");
     expect(reblocked.find((task) => task.id === dependent.id)).toMatchObject({
-      eligibility: { claimable: false, status: "blocked", blockingTaskIds: [blocker.id] },
+      eligibility: {
+        claimable: false,
+        status: "blocked",
+        blockingTaskIds: [blocker.id],
+      },
     });
+    expect(lifecycleEventHints.map((event) => event.kind)).toEqual([
+      "task.completed",
+      "task.reopened",
+    ]);
+    for (const event of lifecycleEventHints) {
+      expect(JSON.parse(event.changesJson)).toMatchObject({
+        taskIds: [blocker.id, dependent.id].toSorted(),
+        scopes: ["tasks"],
+      });
+    }
   });
 
   it("treats an archived blocker as withdrawn instead of stranding its dependent", async () => {
     const blocker = await Effect.runPromise(
       createTask(
-        readyInput({ title: "Withdrawn blocker", idempotencyKey: "withdrawn-blocker" }),
+        readyInput({
+          title: "Withdrawn blocker",
+          idempotencyKey: "withdrawn-blocker",
+        }),
         human,
         taskServices,
       ),
     );
     const dependent = await Effect.runPromise(
       createTask(
-        readyInput({ title: "Dependent work", idempotencyKey: "withdrawn-dependent" }),
+        readyInput({
+          title: "Dependent work",
+          idempotencyKey: "withdrawn-dependent",
+        }),
         human,
         taskServices,
       ),
@@ -1629,10 +1718,23 @@ describe("task application commands", () => {
       ),
     );
     const afterArchive = await Effect.runPromise(listTasks({ projectId }, taskServices));
+    const archiveEvent = projectStore.database
+      .prepare<[string], { changesJson: string }>(
+        "select changes_json as changesJson from events where entity_id = ? and kind = 'task.archived'",
+      )
+      .get(blocker.id);
 
     expect(afterArchive.find((task) => task.id === dependent.id)).toMatchObject({
-      eligibility: { claimable: true, status: "claimable", blockingTaskIds: [] },
+      eligibility: {
+        claimable: true,
+        status: "claimable",
+        blockingTaskIds: [],
+      },
       upstreamRelations: [expect.objectContaining({ sourceTaskId: blocker.id, type: "blocks" })],
+    });
+    expect(JSON.parse(archiveEvent!.changesJson)).toMatchObject({
+      taskIds: [blocker.id, dependent.id].toSorted(),
+      scopes: ["tasks"],
     });
   });
 
@@ -1749,14 +1851,20 @@ describe("task application commands", () => {
   it("returns a typed error for a duplicate relation without partial writes", async () => {
     const source = await Effect.runPromise(
       createTask(
-        readyInput({ title: "Duplicate source", idempotencyKey: "duplicate-source" }),
+        readyInput({
+          title: "Duplicate source",
+          idempotencyKey: "duplicate-source",
+        }),
         human,
         taskServices,
       ),
     );
     const target = await Effect.runPromise(
       createTask(
-        readyInput({ title: "Duplicate target", idempotencyKey: "duplicate-target" }),
+        readyInput({
+          title: "Duplicate target",
+          idempotencyKey: "duplicate-target",
+        }),
         human,
         taskServices,
       ),
@@ -1882,7 +1990,12 @@ describe("task application commands", () => {
     const storedAttempt = projectStore.database
       .prepare<
         [string],
-        { id: string; agentRunId: string; status: string; completedAt: string | null }
+        {
+          id: string;
+          agentRunId: string;
+          status: string;
+          completedAt: string | null;
+        }
       >(
         "select id, agent_run_id as agentRunId, status, completed_at as completedAt from attempts where task_id = ?",
       )
@@ -2158,7 +2271,9 @@ describe("task application commands", () => {
         .get(nextContested.id),
     ).toBe(1);
     expect(nextClaimEvent).toBeDefined();
-    expect(JSON.parse(nextClaimEvent ?? "{}")).toMatchObject({ selection: "next" });
+    expect(JSON.parse(nextClaimEvent ?? "{}")).toMatchObject({
+      selection: "next",
+    });
 
     const retryTask = await Effect.runPromise(
       createTask(
@@ -2200,7 +2315,10 @@ describe("task application commands", () => {
     } else {
       expect(failedRetries).toEqual([
         expect.objectContaining({
-          error: expect.objectContaining({ _tag: "TaskLeaseError", reason: "inactive" }),
+          error: expect.objectContaining({
+            _tag: "TaskLeaseError",
+            reason: "inactive",
+          }),
         }),
       ]);
     }
@@ -2344,7 +2462,12 @@ describe("task application commands", () => {
     const competingState = projectStore.database
       .prepare<
         [string],
-        { lifecycle: string; version: number; leaseStatus: string; expiresAt: string }
+        {
+          lifecycle: string;
+          version: number;
+          leaseStatus: string;
+          expiresAt: string;
+        }
       >(
         `select tasks.lifecycle, tasks.version, leases.status as leaseStatus, leases.expires_at as expiresAt
          from tasks join leases on leases.task_id = tasks.id where tasks.id = ?`,
@@ -2720,7 +2843,11 @@ describe("task application commands", () => {
       claim: null,
       eligibility: { status: "claimable", claimable: true },
     });
-    expect(lease).toEqual({ status: "expired", invalidatedAt: now, reason: "Lease expired." });
+    expect(lease).toEqual({
+      status: "expired",
+      invalidatedAt: now,
+      reason: "Lease expired.",
+    });
     expect(attempt).toEqual({
       status: "abandoned",
       summary: "Lease expired.",
@@ -2840,8 +2967,16 @@ describe("task application commands", () => {
     });
     expect(leaseStatuses).toEqual(["cancelled", "reassigned"]);
     expect(invalidationEvents).toEqual([
-      { kind: "task.lease.cancelled", actorType: "human", actorId: "local-human" },
-      { kind: "task.lease.reassigned", actorType: "human", actorId: "local-human" },
+      {
+        kind: "task.lease.cancelled",
+        actorType: "human",
+        actorId: "local-human",
+      },
+      {
+        kind: "task.lease.reassigned",
+        actorType: "human",
+        actorId: "local-human",
+      },
     ]);
   });
 
@@ -2920,7 +3055,10 @@ describe("task application commands", () => {
     expect(() => compiledCreateTaskInputSchema.parse({ ...valid, title: "" })).toThrow();
     expect(() => createTaskInputSchema.parse({ ...valid, notBefore: "2026-02-30" })).toThrow();
     expect(() =>
-      compiledCreateTaskInputSchema.parse({ ...valid, referencedPaths: ["../outside.ts"] }),
+      compiledCreateTaskInputSchema.parse({
+        ...valid,
+        referencedPaths: ["../outside.ts"],
+      }),
     ).toThrow();
     expect(() =>
       compiledCreateTaskInputSchema.parse({
@@ -2929,7 +3067,10 @@ describe("task application commands", () => {
       }),
     ).toThrow();
     expect(() =>
-      compiledCreateTaskInputSchema.parse({ ...valid, referencedPaths: ["src/\0outside.ts"] }),
+      compiledCreateTaskInputSchema.parse({
+        ...valid,
+        referencedPaths: ["src/\0outside.ts"],
+      }),
     ).toThrow();
     const planning = {
       taskId: "task-1",
@@ -3004,7 +3145,10 @@ describe("task application commands", () => {
     expect(compiledInvalidateTaskClaimInputSchema.parse(invalidation)).toEqual(invalidation);
 
     expect(() =>
-      compiledClaimTaskInputSchema.parse({ ...chosenClaim, leaseDurationSeconds: 29 }),
+      compiledClaimTaskInputSchema.parse({
+        ...chosenClaim,
+        leaseDurationSeconds: 29,
+      }),
     ).toThrow();
   });
 });

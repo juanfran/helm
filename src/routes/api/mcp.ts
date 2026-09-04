@@ -1,9 +1,19 @@
 import { createFileRoute } from "@tanstack/react-router";
 
 import { createMcpRequestHandler } from "../../mcp/http-transport.server";
-import { agentServices, projectServices, taskServices } from "../../server/project-runtime.server";
+import {
+  activityServices,
+  agentServices,
+  projectServices,
+  taskServices,
+} from "../../server/project-runtime.server";
 
-const handleMcpRequest = createMcpRequestHandler(projectServices, taskServices, agentServices);
+const handleMcpRequest = createMcpRequestHandler(
+  projectServices,
+  taskServices,
+  agentServices,
+  activityServices,
+);
 
 export const Route = createFileRoute("/api/mcp")({
   server: {

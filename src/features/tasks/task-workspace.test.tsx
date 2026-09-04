@@ -4,6 +4,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { ProjectEvent } from "../../domain/activity";
 import type { Project } from "../../domain/projects";
 import { emptyRichTextDocument, type Task } from "../../domain/tasks";
 import { TaskWorkspace } from "./task-workspace";
@@ -90,6 +91,10 @@ function props(tasks: readonly Task[] = [backlog]) {
     theme: "system" as const,
     tasks,
     tagDefinitions: tasks.flatMap((task) => task.tags),
+    activityEntries: [],
+    manualBlockers: [],
+    projectEvents: [],
+    liveStatus: "live" as const,
     onCreateTask: vi.fn(),
     onPrepareTask: vi.fn(),
     onUpdateTaskPlanning: vi.fn(),
@@ -98,11 +103,44 @@ function props(tasks: readonly Task[] = [backlog]) {
     onCreateTaskRelation: vi.fn(),
     onArchiveTask: vi.fn(),
     onInvalidateClaim: vi.fn(),
+    onCreateActivityEntry: vi.fn(),
+    onWithdrawActivityEntry: vi.fn(),
+    onCreateManualBlocker: vi.fn(),
+    onResolveManualBlocker: vi.fn(),
     onChangeTheme: vi.fn(),
   };
 }
 
 describe("task workspace", () => {
+  it("switches to the durable project activity view", async () => {
+    const user = userEvent.setup();
+    const activityEvent: ProjectEvent = {
+      id: "event-1",
+      cursor: 1,
+      projectId: project.id,
+      kind: "task.blocker.created",
+      importance: "attention",
+      actor: { type: "human", id: "local-human" },
+      entity: { type: "manual_blocker", id: "blocker-1" },
+      payload: { reason: "Needs approval" },
+      changes: {
+        projectIds: [project.id],
+        taskIds: [backlog.id],
+        activityEntryIds: [],
+        agentRunIds: [],
+        scopes: ["tasks", "activity"],
+      },
+      occurredAt: "2026-09-04T10:15:00.000Z",
+    };
+    render(<TaskWorkspace {...props()} projectEvents={[activityEvent]} />);
+
+    await user.click(screen.getByRole("button", { name: "Activity" }));
+
+    expect(screen.getByRole("heading", { name: "Project activity" })).toBeTruthy();
+    expect(screen.getByText("Needs approval")).toBeTruthy();
+    expect(screen.getByText("attention")).toBeTruthy();
+  });
+
   it("orders the live task list with the shared Helm ranking rules", () => {
     const low: Task = {
       ...backlog,

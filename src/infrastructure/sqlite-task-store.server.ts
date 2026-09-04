@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import Database from "better-sqlite3";
-import { and, asc, eq, isNull, max } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, max } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Effect } from "effect";
 
@@ -32,10 +32,12 @@ import type {
 import {
   agentProfiles,
   agentRuns,
+  activityEntries,
   attempts,
   events,
   idempotencyRecords,
   leases,
+  manualBlockers,
   projects,
   schema,
   tags,
@@ -46,6 +48,12 @@ import {
   taskTags,
 } from "../db/schema";
 import {
+  activityEntrySchema,
+  importanceForEventKind,
+  manualBlockerSchema,
+  normalizeEventChangeHints,
+} from "../domain/activity";
+import {
   compareTaskOrder,
   decodeTaskDiscoveryCursor,
   duplicateExclusiveTagGroups,
@@ -54,6 +62,7 @@ import {
   findBlockingPath,
   isIncompleteBlockingDependency,
   normalizeCapabilities,
+  richTextDocumentSchema,
   richTextToPlainText,
   tagSchema,
   taskRelationSchema,
@@ -239,6 +248,16 @@ function relationsForTask(db: DatabaseSession, taskId: string) {
   return { upstreamRelations, downstreamRelations };
 }
 
+function blockingRelationTargetIds(db: DatabaseSession, sourceTaskId: string) {
+  return db
+    .select({ id: taskRelations.targetTaskId })
+    .from(taskRelations)
+    .where(and(eq(taskRelations.sourceTaskId, sourceTaskId), eq(taskRelations.type, "blocks")))
+    .orderBy(asc(taskRelations.targetTaskId))
+    .all()
+    .map((row) => row.id);
+}
+
 function childTaskIdsForTask(db: DatabaseSession, taskId: string) {
   return db
     .select({ id: tasks.id })
@@ -389,6 +408,59 @@ function referencedPathsForTask(db: DatabaseSession, taskId: string) {
     .map((entry) => entry.path);
 }
 
+function activeManualBlockersForTask(db: DatabaseSession, taskId: string) {
+  return db
+    .select()
+    .from(manualBlockers)
+    .where(and(eq(manualBlockers.taskId, taskId), eq(manualBlockers.status, "active")))
+    .orderBy(asc(manualBlockers.createdAt), asc(manualBlockers.id))
+    .all()
+    .map((row) =>
+      manualBlockerSchema.parse({
+        id: row.id,
+        projectId: row.projectId,
+        taskId: row.taskId,
+        reason: row.reason,
+        status: row.status,
+        createdBy: { type: row.createdByType, id: row.createdById },
+        createdAt: row.createdAt,
+        resolvedBy: null,
+        resolvedAt: null,
+        resolution: null,
+      }),
+    );
+}
+
+function activityEntriesForTask(db: DatabaseSession, taskId: string) {
+  return db
+    .select()
+    .from(activityEntries)
+    .where(eq(activityEntries.taskId, taskId))
+    .orderBy(asc(activityEntries.createdAt), asc(activityEntries.id))
+    .all()
+    .map((row) =>
+      activityEntrySchema.parse({
+        id: row.id,
+        projectId: row.projectId,
+        taskId: row.taskId,
+        attemptId: row.attemptId,
+        kind: row.kind,
+        author: { type: row.authorType, id: row.authorId },
+        authorDisplayName: row.authorDisplayName,
+        agentProfileId: row.agentProfileId,
+        content: row.withdrawnAt ? null : JSON.parse(row.contentJson),
+        contentText: row.withdrawnAt ? "" : row.contentText,
+        createdAt: row.createdAt,
+        withdrawnAt: row.withdrawnAt,
+        withdrawnBy:
+          row.withdrawnByType && row.withdrawnById
+            ? { type: row.withdrawnByType, id: row.withdrawnById }
+            : null,
+        withdrawalReason: row.withdrawalReason,
+      }),
+    );
+}
+
 function taskFromRow(db: DatabaseSession, row: TaskRow, context?: TaskEvaluationContext): Task {
   const { upstreamRelations, downstreamRelations } = relationsForTask(db, row.id);
   const blockingTaskIds = incompleteBlockingDependencies(db, row.id).map((task) => task.id);
@@ -407,6 +479,7 @@ function taskFromRow(db: DatabaseSession, row: TaskRow, context?: TaskEvaluation
     .orderBy(asc(taskCapabilityRequirements.capability))
     .all()
     .map((entry) => entry.capability);
+  const activeManualBlockers = activeManualBlockersForTask(db, row.id);
   const task = taskSchema.parse({
     id: row.id,
     projectId: row.projectId,
@@ -426,6 +499,7 @@ function taskFromRow(db: DatabaseSession, row: TaskRow, context?: TaskEvaluation
     claim: context ? activeClaimForTask(db, row.id, context.now) : null,
     upstreamRelations,
     downstreamRelations,
+    manualBlockers: activeManualBlockers,
     description: JSON.parse(row.descriptionJson),
     descriptionText: row.descriptionText,
     expectedOutcome: row.expectedOutcome,
@@ -438,7 +512,10 @@ function taskFromRow(db: DatabaseSession, row: TaskRow, context?: TaskEvaluation
     updatedAt: row.updatedAt,
   });
   return context
-    ? { ...task, eligibility: evaluateTaskEligibility(task, context, blockingTaskIds) }
+    ? {
+        ...task,
+        eligibility: evaluateTaskEligibility(task, context, blockingTaskIds, activeManualBlockers),
+      }
     : task;
 }
 
@@ -617,9 +694,19 @@ function findIdempotentResult(
     .map((relation) => currentTask(db, relation.sourceTaskId))
     .filter(isIncompleteBlockingDependency)
     .map((task) => task.id);
-  return {
+  const currentManualBlockers = activeManualBlockersForTask(db, durableTask.id);
+  const refreshedTask = {
     ...durableTask,
-    eligibility: evaluateTaskEligibility(durableTask, context, blockingTaskIds),
+    manualBlockers: currentManualBlockers,
+  };
+  return {
+    ...refreshedTask,
+    eligibility: evaluateTaskEligibility(
+      refreshedTask,
+      context,
+      blockingTaskIds,
+      currentManualBlockers,
+    ),
   };
 }
 
@@ -718,11 +805,19 @@ function recordLeaseMutation(
     .values({
       projectId: result.task.projectId,
       kind: event.kind,
+      importance: importanceForEventKind(event.kind),
       actorType: actor.type,
       actorId: actor.id,
       entityType: "task",
       entityId: result.task.id,
       payloadJson: JSON.stringify(event.payload),
+      changesJson: JSON.stringify(
+        normalizeEventChangeHints({
+          projectIds: [result.task.projectId],
+          taskIds: [result.task.id],
+          scopes: ["tasks"],
+        }),
+      ),
       occurredAt: event.occurredAt,
     })
     .run();
@@ -750,15 +845,28 @@ function recordMutation(
   actor: Actor,
   event: { kind: string; payload: unknown },
 ) {
+  const eligibilityChangedTaskIds = ["task.completed", "task.reopened", "task.archived"].includes(
+    event.kind,
+  )
+    ? blockingRelationTargetIds(db, result.id)
+    : [];
   db.insert(events)
     .values({
       projectId: result.projectId,
       kind: event.kind,
+      importance: importanceForEventKind(event.kind),
       actorType: actor.type,
       actorId: actor.id,
       entityType: "task",
       entityId: result.id,
       payloadJson: JSON.stringify(event.payload),
+      changesJson: JSON.stringify(
+        normalizeEventChangeHints({
+          projectIds: [result.projectId],
+          taskIds: [result.id, ...eligibilityChangedTaskIds],
+          scopes: ["tasks"],
+        }),
+      ),
       occurredAt: result.updatedAt,
     })
     .run();
@@ -786,6 +894,7 @@ function recordRelationMutation(
     .values({
       projectId: result.projectId,
       kind: "task.relation.created",
+      importance: importanceForEventKind("task.relation.created"),
       actorType: actor.type,
       actorId: actor.id,
       entityType: "task_relation",
@@ -795,6 +904,13 @@ function recordRelationMutation(
         targetTaskId: result.targetTaskId,
         type: result.type,
       }),
+      changesJson: JSON.stringify(
+        normalizeEventChangeHints({
+          projectIds: [result.projectId],
+          taskIds: [result.sourceTaskId, result.targetTaskId],
+          scopes: ["tasks"],
+        }),
+      ),
       occurredAt,
     })
     .run();
@@ -812,7 +928,10 @@ function recordRelationMutation(
 function currentTask(db: DatabaseSession, taskId: string) {
   const [row] = db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1).all();
   if (!row) {
-    throw new TaskNotFoundError({ taskId, message: "That task does not exist." });
+    throw new TaskNotFoundError({
+      taskId,
+      message: "That task does not exist.",
+    });
   }
   return row;
 }
@@ -820,7 +939,10 @@ function currentTask(db: DatabaseSession, taskId: string) {
 function projectRepositoryRoot(db: DatabaseSession, projectId: string) {
   const [project] = db.select().from(projects).where(eq(projects.id, projectId)).limit(1).all();
   if (!project) {
-    throw new TaskNotFoundError({ taskId: projectId, message: "That project does not exist." });
+    throw new TaskNotFoundError({
+      taskId: projectId,
+      message: "That project does not exist.",
+    });
   }
   return project.repositoryRoot;
 }
@@ -861,6 +983,7 @@ function taskContextFromInput(db: DatabaseSession, input: TaskContextQuery): Tas
       referencedPaths: projectContext.referencedPaths,
     },
     priorAttempts: attemptSummariesForTask(db, task.id),
+    entries: activityEntriesForTask(db, task.id),
     projectInstructions: projectContext.instructions,
   });
 }
@@ -993,6 +1116,46 @@ function closeLeaseAttempt(
     .run();
 }
 
+function insertSystemLeaseActivity(
+  db: DatabaseSession,
+  task: TaskRow,
+  lease: LeaseRow,
+  status: "expired" | "cancelled",
+  reason: string,
+  now: string,
+) {
+  const entryId = `system-lease-${status}-${lease.id}`;
+  const content = richTextDocumentSchema.parse({
+    version: 1,
+    doc: {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: reason }] }],
+    },
+  });
+  db.insert(activityEntries)
+    .values({
+      id: entryId,
+      projectId: task.projectId,
+      taskId: task.id,
+      attemptId: lease.attemptId,
+      kind: "system",
+      authorType: "system",
+      authorId: "helm",
+      authorDisplayName: "Helm",
+      agentProfileId: null,
+      agentRunId: null,
+      contentJson: JSON.stringify(content),
+      contentText: reason,
+      createdAt: now,
+      withdrawnAt: null,
+      withdrawnByType: null,
+      withdrawnById: null,
+      withdrawalReason: null,
+    })
+    .run();
+  return entryId;
+}
+
 function invalidateLeaseAsSystem(
   db: DatabaseSession,
   lease: LeaseRow,
@@ -1009,10 +1172,13 @@ function invalidateLeaseAsSystem(
       .where(and(eq(tasks.id, task.id), eq(tasks.version, task.version)))
       .run();
   }
+  const activityEntryId = insertSystemLeaseActivity(db, task, lease, status, reason, now);
+  const kind = status === "expired" ? "task.lease.expired" : "task.lease.cancelled";
   db.insert(events)
     .values({
       projectId: task.projectId,
-      kind: status === "expired" ? "task.lease.expired" : "task.lease.cancelled",
+      kind,
+      importance: importanceForEventKind(kind),
       actorType: "system",
       actorId: "helm",
       entityType: "task",
@@ -1024,7 +1190,17 @@ function invalidateLeaseAsSystem(
         previousVersion: task.version,
         version: returnsToReady ? task.version + 1 : task.version,
         reason,
+        activityEntryId,
       }),
+      changesJson: JSON.stringify(
+        normalizeEventChangeHints({
+          projectIds: [task.projectId],
+          taskIds: [task.id],
+          activityEntryIds: [activityEntryId],
+          agentRunIds: [lease.agentRunId],
+          scopes: ["activity", "tasks", "agents"],
+        }),
+      ),
       occurredAt: now,
     })
     .run();
@@ -1186,7 +1362,11 @@ function invalidateLease(
   }
   closeLeaseAttempt(db, lease, status, reason, context.now);
   db.update(tasks)
-    .set({ lifecycle: "ready", version: row.version + 1, updatedAt: context.now })
+    .set({
+      lifecycle: "ready",
+      version: row.version + 1,
+      updatedAt: context.now,
+    })
     .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
     .run();
   return taskLeaseMutationResultSchema.parse({
@@ -1218,9 +1398,11 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
     list(input: TaskListQuery) {
       return Effect.try({
         try: () => {
-          const where = input.includeArchived
-            ? eq(tasks.projectId, input.projectId)
-            : and(eq(tasks.projectId, input.projectId), isNull(tasks.archivedAt));
+          const where = input.taskIds
+            ? and(eq(tasks.projectId, input.projectId), inArray(tasks.id, input.taskIds))
+            : input.includeArchived
+              ? eq(tasks.projectId, input.projectId)
+              : and(eq(tasks.projectId, input.projectId), isNull(tasks.archivedAt));
           return db
             .select()
             .from(tasks)
@@ -1902,7 +2084,11 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
 
             const now = new Date().toISOString();
             tx.update(tasks)
-              .set({ lifecycle: "done", version: row.version + 1, updatedAt: now })
+              .set({
+                lifecycle: "done",
+                version: row.version + 1,
+                updatedAt: now,
+              })
               .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
               .run();
             const task = taskFromRow(tx, currentTask(tx, row.id), context);
@@ -1941,7 +2127,11 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
 
             const now = new Date().toISOString();
             tx.update(tasks)
-              .set({ lifecycle: "ready", version: row.version + 1, updatedAt: now })
+              .set({
+                lifecycle: "ready",
+                version: row.version + 1,
+                updatedAt: now,
+              })
               .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
               .run();
             const task = taskFromRow(tx, currentTask(tx, row.id), context);
@@ -2102,7 +2292,11 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
               );
             }
             tx.update(tasks)
-              .set({ archivedAt: now, version: row.version + 1, updatedAt: now })
+              .set({
+                archivedAt: now,
+                version: row.version + 1,
+                updatedAt: now,
+              })
               .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
               .run();
             const task = taskFromRow(tx, currentTask(tx, row.id), context);

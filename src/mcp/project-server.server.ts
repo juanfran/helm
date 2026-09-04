@@ -4,6 +4,12 @@ import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sd
 import { Effect, Either } from "effect";
 import { z } from "zod";
 
+import {
+  listActivityEntries,
+  readActivityEvents,
+  type ActivityServices,
+} from "../application/activity";
+import { toActivityErrorDto, type ActivityErrorDto } from "../application/activity-errors";
 import { toAgentErrorDto, type AgentErrorDto } from "../application/agent-errors";
 import { registerAgentRun, requireAgentRun, type AgentServices } from "../application/agents";
 import { getAppState, listProjects, type ProjectServices } from "../application/projects";
@@ -18,6 +24,16 @@ import {
 } from "../application/tasks";
 import { toTaskErrorDto } from "../application/task-errors";
 import { registeredAgentRunSchema, registerAgentRunInputSchema } from "../domain/agents";
+import {
+  activityEntryMutationResultSchema,
+  activityEntrySchema,
+  activityEventPageSchema,
+  createAgentActivityEntryInputSchema,
+  createAgentManualBlockerInputSchema,
+  listActivityEntriesInputSchema,
+  manualBlockerMutationResultSchema,
+  readActivityEventsInputSchema,
+} from "../domain/activity";
 import { appStateSchema, projectSchema } from "../domain/projects";
 import {
   claimNextTaskInputSchema,
@@ -38,6 +54,10 @@ import {
   taskSchema,
   type Actor,
 } from "../domain/tasks";
+import {
+  executeCreateAgentActivityEntry,
+  executeCreateAgentManualBlocker,
+} from "../server/activity-adapter";
 import {
   executeCompleteTask,
   executeCreateTask,
@@ -69,7 +89,11 @@ const agentErrorSchema = z.discriminatedUnion("type", [
 
 const taskErrorSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("InvalidTaskInputError"), message: z.string() }),
-  z.object({ type: z.literal("TaskNotFoundError"), message: z.string(), taskId: z.string() }),
+  z.object({
+    type: z.literal("TaskNotFoundError"),
+    message: z.string(),
+    taskId: z.string(),
+  }),
   z.object({
     type: z.literal("TaskPreparationError"),
     message: z.string(),
@@ -123,7 +147,11 @@ const taskErrorSchema = z.discriminatedUnion("type", [
     message: z.string(),
     tagName: z.string(),
   }),
-  z.object({ type: z.literal("TaskPathError"), message: z.string(), path: z.string() }),
+  z.object({
+    type: z.literal("TaskPathError"),
+    message: z.string(),
+    path: z.string(),
+  }),
   z.object({
     type: z.literal("TaskDiscoveryCursorStaleError"),
     message: z.string(),
@@ -155,12 +183,75 @@ const taskErrorSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("TaskPersistenceError"), message: z.string() }),
 ]);
 
+const activityErrorSchema = z.object({
+  type: z.enum([
+    "InvalidActivityInputError",
+    "ActivityEntryNotFoundError",
+    "ActivityEntryWithdrawnError",
+    "ActivityAttributionError",
+    "ActivityIdempotencyConflictError",
+    "ManualBlockerNotFoundError",
+    "ManualBlockerStateError",
+    "TaskNotFoundError",
+    "TaskVersionConflictError",
+    "TaskLeaseError",
+    "ActivityPersistenceError",
+  ]),
+  message: z.string(),
+  entryId: z.string().optional(),
+  blockerId: z.string().optional(),
+  taskId: z.string().optional(),
+  leaseId: z.string().optional(),
+  expectedVersion: z.number().optional(),
+  currentVersion: z.number().optional(),
+  changeSummary: z.string().optional(),
+  status: z.string().optional(),
+  key: z.string().optional(),
+  leaseReason: z
+    .enum(["not_found", "required", "expired", "inactive", "owner_mismatch", "inactive_run"])
+    .optional(),
+});
+
+const activityToolErrorSchema = z.union([agentErrorSchema, activityErrorSchema]);
+const agentActivityEntryInputSchema = createAgentActivityEntryInputSchema.options[1].omit({
+  kind: true,
+});
+const reportProgressInputSchema = createAgentActivityEntryInputSchema.options[0].omit({
+  kind: true,
+});
+const listTaskEntriesInputSchema = listActivityEntriesInputSchema
+  .omit({ entryIds: true })
+  .required({ taskId: true });
+const readForwardEventsInputSchema = readActivityEventsInputSchema.omit({
+  direction: true,
+  beforeCursor: true,
+});
+
+function activityToolOutputSchema<TPayload extends z.ZodType>(payload: TPayload) {
+  return {
+    ok: z.boolean(),
+    payload: payload.optional(),
+    error: activityToolErrorSchema.optional(),
+  };
+}
+
 function jsonToolResult<T extends object>(structuredContent: T, isError = false) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }],
     structuredContent,
     isError,
   };
+}
+
+function activityMutationToolResult(
+  response:
+    | { readonly ok: true; readonly result: object }
+    | { readonly ok: false; readonly error: ActivityErrorDto },
+) {
+  const structuredContent = response.ok
+    ? { ok: true, payload: response.result }
+    : { ok: false, error: response.error };
+  return jsonToolResult(structuredContent, !structuredContent.ok);
 }
 
 function sessionFromExtra(extra: McpExtra, client: McpClientIdentity) {
@@ -195,7 +286,10 @@ async function actorForTool(extra: McpExtra, services: AgentServices, client: Mc
   if (!registered.ok) return registered;
   return {
     ok: true as const,
-    actor: { type: "agent", id: registered.registration.run.id } satisfies Actor,
+    actor: {
+      type: "agent",
+      id: registered.registration.run.id,
+    } satisfies Actor,
     capabilities: registered.registration.profile.capabilities,
   };
 }
@@ -204,6 +298,7 @@ export function createHelmMcpServer(
   services: ProjectServices,
   taskServices: TaskServices,
   agentServices: AgentServices,
+  activityServices: ActivityServices,
   client: McpClientIdentity = { clientName: null, clientVersion: null },
 ) {
   const server = new McpServer({ name: "helm", version: "0.1.0" });
@@ -309,6 +404,163 @@ export function createHelmMcpServer(
       const structuredContent = Either.isRight(result)
         ? { ok: true, context: result.right }
         : { ok: false, error: toTaskErrorDto(result.left) };
+      return jsonToolResult(structuredContent, !structuredContent.ok);
+    },
+  );
+
+  server.registerTool(
+    "add_comment",
+    {
+      title: "Add task comment",
+      description: "Add an attributed comment to a task as the registered agent run.",
+      inputSchema: agentActivityEntryInputSchema,
+      outputSchema: activityToolOutputSchema(activityEntryMutationResultSchema),
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const response = await executeCreateAgentActivityEntry(
+        { ...input, kind: "comment" },
+        registered.registration,
+        activityServices,
+      );
+      return activityMutationToolResult(response);
+    },
+  );
+
+  server.registerTool(
+    "report_progress",
+    {
+      title: "Report task progress",
+      description:
+        "Report progress for the registered agent's active task attempt using its lease token.",
+      inputSchema: reportProgressInputSchema,
+      outputSchema: activityToolOutputSchema(activityEntryMutationResultSchema),
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const response = await executeCreateAgentActivityEntry(
+        { ...input, kind: "progress" },
+        registered.registration,
+        activityServices,
+      );
+      return activityMutationToolResult(response);
+    },
+  );
+
+  server.registerTool(
+    "report_blocker",
+    {
+      title: "Report task blocker",
+      description:
+        "Report an explicit blocker for the registered agent's active task attempt using its lease token.",
+      inputSchema: createAgentManualBlockerInputSchema,
+      outputSchema: activityToolOutputSchema(manualBlockerMutationResultSchema),
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const response = await executeCreateAgentManualBlocker(
+        input,
+        registered.registration,
+        activityServices,
+      );
+      return activityMutationToolResult(response);
+    },
+  );
+
+  server.registerTool(
+    "record_decision",
+    {
+      title: "Record task decision",
+      description: "Record an attributed decision on a task as the registered agent run.",
+      inputSchema: agentActivityEntryInputSchema,
+      outputSchema: activityToolOutputSchema(activityEntryMutationResultSchema),
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const response = await executeCreateAgentActivityEntry(
+        { ...input, kind: "decision" },
+        registered.registration,
+        activityServices,
+      );
+      return activityMutationToolResult(response);
+    },
+  );
+
+  server.registerTool(
+    "request_change",
+    {
+      title: "Request a task change",
+      description: "Record an attributed change request on a task as the registered agent run.",
+      inputSchema: agentActivityEntryInputSchema,
+      outputSchema: activityToolOutputSchema(activityEntryMutationResultSchema),
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const response = await executeCreateAgentActivityEntry(
+        { ...input, kind: "change_request" },
+        registered.registration,
+        activityServices,
+      );
+      return activityMutationToolResult(response);
+    },
+  );
+
+  server.registerTool(
+    "list_task_entries",
+    {
+      title: "List task activity entries",
+      description: "List attributed activity entries for one task in deterministic order.",
+      inputSchema: listTaskEntriesInputSchema,
+      outputSchema: activityToolOutputSchema(z.array(activityEntrySchema)),
+      annotations: { readOnlyHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const result = await Effect.runPromise(
+        Effect.either(listActivityEntries(input, activityServices)),
+      );
+      const structuredContent = Either.isRight(result)
+        ? { ok: true, payload: [...result.right] }
+        : { ok: false, error: toActivityErrorDto(result.left) };
+      return jsonToolResult(structuredContent, !structuredContent.ok);
+    },
+  );
+
+  server.registerTool(
+    "read_events",
+    {
+      title: "Read Helm events",
+      description:
+        "Read committed project events after a durable cursor in forward deterministic order.",
+      inputSchema: readForwardEventsInputSchema,
+      outputSchema: activityToolOutputSchema(activityEventPageSchema),
+      annotations: { readOnlyHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const result = await Effect.runPromise(
+        Effect.either(
+          readActivityEvents(
+            { ...input, direction: "forward", beforeCursor: null },
+            activityServices,
+          ),
+        ),
+      );
+      const structuredContent = Either.isRight(result)
+        ? { ok: true, payload: result.right }
+        : { ok: false, error: toActivityErrorDto(result.left) };
       return jsonToolResult(structuredContent, !structuredContent.ok);
     },
   );

@@ -41,11 +41,13 @@ and a server restart make the token unusable.
 
 Registered agents can use `add_comment`, `record_decision`, and `request_change` to append attributed
 task history. `report_progress` additionally requires the active claim's lease token, which binds the
-entry to its execution attempt. `list_task_entries` returns stable text projections, and `read_events`
-reads the durable event log after a monotonic cursor. The browser's task, list, and activity views use the
-same event log through `/api/events`; reconnects replay missed commits and update only affected local
-records. Humans can add the same semantic entries, report or resolve explicit manual blockers, and
-withdraw entries without deleting their audit metadata.
+entry to its execution attempt. `report_blocker` uses the same lease proof to create an explicit manual
+blocker for human attention; only the local human resolves it. `list_task_entries` returns stable text
+projections, and `read_events` reads the durable event log after a monotonic cursor. Helm records automatic
+lease expiry and agent-session closure as system timeline entries. The browser's task, list, and activity
+views use the same event log through `/api/events`; reconnects replay missed commits and update only
+affected local records. Humans can add the same semantic entries, report or resolve explicit manual
+blockers, and withdraw human or agent entries without deleting their audit metadata.
 
 `list_projects` and `get_active_project` remain available as read-only project queries. Discovery cursors
 are bound to the queue revision, evaluation date, project, and normalized agent capabilities. If any of
