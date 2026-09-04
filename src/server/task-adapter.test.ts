@@ -6,6 +6,7 @@ import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createProject } from "../application/projects";
+import type { TaskServices } from "../application/tasks";
 import { emptyRichTextDocument } from "../domain/tasks";
 import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
 import {
@@ -23,7 +24,7 @@ import {
 let temporaryRoot: string;
 let projectStore: SqliteProjectStore;
 let projectId: string;
-let taskServices: { store: ReturnType<typeof createSqliteTaskStore> };
+let taskServices: TaskServices;
 const actor = { type: "human" as const, id: "adapter-human" };
 
 beforeEach(async () => {
@@ -38,7 +39,10 @@ beforeEach(async () => {
     ),
   );
   projectId = project.id;
-  taskServices = { store: createSqliteTaskStore(projectStore.database) };
+  taskServices = {
+    store: createSqliteTaskStore(projectStore.database),
+    clock: { today: () => "2026-09-03" },
+  };
 });
 
 afterEach(async () => {

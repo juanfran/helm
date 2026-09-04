@@ -7,7 +7,7 @@ import { z } from "zod";
 import { toAgentErrorDto, type AgentErrorDto } from "../application/agent-errors";
 import { registerAgentRun, requireAgentRun, type AgentServices } from "../application/agents";
 import { getAppState, listProjects, type ProjectServices } from "../application/projects";
-import { discoverTasks, findWork, getTaskContext, type TaskServices } from "../application/tasks";
+import { findWork, getTaskContext, type TaskServices } from "../application/tasks";
 import { toTaskErrorDto } from "../application/task-errors";
 import { registeredAgentRunSchema, registerAgentRunInputSchema } from "../domain/agents";
 import { appStateSchema, projectSchema } from "../domain/projects";
@@ -15,7 +15,6 @@ import {
   completeTaskInputSchema,
   createTaskInputSchema,
   createTaskRelationInputSchema,
-  discoverTasksInputSchema,
   findWorkInputSchema,
   reopenTaskInputSchema,
   taskContextInputSchema,
@@ -38,28 +37,88 @@ export type McpClientIdentity = {
   readonly clientVersion: string | null;
 };
 
-const agentErrorSchema = z.object({
-  type: z.string(),
-  message: z.string(),
-  runId: z.string().optional(),
-});
+const agentErrorSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("InvalidAgentInputError"), message: z.string() }),
+  z.object({ type: z.literal("AgentRunRequiredError"), message: z.string() }),
+  z.object({
+    type: z.literal("AgentRunRegistrationError"),
+    message: z.string(),
+    runId: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal("AgentIdempotencyConflictError"),
+    message: z.string(),
+    key: z.string(),
+  }),
+  z.object({ type: z.literal("AgentPersistenceError"), message: z.string() }),
+]);
 
-const taskErrorSchema = z.object({
-  type: z.string(),
-  message: z.string(),
-  taskId: z.string().optional(),
-  missingFields: z.array(z.string()).optional(),
-  expectedVersion: z.number().optional(),
-  currentVersion: z.number().optional(),
-  changeSummary: z.string().optional(),
-  group: z.string().optional(),
-  tagNames: z.array(z.string()).optional(),
-  lifecycle: z.string().optional(),
-  parentTaskId: z.string().optional(),
-  sourceTaskId: z.string().optional(),
-  targetTaskId: z.string().optional(),
-  relationPath: z.array(z.string()).optional(),
-});
+const taskErrorSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("InvalidTaskInputError"), message: z.string() }),
+  z.object({ type: z.literal("TaskNotFoundError"), message: z.string(), taskId: z.string() }),
+  z.object({
+    type: z.literal("TaskPreparationError"),
+    message: z.string(),
+    missingFields: z.array(z.string()),
+  }),
+  z.object({
+    type: z.literal("TaskVersionConflictError"),
+    message: z.string(),
+    taskId: z.string(),
+    expectedVersion: z.number(),
+    currentVersion: z.number(),
+    changeSummary: z.string(),
+  }),
+  z.object({
+    type: z.literal("TaskAlreadyArchivedError"),
+    message: z.string(),
+    taskId: z.string(),
+  }),
+  z.object({
+    type: z.literal("TaskLifecycleError"),
+    message: z.string(),
+    taskId: z.string(),
+    lifecycle: z.string(),
+  }),
+  z.object({
+    type: z.literal("TaskNestingError"),
+    message: z.string(),
+    taskId: z.string(),
+    parentTaskId: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal("TaskRelationError"),
+    message: z.string(),
+    sourceTaskId: z.string(),
+    targetTaskId: z.string(),
+    relationPath: z.array(z.string()),
+  }),
+  z.object({
+    type: z.literal("TaskIdempotencyConflictError"),
+    message: z.string(),
+    key: z.string(),
+  }),
+  z.object({
+    type: z.literal("TaskTagConstraintError"),
+    message: z.string(),
+    group: z.string(),
+    tagNames: z.array(z.string()),
+  }),
+  z.object({
+    type: z.literal("TaskTagDefinitionConflictError"),
+    message: z.string(),
+    tagName: z.string(),
+  }),
+  z.object({ type: z.literal("TaskPathError"), message: z.string(), path: z.string() }),
+  z.object({
+    type: z.literal("TaskDiscoveryCursorStaleError"),
+    message: z.string(),
+    cursorRevision: z.number(),
+    currentRevision: z.number(),
+    staleBecause: z.enum(["queue_changed", "evaluation_context_changed"]),
+  }),
+  z.object({ type: z.literal("TaskPersistenceError"), message: z.string() }),
+]);
 
 function jsonToolResult<T extends object>(structuredContent: T, isError = false) {
   return {
@@ -102,6 +161,7 @@ async function actorForTool(extra: McpExtra, services: AgentServices, client: Mc
   return {
     ok: true as const,
     actor: { type: "agent", id: registered.registration.run.id } satisfies Actor,
+    capabilities: registered.registration.profile.capabilities,
   };
 }
 
@@ -206,7 +266,11 @@ export function createHelmMcpServer(
     async (input, extra) => {
       const registered = await registeredRunForTool(extra, agentServices, client);
       if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
-      const result = await Effect.runPromise(Effect.either(getTaskContext(input, taskServices)));
+      const result = await Effect.runPromise(
+        Effect.either(
+          getTaskContext(input, registered.registration.profile.capabilities, taskServices),
+        ),
+      );
       const structuredContent = Either.isRight(result)
         ? { ok: true, context: result.right }
         : { ok: false, error: toTaskErrorDto(result.left) };
@@ -231,7 +295,12 @@ export function createHelmMcpServer(
     async (input, extra) => {
       const actor = await actorForTool(extra, agentServices, client);
       if (!actor.ok) return jsonToolResult({ ok: false, error: actor.error }, true);
-      const response = await executeCreateTask(input, actor.actor, taskServices);
+      const response = await executeCreateTask(
+        input,
+        actor.actor,
+        taskServices,
+        actor.capabilities,
+      );
       return jsonToolResult(response, !response.ok);
     },
   );
@@ -275,7 +344,12 @@ export function createHelmMcpServer(
     async (input, extra) => {
       const actor = await actorForTool(extra, agentServices, client);
       if (!actor.ok) return jsonToolResult({ ok: false, error: actor.error }, true);
-      const response = await executeCompleteTask(input, actor.actor, taskServices);
+      const response = await executeCompleteTask(
+        input,
+        actor.actor,
+        taskServices,
+        actor.capabilities,
+      );
       return jsonToolResult(response, !response.ok);
     },
   );
@@ -297,25 +371,13 @@ export function createHelmMcpServer(
     async (input, extra) => {
       const actor = await actorForTool(extra, agentServices, client);
       if (!actor.ok) return jsonToolResult({ ok: false, error: actor.error }, true);
-      const response = await executeReopenTask(input, actor.actor, taskServices);
+      const response = await executeReopenTask(
+        input,
+        actor.actor,
+        taskServices,
+        actor.capabilities,
+      );
       return jsonToolResult(response, !response.ok);
-    },
-  );
-
-  server.registerTool(
-    "discover_tasks",
-    {
-      title: "Discover claimable Helm tasks",
-      description: "Compatibility read that returns claimable ready work from Helm's shared query.",
-      inputSchema: discoverTasksInputSchema,
-      outputSchema: {
-        tasks: z.array(taskSchema),
-      },
-      annotations: { readOnlyHint: true },
-    },
-    async (input) => {
-      const tasks = await Effect.runPromise(discoverTasks(input, taskServices));
-      return jsonToolResult({ tasks: [...tasks] });
     },
   );
 

@@ -21,6 +21,7 @@ export interface AgentStore {
   ): Effect.Effect<RegisteredAgentRun, AgentCommandError>;
   resolveRun(session: McpSessionContext): Effect.Effect<RegisteredAgentRun, AgentCommandError>;
   closeRun(sessionId: string): Effect.Effect<void, AgentPersistenceError>;
+  reconcileActiveRuns(): Effect.Effect<void, AgentPersistenceError>;
 }
 
 export type AgentServices = { store: AgentStore };
@@ -61,4 +62,8 @@ export function requireAgentRun(session: unknown, services: AgentServices) {
 
 export function closeAgentRun(sessionId: string, services: AgentServices) {
   return services.store.closeRun(sessionId);
+}
+
+export function reconcileActiveAgentRuns(services: AgentServices) {
+  return services.store.reconcileActiveRuns();
 }

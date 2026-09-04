@@ -40,8 +40,13 @@ async function executeRelation(
     : { ok: false, error: toTaskErrorDto(result.left) };
 }
 
-export function executeCreateTask(data: unknown, actor: Actor, services: TaskServices) {
-  return execute(createTask(data, actor, services));
+export function executeCreateTask(
+  data: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
+  return execute(createTask(data, actor, services, agentCapabilities));
 }
 
 export function executePrepareTask(data: unknown, actor: Actor, services: TaskServices) {
@@ -52,12 +57,22 @@ export function executeUpdateTaskPlanning(data: unknown, actor: Actor, services:
   return execute(updateTaskPlanning(data, actor, services));
 }
 
-export function executeCompleteTask(data: unknown, actor: Actor, services: TaskServices) {
-  return execute(completeTask(data, actor, services));
+export function executeCompleteTask(
+  data: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
+  return execute(completeTask(data, actor, services, agentCapabilities));
 }
 
-export function executeReopenTask(data: unknown, actor: Actor, services: TaskServices) {
-  return execute(reopenTask(data, actor, services));
+export function executeReopenTask(
+  data: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
+  return execute(reopenTask(data, actor, services, agentCapabilities));
 }
 
 export function executeCreateTaskRelation(data: unknown, actor: Actor, services: TaskServices) {

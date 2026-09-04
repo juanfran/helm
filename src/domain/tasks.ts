@@ -74,10 +74,56 @@ export type TaskPriority = z.infer<typeof taskPrioritySchema>;
 export const taskSizeSchema = z.enum(["xs", "s", "m", "l", "xl"]);
 export type TaskSize = z.infer<typeof taskSizeSchema>;
 
-export const taskDateSchema = z
+export const taskDateSchema = z.iso.date({
+  error: "Use a valid ISO date in YYYY-MM-DD format.",
+});
+
+function hasControlCharacter(value: string) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit <= 31 || codeUnit === 127) return true;
+  }
+  return false;
+}
+
+export const taskReferencedPathSchema = z
   .string()
   .trim()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, "Use an ISO date in YYYY-MM-DD format.");
+  .min(1)
+  .max(1_000)
+  .refine((path) => {
+    if (path.startsWith("/") || path.startsWith("\\") || /^[a-z]:/i.test(path)) return false;
+    const segments = path.split(/[\\/]/);
+    return (
+      !path.includes("\\") &&
+      segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+    );
+  }, "Use a normalized path relative to the repository root.")
+  .refine(
+    (path) => path.split("/").every((segment) => new TextEncoder().encode(segment).length <= 255),
+    "Each referenced-path segment must be at most 255 UTF-8 bytes.",
+  )
+  .refine(
+    (path) => !hasControlCharacter(path),
+    "Referenced paths may not contain control characters.",
+  );
+
+const taskReferencedPathsSchema = z
+  .array(taskReferencedPathSchema)
+  .max(100)
+  .superRefine((paths, context) => {
+    const uniquePaths = new Set<string>();
+    for (const [index, path] of paths.entries()) {
+      if (uniquePaths.has(path)) {
+        context.addIssue({
+          code: "custom",
+          message: `Referenced path ${path} may only appear once.`,
+          path: [index],
+        });
+      }
+      uniquePaths.add(path);
+    }
+  });
 
 export const capabilityNameSchema = z
   .string()
@@ -105,6 +151,23 @@ export const tagInputSchema = z.object({
   exclusiveGroup: z.string().trim().min(1).max(80).nullable().optional().default(null),
 });
 export type TagInput = z.infer<typeof tagInputSchema>;
+
+const tagAssignmentsSchema = z
+  .array(tagInputSchema)
+  .max(50)
+  .superRefine((assignedTags, context) => {
+    const names = new Set<string>();
+    for (const [index, tag] of assignedTags.entries()) {
+      if (names.has(tag.name)) {
+        context.addIssue({
+          code: "custom",
+          message: `Tag ${tag.name} may only be assigned once.`,
+          path: [index, "name"],
+        });
+      }
+      names.add(tag.name);
+    }
+  });
 
 export const taskRelationTypeSchema = z.enum([
   "blocks",
@@ -161,6 +224,7 @@ export const taskSchema = z.object({
   size: taskSizeSchema.nullable().default(null),
   tags: z.array(tagSchema).default([]),
   requiredCapabilities: z.array(capabilityNameSchema).default([]),
+  referencedPaths: taskReferencedPathsSchema.default([]),
   upstreamRelations: z.array(taskRelationSchema).default([]),
   downstreamRelations: z.array(taskRelationSchema).default([]),
   eligibility: taskEligibilitySchema.optional(),
@@ -220,6 +284,7 @@ export const taskCandidateFieldSchema = z.enum([
   "agentContext",
   "checklist",
   "relations",
+  "referencedPaths",
   "timestamps",
 ]);
 export type TaskCandidateField = z.infer<typeof taskCandidateFieldSchema>;
@@ -246,6 +311,7 @@ export const taskCandidateSchema = z.object({
   checklist: z.array(checklistItemSchema).optional(),
   upstreamRelations: z.array(taskRelationSchema).optional(),
   downstreamRelations: z.array(taskRelationSchema).optional(),
+  referencedPaths: taskReferencedPathsSchema.optional(),
   createdAt: z.string().optional(),
   updatedAt: z.string().optional(),
 });
@@ -264,6 +330,7 @@ const taskFieldsSchema = z.object({
   acceptanceCriteria: z.string().trim().max(20_000),
   agentContext: z.string().trim().max(20_000),
   checklist: z.array(checklistItemSchema).max(200),
+  referencedPaths: taskReferencedPathsSchema.optional().default([]),
 });
 
 const optionalTaskPlanningFieldsSchema = z.object({
@@ -272,7 +339,7 @@ const optionalTaskPlanningFieldsSchema = z.object({
   notBefore: taskDateSchema.nullable().optional(),
   dueAt: taskDateSchema.nullable().optional(),
   size: taskSizeSchema.nullable().optional(),
-  tags: z.array(tagInputSchema).max(50).optional(),
+  tags: tagAssignmentsSchema.optional(),
   requiredCapabilities: z.array(capabilityNameSchema).max(50).optional(),
 });
 
@@ -324,7 +391,7 @@ export const updateTaskPlanningInputSchema = z.object({
   notBefore: taskDateSchema.nullable(),
   dueAt: taskDateSchema.nullable(),
   size: taskSizeSchema.nullable(),
-  tags: z.array(tagInputSchema).max(50),
+  tags: tagAssignmentsSchema,
   requiredCapabilities: z.array(capabilityNameSchema).max(50),
   expectedVersion: z.number().int().positive(),
   idempotencyKey: z.string().trim().min(1).max(200),
@@ -345,25 +412,28 @@ export type CreateTaskRelationInput = z.infer<typeof createTaskRelationInputSche
 export const listTasksInputSchema = z.object({
   projectId: z.string().trim().min(1),
   includeArchived: z.boolean().optional().default(false),
-  agentCapabilities: z.array(capabilityNameSchema).optional().default([]),
-  now: taskDateSchema.optional(),
 });
 export type ListTasksInput = z.infer<typeof listTasksInputSchema>;
 
-export const discoverTasksInputSchema = z.object({
+export const listTaskTagsInputSchema = z.object({
   projectId: z.string().trim().min(1),
-  agentCapabilities: z.array(capabilityNameSchema).optional().default([]),
-  now: taskDateSchema.optional(),
-  limit: z.number().int().positive().max(100).optional().default(25),
-  cursor: z.string().trim().regex(/^\d+$/).nullable().optional().default(null),
 });
-export type DiscoverTasksInput = z.infer<typeof discoverTasksInputSchema>;
+export type ListTaskTagsInput = z.infer<typeof listTaskTagsInputSchema>;
+
+export const taskDiscoveryCursorSchema = z
+  .string()
+  .trim()
+  .max(200)
+  .regex(
+    /^v3:(0|[1-9]\d*):[a-f0-9]{64}:(urgent|high|normal|low):(0|[1-9]\d*):(~|\d{4}-\d{2}-\d{2}):([1-9]\d*)$/,
+    "The work-discovery cursor is invalid.",
+  )
+  .refine(isValidTaskDiscoveryCursor, "The work-discovery cursor is invalid.");
 
 export const findWorkInputSchema = z.object({
   projectId: z.string().trim().min(1),
-  now: taskDateSchema.optional(),
   limit: z.number().int().positive().max(100).optional().default(25),
-  cursor: z.string().trim().regex(/^\d+$/).nullable().optional().default(null),
+  cursor: taskDiscoveryCursorSchema.nullable().optional().default(null),
   fields: z.array(taskCandidateFieldSchema).max(20).optional().default([]),
 });
 export type FindWorkInput = z.infer<typeof findWorkInputSchema>;
@@ -371,7 +441,6 @@ export type FindWorkInput = z.infer<typeof findWorkInputSchema>;
 export const taskContextInputSchema = z.object({
   projectId: z.string().trim().min(1),
   taskId: z.string().trim().min(1),
-  now: taskDateSchema.optional(),
 });
 export type TaskContextInput = z.infer<typeof taskContextInputSchema>;
 
@@ -383,7 +452,7 @@ export const compiledReopenTaskInputSchema = z.compile(reopenTaskInputSchema);
 export const compiledUpdateTaskPlanningInputSchema = z.compile(updateTaskPlanningInputSchema);
 export const compiledCreateTaskRelationInputSchema = z.compile(createTaskRelationInputSchema);
 export const compiledListTasksInputSchema = z.compile(listTasksInputSchema);
-export const compiledDiscoverTasksInputSchema = z.compile(discoverTasksInputSchema);
+export const compiledListTaskTagsInputSchema = z.compile(listTaskTagsInputSchema);
 export const compiledFindWorkInputSchema = z.compile(findWorkInputSchema);
 export const compiledTaskContextInputSchema = z.compile(taskContextInputSchema);
 
@@ -445,6 +514,214 @@ export const taskPriorityRank: Record<TaskPriority, number> = {
   low: 3,
 };
 
-export function todayIsoDate() {
-  return new Date().toISOString().slice(0, 10);
+export type TaskEvaluationContext = {
+  readonly agentCapabilities: readonly string[];
+  readonly today: string;
+};
+
+export type TaskOrderingKey = Pick<Task, "priority" | "position" | "dueAt" | "sequence">;
+
+export type BlockingEdge = {
+  readonly sourceTaskId: string;
+  readonly targetTaskId: string;
+};
+
+export function normalizeCapabilities(capabilities: readonly string[] = []) {
+  return [
+    ...new Set(
+      capabilities
+        .map((capability) => capability.trim().toLocaleLowerCase("en-US"))
+        .filter(Boolean),
+    ),
+  ].toSorted((left, right) => left.localeCompare(right));
+}
+
+export function taskOrderingExplanation(task: TaskOrderingKey) {
+  return [
+    `${task.priority} lane`,
+    `position ${task.position}`,
+    task.dueAt ? `due ${task.dueAt}` : "no due date",
+    `stable tie-breaker #${task.sequence}`,
+  ].join(", ");
+}
+
+export function evaluateTaskEligibility(
+  task: Task,
+  context: TaskEvaluationContext,
+  blockingTaskIds: readonly string[],
+): TaskEligibility {
+  const agentCapabilities = new Set(normalizeCapabilities(context.agentCapabilities));
+  const missingCapabilities = task.requiredCapabilities.filter(
+    (capability) => !agentCapabilities.has(capability.toLocaleLowerCase("en-US")),
+  );
+  const orderingExplanation = taskOrderingExplanation(task);
+
+  if (task.archivedAt) {
+    return {
+      claimable: false,
+      status: "archived",
+      reasons: ["Task is archived."],
+      orderingExplanation,
+      missingCapabilities,
+      blockingTaskIds: [...blockingTaskIds],
+    };
+  }
+  if (task.lifecycle === "done") {
+    return {
+      claimable: false,
+      status: "complete",
+      reasons: ["Task is complete."],
+      orderingExplanation,
+      missingCapabilities,
+      blockingTaskIds: [...blockingTaskIds],
+    };
+  }
+  if (task.lifecycle !== "ready") {
+    return {
+      claimable: false,
+      status: "not_ready",
+      reasons: ["Task is not ready."],
+      orderingExplanation,
+      missingCapabilities,
+      blockingTaskIds: [...blockingTaskIds],
+    };
+  }
+  if (task.notBefore && task.notBefore > context.today) {
+    return {
+      claimable: false,
+      status: "scheduled",
+      reasons: [`Task starts on ${task.notBefore}.`],
+      orderingExplanation,
+      missingCapabilities,
+      blockingTaskIds: [...blockingTaskIds],
+    };
+  }
+  if (blockingTaskIds.length > 0) {
+    return {
+      claimable: false,
+      status: "blocked",
+      reasons: [`Blocked by: ${blockingTaskIds.join(", ")}.`],
+      orderingExplanation,
+      missingCapabilities,
+      blockingTaskIds: [...blockingTaskIds],
+    };
+  }
+  if (missingCapabilities.length > 0) {
+    return {
+      claimable: false,
+      status: "capability_mismatch",
+      reasons: [`Missing capabilities: ${missingCapabilities.join(", ")}.`],
+      orderingExplanation,
+      missingCapabilities,
+      blockingTaskIds: [...blockingTaskIds],
+    };
+  }
+  return {
+    claimable: true,
+    status: "claimable",
+    reasons: ["Ready, unscheduled, and capability-compatible."],
+    orderingExplanation,
+    missingCapabilities,
+    blockingTaskIds: [...blockingTaskIds],
+  };
+}
+
+export function compareTaskOrder(left: TaskOrderingKey, right: TaskOrderingKey) {
+  const priority = taskPriorityRank[left.priority] - taskPriorityRank[right.priority];
+  if (priority !== 0) return priority;
+  const position = left.position - right.position;
+  if (position !== 0) return position;
+  if (left.dueAt !== right.dueAt) {
+    if (!left.dueAt) return 1;
+    if (!right.dueAt) return -1;
+    return left.dueAt.localeCompare(right.dueAt);
+  }
+  return left.sequence - right.sequence;
+}
+
+function taskDiscoveryCursorParts(cursor: string) {
+  const [, revision, evaluationKey, priority, position, dueAt, sequence] = cursor.split(":");
+  return { revision, evaluationKey, priority, position, dueAt, sequence };
+}
+
+function isValidTaskDiscoveryCursor(cursor: string) {
+  const { revision, evaluationKey, priority, position, dueAt, sequence } =
+    taskDiscoveryCursorParts(cursor);
+  return (
+    Number.isSafeInteger(Number(revision)) &&
+    Number(revision) >= 0 &&
+    /^[a-f0-9]{64}$/.test(evaluationKey ?? "") &&
+    taskPrioritySchema.safeParse(priority).success &&
+    Number.isSafeInteger(Number(position)) &&
+    Number(position) >= 0 &&
+    (dueAt === "~" || taskDateSchema.safeParse(dueAt).success) &&
+    Number.isSafeInteger(Number(sequence)) &&
+    Number(sequence) > 0
+  );
+}
+
+export function encodeTaskDiscoveryCursor(
+  task: TaskOrderingKey,
+  revision: number,
+  evaluationKey: string,
+) {
+  return taskDiscoveryCursorSchema.parse(
+    `v3:${revision}:${evaluationKey}:${task.priority}:${task.position}:${task.dueAt ?? "~"}:${task.sequence}`,
+  );
+}
+
+export function decodeTaskDiscoveryCursor(
+  cursor: string,
+): TaskOrderingKey & { revision: number; evaluationKey: string } {
+  const parsedCursor = taskDiscoveryCursorSchema.parse(cursor);
+  const { revision, evaluationKey, priority, position, dueAt, sequence } =
+    taskDiscoveryCursorParts(parsedCursor);
+  return {
+    revision: Number(revision),
+    evaluationKey: evaluationKey!,
+    priority: taskPrioritySchema.parse(priority),
+    position: Number(position),
+    dueAt: dueAt === "~" ? null : taskDateSchema.parse(dueAt),
+    sequence: Number(sequence),
+  };
+}
+
+export function findBlockingPath(
+  edges: readonly BlockingEdge[],
+  startTaskId: string,
+  goalTaskId: string,
+) {
+  const outgoing = new Map<string, string[]>();
+  for (const edge of edges) {
+    outgoing.set(edge.sourceTaskId, [
+      ...(outgoing.get(edge.sourceTaskId) ?? []),
+      edge.targetTaskId,
+    ]);
+  }
+  const queue: Array<readonly string[]> = [[startTaskId]];
+  const visited = new Set<string>();
+  for (const path of queue) {
+    const current = path.at(-1);
+    if (!current || visited.has(current)) continue;
+    if (current === goalTaskId) return path;
+    visited.add(current);
+    for (const next of outgoing.get(current) ?? []) queue.push([...path, next]);
+  }
+  return null;
+}
+
+export function isIncompleteBlockingDependency(task: {
+  readonly lifecycle: TaskLifecycle;
+  readonly archivedAt: string | null;
+}) {
+  return !task.archivedAt && task.lifecycle !== "done" && task.lifecycle !== "cancelled";
+}
+
+export function taskParentViolation(
+  parent: Pick<Task, "projectId" | "parentTaskId">,
+  projectId: string,
+) {
+  if (parent.projectId !== projectId) return "different_project" as const;
+  if (parent.parentTaskId) return "nested" as const;
+  return null;
 }

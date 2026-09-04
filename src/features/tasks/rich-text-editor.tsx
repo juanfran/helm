@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { StarterKit } from "@tiptap/starter-kit";
 import * as stylex from "@stylexjs/stylex";
@@ -9,14 +10,17 @@ import { tokens } from "../../styles/tokens.stylex";
 export function RichTextEditor({
   value,
   onChange,
+  editable = true,
 }: {
   value: RichTextDocument;
   onChange: (document: RichTextDocument) => void;
+  editable?: boolean;
 }) {
   const contentClassName = stylex.props(styles.content).className;
   const editor = useEditor({
     extensions: [StarterKit],
     content: value.doc,
+    editable,
     immediatelyRender: false,
     editorProps: {
       attributes: {
@@ -29,6 +33,10 @@ export function RichTextEditor({
     },
   });
 
+  useEffect(() => {
+    if (editor && editor.isEditable !== editable) editor.setEditable(editable);
+  }, [editable, editor]);
+
   return (
     <div {...stylex.props(styles.root)}>
       <div {...stylex.props(styles.toolbar)} aria-label="Description formatting">
@@ -36,6 +44,7 @@ export function RichTextEditor({
           type="button"
           aria-label="Bold"
           aria-pressed={editor?.isActive("bold") ?? false}
+          disabled={!editable}
           onClick={() => editor?.chain().focus().toggleBold().run()}
           {...stylex.props(styles.tool)}
         >
@@ -45,6 +54,7 @@ export function RichTextEditor({
           type="button"
           aria-label="Bullet list"
           aria-pressed={editor?.isActive("bulletList") ?? false}
+          disabled={!editable}
           onClick={() => editor?.chain().focus().toggleBulletList().run()}
           {...stylex.props(styles.tool)}
         >

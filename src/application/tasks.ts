@@ -5,8 +5,8 @@ import {
   compiledCompleteTaskInputSchema,
   compiledCreateTaskInputSchema,
   compiledCreateTaskRelationInputSchema,
-  compiledDiscoverTasksInputSchema,
   compiledFindWorkInputSchema,
+  compiledListTaskTagsInputSchema,
   compiledListTasksInputSchema,
   compiledTaskContextInputSchema,
   compiledPrepareTaskInputSchema,
@@ -19,17 +19,18 @@ import {
   type CompleteTaskInput,
   type CreateTaskInput,
   type CreateTaskRelationInput,
-  type DiscoverTasksInput,
   type FindWorkInput,
+  type ListTaskTagsInput,
   type ListTasksInput,
   type PrepareTaskInput,
   type ReopenTaskInput,
   type Task,
   type TaskContextInput,
   type TaskContextPackage,
-  type TaskCandidateField,
   type TaskDiscoveryPage,
+  type TaskEvaluationContext,
   type TaskRelation,
+  type TaskTag,
   type UpdateTaskPlanningInput,
 } from "../domain/tasks";
 import {
@@ -41,29 +42,68 @@ import {
 } from "./task-errors";
 
 export interface TaskStore {
-  list(input: ListTasksInput): Effect.Effect<readonly Task[], TaskPersistenceError>;
-  discover(input: DiscoverTasksInput): Effect.Effect<readonly Task[], TaskPersistenceError>;
-  discoverPage(
-    input: DiscoverTasksInput,
-    fields?: readonly TaskCandidateField[],
-  ): Effect.Effect<TaskDiscoveryPage, TaskPersistenceError>;
-  getContext(input: TaskContextInput): Effect.Effect<TaskContextPackage, TaskCommandError>;
-  create(input: CreateTaskInput, actor: Actor): Effect.Effect<Task, TaskCommandError>;
-  prepare(input: PrepareTaskInput, actor: Actor): Effect.Effect<Task, TaskCommandError>;
-  complete(input: CompleteTaskInput, actor: Actor): Effect.Effect<Task, TaskCommandError>;
-  reopen(input: ReopenTaskInput, actor: Actor): Effect.Effect<Task, TaskCommandError>;
+  list(input: TaskListQuery): Effect.Effect<readonly Task[], TaskPersistenceError>;
+  listTags(input: ListTaskTagsInput): Effect.Effect<readonly TaskTag[], TaskPersistenceError>;
+  discoverPage(input: TaskDiscoveryQuery): Effect.Effect<TaskDiscoveryPage, TaskCommandError>;
+  getContext(input: TaskContextQuery): Effect.Effect<TaskContextPackage, TaskCommandError>;
+  create(
+    input: CreateTaskInput,
+    actor: Actor,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<Task, TaskCommandError>;
+  prepare(
+    input: PrepareTaskInput,
+    actor: Actor,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<Task, TaskCommandError>;
+  complete(
+    input: CompleteTaskInput,
+    actor: Actor,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<Task, TaskCommandError>;
+  reopen(
+    input: ReopenTaskInput,
+    actor: Actor,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<Task, TaskCommandError>;
   updatePlanning(
     input: UpdateTaskPlanningInput,
     actor: Actor,
+    context: TaskEvaluationContext,
   ): Effect.Effect<Task, TaskCommandError>;
   createRelation(
     input: CreateTaskRelationInput,
     actor: Actor,
   ): Effect.Effect<TaskRelation, TaskCommandError>;
-  archive(input: ArchiveTaskInput, actor: Actor): Effect.Effect<Task, TaskCommandError>;
+  archive(
+    input: ArchiveTaskInput,
+    actor: Actor,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<Task, TaskCommandError>;
 }
 
-export type TaskServices = { store: TaskStore };
+export type TaskClock = { today(): string };
+export type TaskServices = { store: TaskStore; clock: TaskClock };
+export type TaskListQuery = ListTasksInput & TaskEvaluationContext;
+export type TaskDiscoveryQuery = FindWorkInput & TaskEvaluationContext;
+export type TaskContextQuery = TaskContextInput & TaskEvaluationContext;
+
+export const systemTaskClock: TaskClock = {
+  today() {
+    const date = new Date();
+    const year = String(date.getFullYear()).padStart(4, "0");
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  },
+};
+
+function evaluationContext(
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+): TaskEvaluationContext {
+  return { today: services.clock.today(), agentCapabilities };
+}
 
 function parseInput<A>(parse: () => A): Effect.Effect<A, InvalidTaskInputError> {
   return Effect.try({
@@ -103,7 +143,12 @@ function validateTagConstraints(input: {
     : Effect.void;
 }
 
-export function createTask(input: unknown, actor: Actor, services: TaskServices) {
+export function createTask(
+  input: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
   return Effect.flatMap(
     parseInput(() => compiledCreateTaskInputSchema.parse(input)),
     (parsed) =>
@@ -112,42 +157,68 @@ export function createTask(input: unknown, actor: Actor, services: TaskServices)
           parsed.lifecycle === "ready" ? validateReady(parsed) : Effect.void,
           validateTagConstraints(parsed),
         ]),
-        () => services.store.create(parsed, actor),
+        () => services.store.create(parsed, actor, evaluationContext(services, agentCapabilities)),
       ),
   );
 }
 
-export function prepareTask(input: unknown, actor: Actor, services: TaskServices) {
+export function prepareTask(
+  input: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
   return Effect.flatMap(
     parseInput(() => compiledPrepareTaskInputSchema.parse(input)),
     (parsed) =>
       Effect.flatMap(Effect.all([validateReady(parsed), validateTagConstraints(parsed)]), () =>
-        services.store.prepare(parsed, actor),
+        services.store.prepare(parsed, actor, evaluationContext(services, agentCapabilities)),
       ),
   );
 }
 
-export function updateTaskPlanning(input: unknown, actor: Actor, services: TaskServices) {
+export function updateTaskPlanning(
+  input: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
   return Effect.flatMap(
     parseInput(() => compiledUpdateTaskPlanningInputSchema.parse(input)),
     (parsed) =>
       Effect.flatMap(validateTagConstraints(parsed), () =>
-        services.store.updatePlanning(parsed, actor),
+        services.store.updatePlanning(
+          parsed,
+          actor,
+          evaluationContext(services, agentCapabilities),
+        ),
       ),
   );
 }
 
-export function completeTask(input: unknown, actor: Actor, services: TaskServices) {
+export function completeTask(
+  input: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
   return Effect.flatMap(
     parseInput(() => compiledCompleteTaskInputSchema.parse(input)),
-    (parsed) => services.store.complete(parsed, actor),
+    (parsed) =>
+      services.store.complete(parsed, actor, evaluationContext(services, agentCapabilities)),
   );
 }
 
-export function reopenTask(input: unknown, actor: Actor, services: TaskServices) {
+export function reopenTask(
+  input: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
   return Effect.flatMap(
     parseInput(() => compiledReopenTaskInputSchema.parse(input)),
-    (parsed) => services.store.reopen(parsed, actor),
+    (parsed) =>
+      services.store.reopen(parsed, actor, evaluationContext(services, agentCapabilities)),
   );
 }
 
@@ -158,24 +229,35 @@ export function createTaskRelation(input: unknown, actor: Actor, services: TaskS
   );
 }
 
-export function archiveTask(input: unknown, actor: Actor, services: TaskServices) {
+export function archiveTask(
+  input: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
   return Effect.flatMap(
     parseInput(() => compiledArchiveTaskInputSchema.parse(input)),
-    (parsed) => services.store.archive(parsed, actor),
+    (parsed) =>
+      services.store.archive(parsed, actor, evaluationContext(services, agentCapabilities)),
   );
 }
 
-export function listTasks(input: unknown, services: TaskServices) {
+export function listTasks(
+  input: unknown,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
   return Effect.flatMap(
     parseInput(() => compiledListTasksInputSchema.parse(input)),
-    (parsed) => services.store.list(parsed),
+    (parsed) =>
+      services.store.list({ ...parsed, ...evaluationContext(services, agentCapabilities) }),
   );
 }
 
-export function discoverTasks(input: unknown, services: TaskServices) {
+export function listTaskTags(input: unknown, services: TaskServices) {
   return Effect.flatMap(
-    parseInput(() => compiledDiscoverTasksInputSchema.parse(input)),
-    (parsed) => services.store.discover(parsed),
+    parseInput(() => compiledListTaskTagsInputSchema.parse(input)),
+    (parsed) => services.store.listTags(parsed),
   );
 }
 
@@ -187,22 +269,24 @@ export function findWork(
   return Effect.flatMap(
     parseInput(() => compiledFindWorkInputSchema.parse(input)),
     (parsed: FindWorkInput) =>
-      services.store.discoverPage(
-        {
-          projectId: parsed.projectId,
-          agentCapabilities: [...agentCapabilities],
-          now: parsed.now,
-          limit: parsed.limit,
-          cursor: parsed.cursor,
-        },
-        parsed.fields,
-      ),
+      services.store.discoverPage({
+        ...parsed,
+        ...evaluationContext(services, agentCapabilities),
+      }),
   );
 }
 
-export function getTaskContext(input: unknown, services: TaskServices) {
+export function getTaskContext(
+  input: unknown,
+  agentCapabilities: readonly string[],
+  services: TaskServices,
+) {
   return Effect.flatMap(
     parseInput(() => compiledTaskContextInputSchema.parse(input)),
-    (parsed) => services.store.getContext(parsed),
+    (parsed) =>
+      services.store.getContext({
+        ...parsed,
+        ...evaluationContext(services, agentCapabilities),
+      }),
   );
 }

@@ -50,6 +50,8 @@ export const registerAgentRunInputSchema = z.object({
   displayName: z.string().trim().min(1).max(200),
   capabilities: z.array(capabilityNameSchema).max(100).optional().default([]),
   resumeRunId: z.string().trim().min(1).nullable().optional().default(null),
+  takeoverActiveRun: z.boolean().optional().default(false),
+  idempotencyKey: z.string().trim().min(1).max(200),
 });
 export type RegisterAgentRunInput = z.infer<typeof registerAgentRunInputSchema>;
 

@@ -57,6 +57,27 @@ export class TaskTagConstraintError extends Data.TaggedError("TaskTagConstraintE
   readonly message: string;
 }> {}
 
+export class TaskTagDefinitionConflictError extends Data.TaggedError(
+  "TaskTagDefinitionConflictError",
+)<{
+  readonly tagName: string;
+  readonly message: string;
+}> {}
+
+export class TaskPathError extends Data.TaggedError("TaskPathError")<{
+  readonly path: string;
+  readonly message: string;
+}> {}
+
+export class TaskDiscoveryCursorStaleError extends Data.TaggedError(
+  "TaskDiscoveryCursorStaleError",
+)<{
+  readonly cursorRevision: number;
+  readonly currentRevision: number;
+  readonly staleBecause: "queue_changed" | "evaluation_context_changed";
+  readonly message: string;
+}> {}
+
 export class TaskPersistenceError extends Data.TaggedError("TaskPersistenceError")<{
   readonly message: string;
 }> {}
@@ -72,6 +93,9 @@ export type TaskCommandError =
   | TaskRelationError
   | TaskIdempotencyConflictError
   | TaskTagConstraintError
+  | TaskTagDefinitionConflictError
+  | TaskPathError
+  | TaskDiscoveryCursorStaleError
   | TaskPersistenceError;
 
 export type TaskErrorDto = {
@@ -84,6 +108,12 @@ export type TaskErrorDto = {
   changeSummary?: string;
   group?: string;
   tagNames?: readonly string[];
+  tagName?: string;
+  key?: string;
+  path?: string;
+  cursorRevision?: number;
+  currentRevision?: number;
+  staleBecause?: "queue_changed" | "evaluation_context_changed";
   lifecycle?: string;
   parentTaskId?: string;
   sourceTaskId?: string;
@@ -135,6 +165,24 @@ export function toTaskErrorDto(error: TaskCommandError): TaskErrorDto {
         message: error.message,
         group: error.group,
         tagNames: error.tagNames,
+      };
+    case "TaskTagDefinitionConflictError":
+      return {
+        type: error["_tag"],
+        message: error.message,
+        tagName: error.tagName,
+      };
+    case "TaskPathError":
+      return { type: error["_tag"], message: error.message, path: error.path };
+    case "TaskIdempotencyConflictError":
+      return { type: error["_tag"], message: error.message, key: error.key };
+    case "TaskDiscoveryCursorStaleError":
+      return {
+        type: error["_tag"],
+        message: error.message,
+        cursorRevision: error.cursorRevision,
+        currentRevision: error.currentRevision,
+        staleBecause: error.staleBecause,
       };
     default:
       return { type: error["_tag"], message: error.message };

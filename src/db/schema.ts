@@ -145,6 +145,20 @@ export const taskCapabilityRequirements = sqliteTable(
   ],
 );
 
+export const taskReferencedPaths = sqliteTable(
+  "task_referenced_paths",
+  {
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id),
+    path: text("path").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.taskId, table.path] }),
+    index("task_referenced_paths_path_index").on(table.path),
+  ],
+);
+
 export const agentProfiles = sqliteTable(
   "agent_profiles",
   {
@@ -235,6 +249,7 @@ export const schema = {
   tags,
   taskTags,
   taskCapabilityRequirements,
+  taskReferencedPaths,
   agentProfiles,
   agentRuns,
   attempts,

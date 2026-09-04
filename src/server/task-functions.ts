@@ -1,12 +1,13 @@
 import { createServerFn } from "@tanstack/react-start";
 import { Effect } from "effect";
 
-import { listTasks } from "../application/tasks";
+import { listTaskTags, listTasks } from "../application/tasks";
 import {
   compiledArchiveTaskInputSchema,
   compiledCompleteTaskInputSchema,
   compiledCreateTaskInputSchema,
   compiledCreateTaskRelationInputSchema,
+  compiledListTaskTagsInputSchema,
   compiledListTasksInputSchema,
   compiledPrepareTaskInputSchema,
   compiledReopenTaskInputSchema,
@@ -29,6 +30,10 @@ const LOCAL_HUMAN: Actor = { type: "human", id: "local-human" };
 export const readTasks = createServerFn({ method: "GET" })
   .validator(compiledListTasksInputSchema)
   .handler(({ data }) => Effect.runPromise(listTasks(data, taskServices)));
+
+export const readTaskTags = createServerFn({ method: "GET" })
+  .validator(compiledListTaskTagsInputSchema)
+  .handler(({ data }) => Effect.runPromise(listTaskTags(data, taskServices)));
 
 export const createHumanTask = createServerFn({ method: "POST" })
   .validator(compiledCreateTaskInputSchema)

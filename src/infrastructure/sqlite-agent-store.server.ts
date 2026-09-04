@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import Database from "better-sqlite3";
 import { and, eq } from "drizzle-orm";
@@ -6,6 +6,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Effect } from "effect";
 
 import {
+  AgentIdempotencyConflictError,
   AgentPersistenceError,
   AgentRunRegistrationError,
   AgentRunRequiredError,
@@ -22,7 +23,8 @@ import {
   type RegisteredAgentRun,
   type RegisterAgentRunInput,
 } from "../domain/agents";
-import { agentProfiles, agentRuns, events, schema } from "../db/schema";
+import { agentProfiles, agentRuns, events, idempotencyRecords, schema } from "../db/schema";
+import { normalizeCapabilities } from "../domain/tasks";
 
 type DrizzleDatabase = ReturnType<typeof drizzle<typeof schema>>;
 type DrizzleTransaction = Parameters<Parameters<DrizzleDatabase["transaction"]>[0]>[0];
@@ -36,10 +38,17 @@ function persistenceError(error: unknown) {
   });
 }
 
-function normalizeCapabilities(capabilities: readonly string[] = []) {
-  return [...new Set(capabilities.map((capability) => capability.trim()).filter(Boolean))].toSorted(
-    (left, right) => left.localeCompare(right),
-  );
+function registrationHash(input: RegisterAgentRunInput) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        profileKey: input.profileKey,
+        displayName: input.displayName,
+        capabilities: normalizeCapabilities(input.capabilities),
+        resumeRunId: input.resumeRunId,
+      }),
+    )
+    .digest("hex");
 }
 
 function profileFromRow(row: AgentProfileRow): AgentProfile {
@@ -69,23 +78,128 @@ function recordRunEvent(
   run: AgentRunRow,
   kind: "agent.run.registered" | "agent.run.resumed" | "agent.run.closed",
   occurredAt: string,
+  options: {
+    actorType?: "agent" | "system";
+    actorId?: string;
+    reason?: string;
+  } = {},
 ) {
   db.insert(events)
     .values({
       projectId: null,
       kind,
-      actorType: "agent",
-      actorId: run.id,
+      actorType: options.actorType ?? "agent",
+      actorId: options.actorId ?? run.id,
       entityType: "agent_run",
       entityId: run.id,
       payloadJson: JSON.stringify({
         profileId: run.profileId,
         mcpSessionId: run.mcpSessionId,
         status: kind === "agent.run.closed" ? "closed" : "active",
+        ...(options.reason ? { reason: options.reason } : {}),
       }),
       occurredAt,
     })
     .run();
+}
+
+function findIdempotentRegistration(
+  db: DatabaseSession,
+  key: string,
+  hash: string,
+  session: McpSessionContext,
+  takeoverActiveRun: boolean,
+) {
+  const existing = db
+    .select()
+    .from(idempotencyRecords)
+    .where(eq(idempotencyRecords.key, key))
+    .limit(1)
+    .get();
+  if (!existing) return null;
+  if (existing.command !== "agent.run.register" || existing.inputHash !== hash) {
+    throw new AgentIdempotencyConflictError({
+      key,
+      message: "That idempotency key was already used for a different command.",
+    });
+  }
+  const recorded = registeredAgentRunSchema.parse(JSON.parse(existing.resultJson));
+  const run = db.select().from(agentRuns).where(eq(agentRuns.id, recorded.run.id)).limit(1).get();
+  const profile = run ? findProfileById(db, run.profileId) : null;
+  if (!run || !profile) {
+    throw new AgentRunRegistrationError({
+      runId: recorded.run.id,
+      message: "The idempotent agent run no longer exists.",
+    });
+  }
+  if (run.status === "active" && run.mcpSessionId === session.sessionId) {
+    return registeredFromRows(profile, run);
+  }
+  if (run.status === "active" && !takeoverActiveRun) {
+    throw new AgentRunRegistrationError({
+      runId: run.id,
+      message:
+        "That idempotent agent run is active in another MCP session; request an explicit takeover to recover it.",
+    });
+  }
+
+  const occupiedSession = findRunBySession(db, session.sessionId);
+  if (occupiedSession && occupiedSession.id !== run.id) {
+    throw new AgentRunRegistrationError({
+      runId: occupiedSession.id,
+      message: "That MCP session is already registered to a different agent run.",
+    });
+  }
+
+  const now = new Date().toISOString();
+  db.update(agentRuns)
+    .set({
+      mcpSessionId: session.sessionId,
+      status: "active",
+      clientName: session.clientName,
+      clientVersion: session.clientVersion,
+      lastSeenAt: now,
+      endedAt: null,
+    })
+    .where(eq(agentRuns.id, run.id))
+    .run();
+  const resumed = {
+    ...run,
+    mcpSessionId: session.sessionId,
+    status: "active" as const,
+    clientName: session.clientName,
+    clientVersion: session.clientVersion,
+    lastSeenAt: now,
+    endedAt: null,
+  };
+  const registration = registeredFromRows(profile, resumed);
+  recordRunEvent(db, resumed, "agent.run.resumed", now, { reason: "idempotent_reconnect" });
+  db.update(idempotencyRecords)
+    .set({ resultJson: JSON.stringify(registration) })
+    .where(eq(idempotencyRecords.key, key))
+    .run();
+  return registration;
+}
+
+function recordRegistration(
+  db: DatabaseSession,
+  key: string,
+  hash: string,
+  registration: RegisteredAgentRun,
+  kind: "agent.run.registered" | "agent.run.resumed",
+  occurredAt: string,
+) {
+  recordRunEvent(db, registration.run, kind, occurredAt);
+  db.insert(idempotencyRecords)
+    .values({
+      key,
+      command: "agent.run.register",
+      inputHash: hash,
+      resultJson: JSON.stringify(registration),
+      createdAt: occurredAt,
+    })
+    .run();
+  return registration;
 }
 
 function findProfileById(db: DatabaseSession, profileId: string) {
@@ -130,6 +244,7 @@ function upsertProfile(db: DatabaseSession, input: RegisterAgentRunInput, now: s
 
 function commandError(error: unknown): AgentCommandError {
   if (
+    error instanceof AgentIdempotencyConflictError ||
     error instanceof AgentRunRegistrationError ||
     error instanceof AgentRunRequiredError ||
     error instanceof AgentPersistenceError
@@ -147,6 +262,15 @@ export function createSqliteAgentStore(database: Database.Database): AgentStore 
       return Effect.try({
         try: () =>
           db.transaction((tx) => {
+            const hash = registrationHash(input);
+            const idempotent = findIdempotentRegistration(
+              tx,
+              input.idempotencyKey,
+              hash,
+              session,
+              input.takeoverActiveRun,
+            );
+            if (idempotent) return idempotent;
             const now = new Date().toISOString();
             const profile = upsertProfile(tx, input, now);
             const sessionRun = findRunBySession(tx, session.sessionId);
@@ -181,8 +305,14 @@ export function createSqliteAgentStore(database: Database.Database): AgentStore 
                 .limit(1)
                 .get();
               if (!updated) throw new Error("Registered run could not be read.");
-              recordRunEvent(tx, updated, "agent.run.registered", now);
-              return registeredFromRows(profile, updated);
+              return recordRegistration(
+                tx,
+                input.idempotencyKey,
+                hash,
+                registeredFromRows(profile, updated),
+                "agent.run.registered",
+                now,
+              );
             }
 
             if (input.resumeRunId) {
@@ -200,10 +330,15 @@ export function createSqliteAgentStore(database: Database.Database): AgentStore 
                   message: "That agent run cannot be resumed for this profile.",
                 });
               }
-              if (resumed.status === "active" && resumed.mcpSessionId !== session.sessionId) {
+              if (
+                resumed.status === "active" &&
+                resumed.mcpSessionId !== session.sessionId &&
+                !input.takeoverActiveRun
+              ) {
                 throw new AgentRunRegistrationError({
                   runId: input.resumeRunId,
-                  message: "That agent run is already active in another MCP session.",
+                  message:
+                    "That agent run is active in another MCP session; request an explicit takeover to recover it.",
                 });
               }
               tx.update(agentRuns)
@@ -224,8 +359,14 @@ export function createSqliteAgentStore(database: Database.Database): AgentStore 
                 .limit(1)
                 .get();
               if (!updated) throw new Error("Resumed run could not be read.");
-              recordRunEvent(tx, updated, "agent.run.resumed", now);
-              return registeredFromRows(profile, updated);
+              return recordRegistration(
+                tx,
+                input.idempotencyKey,
+                hash,
+                registeredFromRows(profile, updated),
+                "agent.run.resumed",
+                now,
+              );
             }
 
             const run = {
@@ -240,8 +381,14 @@ export function createSqliteAgentStore(database: Database.Database): AgentStore 
               endedAt: null,
             };
             tx.insert(agentRuns).values(run).run();
-            recordRunEvent(tx, run, "agent.run.registered", now);
-            return registeredFromRows(profile, run);
+            return recordRegistration(
+              tx,
+              input.idempotencyKey,
+              hash,
+              registeredFromRows(profile, run),
+              "agent.run.registered",
+              now,
+            );
           }),
         catch: commandError,
       });
@@ -283,6 +430,38 @@ export function createSqliteAgentStore(database: Database.Database): AgentStore 
               "agent.run.closed",
               now,
             );
+          }),
+        catch: persistenceError,
+      });
+    },
+    reconcileActiveRuns() {
+      return Effect.try({
+        try: () =>
+          db.transaction((tx) => {
+            const activeRuns = tx
+              .select()
+              .from(agentRuns)
+              .where(eq(agentRuns.status, "active"))
+              .all();
+            if (activeRuns.length === 0) return;
+            const now = new Date().toISOString();
+            for (const run of activeRuns) {
+              const closedRun = {
+                ...run,
+                status: "closed" as const,
+                endedAt: now,
+                lastSeenAt: now,
+              };
+              tx.update(agentRuns)
+                .set({ status: "closed", endedAt: now, lastSeenAt: now })
+                .where(eq(agentRuns.id, run.id))
+                .run();
+              recordRunEvent(tx, closedRun, "agent.run.closed", now, {
+                actorType: "system",
+                actorId: "helm",
+                reason: "server_restart",
+              });
+            }
           }),
         catch: persistenceError,
       });

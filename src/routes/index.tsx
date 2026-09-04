@@ -1,6 +1,6 @@
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useLiveSuspenseQuery } from "@tanstack/react-db";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 
 import { ProjectLanding } from "../features/projects/project-landing";
 import { getTaskCollection } from "../features/tasks/task-collection";
@@ -13,6 +13,7 @@ import {
   createHumanTask,
   createHumanTaskRelation,
   prepareHumanTask,
+  readTaskTags,
   reopenHumanTask,
   updateHumanTaskPlanning,
 } from "../server/task-functions";
@@ -24,12 +25,22 @@ export const Route = createFileRoute("/")({
   loader: async ({ context }) => {
     const state = await readAppState();
     if (state.activeProject) {
-      await getTaskCollection(context.queryClient, state.activeProject.id).preload();
+      await Promise.all([
+        getTaskCollection(context.queryClient, state.activeProject.id).preload(),
+        context.queryClient.ensureQueryData(taskTagsQueryOptions(state.activeProject.id)),
+      ]);
     }
     return state;
   },
   component: Home,
 });
+
+function taskTagsQueryOptions(projectId: string) {
+  return {
+    queryKey: ["task-tags", projectId] as const,
+    queryFn: () => readTaskTags({ data: { projectId } }),
+  };
+}
 
 function Home() {
   const state = Route.useLoaderData();
@@ -63,9 +74,15 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
   const { data: tasks } = useLiveSuspenseQuery({
     query: (query) => query.from({ task: collection }),
   });
+  const { data: tagDefinitions } = useSuspenseQuery(taskTagsQueryOptions(project.id));
 
   async function refresh(response: Awaited<ReturnType<typeof createHumanTask>>) {
-    if (response.ok) await collection.utils.refetch({ throwOnError: true });
+    if (response.ok) {
+      await Promise.all([
+        collection.utils.refetch({ throwOnError: true }),
+        queryClient.invalidateQueries({ queryKey: ["task-tags", project.id] }),
+      ]);
+    }
     return response;
   }
 
@@ -74,6 +91,7 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
       project={project}
       theme={theme}
       tasks={tasks}
+      tagDefinitions={tagDefinitions}
       onCreateTask={(input) => createHumanTask({ data: input }).then(refresh)}
       onPrepareTask={(input) => prepareHumanTask({ data: input }).then(refresh)}
       onUpdateTaskPlanning={(input) => updateHumanTaskPlanning({ data: input }).then(refresh)}

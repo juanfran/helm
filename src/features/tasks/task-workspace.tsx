@@ -10,15 +10,18 @@ import {
   RotateCcw,
   ShipWheel,
   SlidersHorizontal,
+  X,
 } from "lucide-react";
 
 import { Button } from "../../components/ui/button";
 import { themeSchema, type Project, type Theme } from "../../domain/projects";
 import {
   emptyRichTextDocument,
+  compareTaskOrder,
   taskPrioritySchema,
   taskRelationTypeSchema,
   taskSizeSchema,
+  tagInputSchema,
   type ArchiveTaskInput,
   type CompleteTaskInput,
   type CreateTaskInput,
@@ -27,6 +30,8 @@ import {
   type ReopenTaskInput,
   type RichTextDocument,
   type Task,
+  type TagInput,
+  type TaskTag,
   type UpdateTaskPlanningInput,
 } from "../../domain/tasks";
 import type { TaskCommandResponse, TaskRelationCommandResponse } from "../../server/task-adapter";
@@ -37,6 +42,7 @@ type TaskWorkspaceProps = {
   project: Project;
   theme: Theme;
   tasks: readonly Task[];
+  tagDefinitions: readonly TaskTag[];
   onCreateTask: (input: CreateTaskInput) => Promise<TaskCommandResponse>;
   onPrepareTask: (input: PrepareTaskInput) => Promise<TaskCommandResponse>;
   onUpdateTaskPlanning: (input: UpdateTaskPlanningInput) => Promise<TaskCommandResponse>;
@@ -47,10 +53,13 @@ type TaskWorkspaceProps = {
   onChangeTheme: (theme: Theme) => Promise<void>;
 };
 
+type TagDraft = TagInput & { draftId: string };
+
 export function TaskWorkspace({
   project,
   theme,
   tasks,
+  tagDefinitions,
   onCreateTask,
   onPrepareTask,
   onUpdateTaskPlanning,
@@ -60,11 +69,13 @@ export function TaskWorkspace({
   onArchiveTask,
   onChangeTheme,
 }: TaskWorkspaceProps) {
+  const orderedTasks = useMemo(() => tasks.toSorted(compareTaskOrder), [tasks]);
   const [captureTitle, setCaptureTitle] = useState("");
-  const [selectedId, setSelectedId] = useState<string | null>(tasks[0]?.id ?? null);
+  const [selectedId, setSelectedId] = useState<string | null>(orderedTasks[0]?.id ?? null);
   const [pendingCapture, setPendingCapture] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
-  const selectedTask = tasks.find((task) => task.id === selectedId) ?? tasks[0] ?? null;
+  const selectedTask =
+    orderedTasks.find((task) => task.id === selectedId) ?? orderedTasks[0] ?? null;
   const counts = useMemo(
     () => ({
       backlog: tasks.filter((task) => task.lifecycle === "backlog").length,
@@ -90,6 +101,7 @@ export function TaskWorkspace({
         acceptanceCriteria: "",
         agentContext: "",
         checklist: [],
+        referencedPaths: [],
         expectedVersion: 0,
         idempotencyKey: crypto.randomUUID(),
       });
@@ -140,7 +152,7 @@ export function TaskWorkspace({
               <p {...stylex.props(styles.eyebrow)}>Work queue</p>
               <h1 {...stylex.props(styles.heading)}>Tasks</h1>
             </div>
-            <span {...stylex.props(styles.total)}>{tasks.length}</span>
+            <span {...stylex.props(styles.total)}>{orderedTasks.length}</span>
           </div>
           <div {...stylex.props(styles.counts)}>
             <span>
@@ -183,7 +195,7 @@ export function TaskWorkspace({
             </p>
           ) : null}
           <nav aria-label="Tasks" {...stylex.props(styles.taskList)}>
-            {tasks.map((task) => (
+            {orderedTasks.map((task) => (
               <button
                 key={task.id}
                 type="button"
@@ -221,7 +233,8 @@ export function TaskWorkspace({
             <PreparationPanel
               key={`${selectedTask.id}:${selectedTask.version}`}
               task={selectedTask}
-              tasks={tasks}
+              tasks={orderedTasks}
+              tagDefinitions={tagDefinitions}
               onCreateTask={onCreateTask}
               onPrepare={onPrepareTask}
               onUpdatePlanning={onUpdateTaskPlanning}
@@ -246,6 +259,7 @@ export function TaskWorkspace({
 function PreparationPanel({
   task,
   tasks,
+  tagDefinitions,
   onCreateTask,
   onPrepare,
   onUpdatePlanning,
@@ -256,6 +270,7 @@ function PreparationPanel({
 }: {
   task: Task;
   tasks: readonly Task[];
+  tagDefinitions: readonly TaskTag[];
   onCreateTask: TaskWorkspaceProps["onCreateTask"];
   onPrepare: TaskWorkspaceProps["onPrepareTask"];
   onUpdatePlanning: TaskWorkspaceProps["onUpdateTaskPlanning"];
@@ -275,10 +290,23 @@ function PreparationPanel({
   const [notBefore, setNotBefore] = useState(task.notBefore ?? "");
   const [dueAt, setDueAt] = useState(task.dueAt ?? "");
   const [size, setSize] = useState(task.size ?? "");
-  const [tags, setTags] = useState(task.tags.map((tag) => tag.name).join("\n"));
+  const knownTags = useMemo(
+    () => new Map(tagDefinitions.map((tag) => [tag.name, tag])),
+    [tagDefinitions],
+  );
+  const [tagInputs, setTagInputs] = useState<TagDraft[]>(
+    task.tags.map(({ id, name, description: tagDescription, color, exclusiveGroup }) => ({
+      draftId: id,
+      name,
+      description: tagDescription,
+      color,
+      exclusiveGroup,
+    })),
+  );
   const [requiredCapabilities, setRequiredCapabilities] = useState(
     task.requiredCapabilities.join("\n"),
   );
+  const [referencedPaths, setReferencedPaths] = useState(task.referencedPaths.join("\n"));
   const [childTitle, setChildTitle] = useState("");
   const [relationTargetId, setRelationTargetId] = useState(
     tasks.find((candidate) => candidate.id !== task.id)?.id ?? "",
@@ -293,6 +321,21 @@ function PreparationPanel({
     .map((childId) => tasks.find((candidate) => candidate.id === childId))
     .filter((child) => child !== undefined);
   const relationTarget = tasks.find((candidate) => candidate.id === relationTargetId);
+  const editable = task.lifecycle === "backlog" || task.lifecycle === "ready";
+
+  function currentPlanningFields() {
+    return {
+      priority,
+      position: Number(position),
+      notBefore: notBefore || null,
+      dueAt: dueAt || null,
+      size: taskSizeSchema.nullable().parse(size || null),
+      tags: tagInputs
+        .filter((tag) => tag.name.trim().length > 0)
+        .map(({ draftId: _draftId, ...tag }) => tagInputSchema.parse(tag)),
+      requiredCapabilities: parseLines(requiredCapabilities),
+    };
+  }
 
   async function prepare(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -306,18 +349,13 @@ function PreparationPanel({
         expectedOutcome,
         acceptanceCriteria,
         agentContext,
+        referencedPaths: parseLines(referencedPaths),
         checklist: checklist
           .split("\n")
           .map((line) => line.trim())
           .filter(Boolean)
           .map((text, index) => ({ id: `item-${index + 1}`, text, checked: false })),
-        priority,
-        position: Number(position),
-        notBefore: notBefore || null,
-        dueAt: dueAt || null,
-        size: taskSizeSchema.nullable().parse(size || null),
-        tags: parseTagInputs(tags),
-        requiredCapabilities: parseLines(requiredCapabilities),
+        ...currentPlanningFields(),
         expectedVersion: task.version,
         idempotencyKey: crypto.randomUUID(),
       });
@@ -335,13 +373,7 @@ function PreparationPanel({
     try {
       const response = await onUpdatePlanning({
         taskId: task.id,
-        priority,
-        position: Number(position),
-        notBefore: notBefore || null,
-        dueAt: dueAt || null,
-        size: taskSizeSchema.nullable().parse(size || null),
-        tags: parseTagInputs(tags),
-        requiredCapabilities: parseLines(requiredCapabilities),
+        ...currentPlanningFields(),
         expectedVersion: task.version,
         idempotencyKey: crypto.randomUUID(),
       });
@@ -420,6 +452,7 @@ function PreparationPanel({
         acceptanceCriteria: "",
         agentContext: "",
         checklist: [],
+        referencedPaths: [],
         expectedVersion: 0,
         idempotencyKey: crypto.randomUUID(),
       });
@@ -454,6 +487,44 @@ function PreparationPanel({
     }
   }
 
+  function addTag() {
+    const colors = ["#2563eb", "#16a34a", "#c2410c", "#7c3aed", "#0f766e"];
+    setTagInputs((current) => [
+      ...current,
+      {
+        draftId: crypto.randomUUID(),
+        name: "",
+        description: "",
+        color: colors[current.length % colors.length] ?? "#2563eb",
+        exclusiveGroup: null,
+      },
+    ]);
+  }
+
+  function updateTagName(index: number, name: string) {
+    setTagInputs((current) =>
+      current.map((tag, tagIndex) => {
+        if (tagIndex !== index) return tag;
+        const known = knownTags.get(name.trim());
+        return known
+          ? {
+              draftId: tag.draftId,
+              name: known.name,
+              description: known.description,
+              color: known.color,
+              exclusiveGroup: known.exclusiveGroup,
+            }
+          : { ...tag, name };
+      }),
+    );
+  }
+
+  function updateTag(index: number, update: Partial<TagInput>) {
+    setTagInputs((current) =>
+      current.map((tag, tagIndex) => (tagIndex === index ? { ...tag, ...update } : tag)),
+    );
+  }
+
   return (
     <form onSubmit={prepare} {...stylex.props(styles.form)} aria-label="Prepare task">
       <div {...stylex.props(styles.detailHeader)}>
@@ -466,7 +537,7 @@ function PreparationPanel({
             <Button type="button" variant="quiet" disabled={pending} onClick={() => void reopen()}>
               <RotateCcw size={15} aria-hidden="true" /> Reopen
             </Button>
-          ) : (
+          ) : task.lifecycle === "ready" ? (
             <Button
               type="button"
               variant="quiet"
@@ -475,7 +546,7 @@ function PreparationPanel({
             >
               <CheckCircle2 size={15} aria-hidden="true" /> Done
             </Button>
-          )}
+          ) : null}
           <Button type="button" variant="quiet" disabled={pending} onClick={() => void archive()}>
             <Archive size={15} aria-hidden="true" /> Archive
           </Button>
@@ -569,140 +640,212 @@ function PreparationPanel({
           Add relation
         </Button>
       </div>
-      <Field label="Title" required>
-        <input
-          aria-label="Title"
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          maxLength={300}
-          required
-          {...stylex.props(styles.input)}
-        />
-      </Field>
-      <Field label="Description" hint="Rich text is saved as a versioned TipTap document.">
-        <RichTextEditor value={description} onChange={setDescription} />
-      </Field>
-      <div {...stylex.props(styles.planningGrid)}>
-        <Field label="Priority">
-          <select
-            aria-label="Priority"
-            value={priority}
-            onChange={(event) => setPriority(taskPrioritySchema.parse(event.target.value))}
-            {...stylex.props(styles.select, styles.fullWidth)}
-          >
-            <option value="urgent">Urgent</option>
-            <option value="high">High</option>
-            <option value="normal">Normal</option>
-            <option value="low">Low</option>
-          </select>
-        </Field>
-        <Field label="Position">
+      <fieldset disabled={!editable} {...stylex.props(styles.editableFields)}>
+        <legend {...stylex.props(styles.srOnly)}>Editable task details</legend>
+        <Field label="Title" required>
           <input
-            aria-label="Position"
-            type="number"
-            min={0}
-            value={position}
-            onChange={(event) => setPosition(event.target.value)}
+            aria-label="Title"
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            maxLength={300}
+            required
             {...stylex.props(styles.input)}
           />
         </Field>
-        <Field label="Start date">
-          <input
-            aria-label="Start date"
-            type="date"
-            value={notBefore}
-            onChange={(event) => setNotBefore(event.target.value)}
-            {...stylex.props(styles.input)}
+        <Field label="Description" hint="Rich text is saved as a versioned TipTap document.">
+          <RichTextEditor value={description} onChange={setDescription} editable={editable} />
+        </Field>
+        <div {...stylex.props(styles.planningGrid)}>
+          <Field label="Priority">
+            <select
+              aria-label="Priority"
+              value={priority}
+              onChange={(event) => setPriority(taskPrioritySchema.parse(event.target.value))}
+              {...stylex.props(styles.select, styles.fullWidth)}
+            >
+              <option value="urgent">Urgent</option>
+              <option value="high">High</option>
+              <option value="normal">Normal</option>
+              <option value="low">Low</option>
+            </select>
+          </Field>
+          <Field label="Position">
+            <input
+              aria-label="Position"
+              type="number"
+              min={0}
+              value={position}
+              onChange={(event) => setPosition(event.target.value)}
+              {...stylex.props(styles.input)}
+            />
+          </Field>
+          <Field label="Start date">
+            <input
+              aria-label="Start date"
+              type="date"
+              value={notBefore}
+              onChange={(event) => setNotBefore(event.target.value)}
+              {...stylex.props(styles.input)}
+            />
+          </Field>
+          <Field label="Due date">
+            <input
+              aria-label="Due date"
+              type="date"
+              value={dueAt}
+              onChange={(event) => setDueAt(event.target.value)}
+              {...stylex.props(styles.input)}
+            />
+          </Field>
+          <Field label="Size">
+            <select
+              aria-label="Size"
+              value={size}
+              onChange={(event) => setSize(event.target.value)}
+              {...stylex.props(styles.select, styles.fullWidth)}
+            >
+              <option value="">Unestimated</option>
+              <option value="xs">XS</option>
+              <option value="s">S</option>
+              <option value="m">M</option>
+              <option value="l">L</option>
+              <option value="xl">XL</option>
+            </select>
+          </Field>
+        </div>
+        <Field
+          label="Tags"
+          hint="Tag definitions are shared across the project. Existing metadata stays canonical."
+        >
+          <fieldset {...stylex.props(styles.tagEditor)}>
+            <legend {...stylex.props(styles.srOnly)}>Tags</legend>
+            {tagInputs.map((tag, index) => {
+              const known = knownTags.has(tag.name);
+              return (
+                <div key={tag.draftId} {...stylex.props(styles.tagRow)}>
+                  <input
+                    aria-label={`Tag ${index + 1} name`}
+                    value={tag.name}
+                    onChange={(event) => updateTagName(index, event.target.value)}
+                    placeholder="Tag name"
+                    maxLength={80}
+                    {...stylex.props(styles.input)}
+                  />
+                  <input
+                    aria-label={`Tag ${index + 1} description`}
+                    value={tag.description}
+                    onChange={(event) => updateTag(index, { description: event.target.value })}
+                    placeholder="Description"
+                    maxLength={1_000}
+                    disabled={known}
+                    {...stylex.props(styles.input)}
+                  />
+                  <input
+                    aria-label={`Tag ${index + 1} color`}
+                    type="color"
+                    value={tag.color}
+                    onChange={(event) => updateTag(index, { color: event.target.value })}
+                    disabled={known}
+                    {...stylex.props(styles.colorInput)}
+                  />
+                  <input
+                    aria-label={`Tag ${index + 1} exclusive group`}
+                    value={tag.exclusiveGroup ?? ""}
+                    onChange={(event) =>
+                      updateTag(index, { exclusiveGroup: event.target.value || null })
+                    }
+                    placeholder="Exclusive group"
+                    maxLength={80}
+                    disabled={known}
+                    {...stylex.props(styles.input)}
+                  />
+                  <Button
+                    type="button"
+                    variant="quiet"
+                    aria-label={`Remove tag ${tag.name || index + 1}`}
+                    disabled={pending}
+                    onClick={() =>
+                      setTagInputs((current) => current.filter((_, tagIndex) => tagIndex !== index))
+                    }
+                  >
+                    <X size={15} aria-hidden="true" />
+                  </Button>
+                </div>
+              );
+            })}
+            <Button type="button" variant="quiet" disabled={pending} onClick={addTag}>
+              <Plus size={15} aria-hidden="true" /> Add tag
+            </Button>
+          </fieldset>
+        </Field>
+        <Field label="Required capabilities">
+          <textarea
+            aria-label="Required capabilities"
+            value={requiredCapabilities}
+            onChange={(event) => setRequiredCapabilities(event.target.value)}
+            rows={3}
+            {...stylex.props(styles.textarea)}
           />
         </Field>
-        <Field label="Due date">
-          <input
-            aria-label="Due date"
-            type="date"
-            value={dueAt}
-            onChange={(event) => setDueAt(event.target.value)}
-            {...stylex.props(styles.input)}
+        <Field
+          label="Referenced paths"
+          hint="One normalized repository-relative file or directory path per line."
+        >
+          <textarea
+            aria-label="Referenced paths"
+            value={referencedPaths}
+            onChange={(event) => setReferencedPaths(event.target.value)}
+            rows={3}
+            placeholder="src/domain/tasks.ts"
+            {...stylex.props(styles.textarea)}
           />
         </Field>
-        <Field label="Size">
-          <select
-            aria-label="Size"
-            value={size}
-            onChange={(event) => setSize(event.target.value)}
-            {...stylex.props(styles.select, styles.fullWidth)}
-          >
-            <option value="">Unestimated</option>
-            <option value="xs">XS</option>
-            <option value="s">S</option>
-            <option value="m">M</option>
-            <option value="l">L</option>
-            <option value="xl">XL</option>
-          </select>
+        {task.eligibility ? (
+          <p {...stylex.props(styles.hint)}>
+            {task.eligibility.status}: {task.eligibility.reasons.join(" ")}{" "}
+            {task.eligibility.orderingExplanation}
+          </p>
+        ) : null}
+        <Field label="Expected outcome" required>
+          <textarea
+            aria-label="Expected outcome"
+            value={expectedOutcome}
+            onChange={(event) => setExpectedOutcome(event.target.value)}
+            rows={3}
+            required
+            {...stylex.props(styles.textarea)}
+          />
         </Field>
-      </div>
-      <Field label="Tags">
-        <textarea
-          aria-label="Tags"
-          value={tags}
-          onChange={(event) => setTags(event.target.value)}
-          rows={3}
-          {...stylex.props(styles.textarea)}
-        />
-      </Field>
-      <Field label="Required capabilities">
-        <textarea
-          aria-label="Required capabilities"
-          value={requiredCapabilities}
-          onChange={(event) => setRequiredCapabilities(event.target.value)}
-          rows={3}
-          {...stylex.props(styles.textarea)}
-        />
-      </Field>
-      {task.eligibility ? (
-        <p {...stylex.props(styles.hint)}>
-          {task.eligibility.status}: {task.eligibility.reasons.join(" ")}{" "}
-          {task.eligibility.orderingExplanation}
-        </p>
-      ) : null}
-      <Field label="Expected outcome" required>
-        <textarea
-          aria-label="Expected outcome"
-          value={expectedOutcome}
-          onChange={(event) => setExpectedOutcome(event.target.value)}
-          rows={3}
-          required
-          {...stylex.props(styles.textarea)}
-        />
-      </Field>
-      <Field label="Acceptance criteria" required>
-        <textarea
-          aria-label="Acceptance criteria"
-          value={acceptanceCriteria}
-          onChange={(event) => setAcceptanceCriteria(event.target.value)}
-          rows={4}
-          required
-          {...stylex.props(styles.textarea)}
-        />
-      </Field>
-      <Field label="Agent context" hint="Paths, constraints, and execution-specific guidance.">
-        <textarea
-          aria-label="Agent context"
-          value={agentContext}
-          onChange={(event) => setAgentContext(event.target.value)}
-          rows={3}
-          {...stylex.props(styles.textarea)}
-        />
-      </Field>
-      <Field label="Checklist" hint="One required verification step per line." required>
-        <textarea
-          aria-label="Checklist"
-          value={checklist}
-          onChange={(event) => setChecklist(event.target.value)}
-          rows={4}
-          required
-          {...stylex.props(styles.textarea)}
-        />
-      </Field>
+        <Field label="Acceptance criteria" required>
+          <textarea
+            aria-label="Acceptance criteria"
+            value={acceptanceCriteria}
+            onChange={(event) => setAcceptanceCriteria(event.target.value)}
+            rows={4}
+            required
+            {...stylex.props(styles.textarea)}
+          />
+        </Field>
+        <Field label="Agent context" hint="Paths, constraints, and execution-specific guidance.">
+          <textarea
+            aria-label="Agent context"
+            value={agentContext}
+            onChange={(event) => setAgentContext(event.target.value)}
+            rows={3}
+            {...stylex.props(styles.textarea)}
+          />
+        </Field>
+        <Field label="Checklist" hint="One required verification step per line." required>
+          <textarea
+            aria-label="Checklist"
+            value={checklist}
+            onChange={(event) => setChecklist(event.target.value)}
+            rows={4}
+            required
+            {...stylex.props(styles.textarea)}
+          />
+        </Field>
+      </fieldset>
       {error ? (
         <p role="alert" {...stylex.props(styles.error)}>
           {error}
@@ -711,23 +854,33 @@ function PreparationPanel({
       <div {...stylex.props(styles.formFooter)}>
         <p>Ready requires an outcome, acceptance criteria, and at least one checklist item.</p>
         <span {...stylex.props(styles.footerActions)}>
-          <Button
-            type="button"
-            variant="quiet"
-            disabled={pending}
-            onClick={() => void updatePlanning()}
-          >
-            <SlidersHorizontal size={16} aria-hidden="true" />
-            Save planning
-          </Button>
-          <Button type="submit" disabled={pending}>
-            <CheckCircle2 size={16} aria-hidden="true" />
-            {pending
-              ? "Saving…"
-              : task.lifecycle === "ready"
-                ? "Save preparation"
-                : "Move to ready"}
-          </Button>
+          {editable ? (
+            <>
+              <Button
+                type="button"
+                variant="quiet"
+                disabled={pending}
+                onClick={() => void updatePlanning()}
+              >
+                <SlidersHorizontal size={16} aria-hidden="true" />
+                Save planning
+              </Button>
+              <Button type="submit" disabled={pending}>
+                <CheckCircle2 size={16} aria-hidden="true" />
+                {pending
+                  ? "Saving…"
+                  : task.lifecycle === "ready"
+                    ? "Save preparation"
+                    : "Move to ready"}
+              </Button>
+            </>
+          ) : (
+            <span {...stylex.props(styles.hint)}>
+              {task.lifecycle === "done"
+                ? "Reopen this task before editing it."
+                : "Cancelled tasks are read-only."}
+            </span>
+          )}
         </span>
       </div>
     </form>
@@ -739,16 +892,6 @@ function parseLines(value: string) {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-}
-
-function parseTagInputs(value: string) {
-  const colors = ["#2563eb", "#16a34a", "#c2410c", "#7c3aed", "#0f766e"];
-  return parseLines(value).map((name, index) => ({
-    name,
-    description: "",
-    color: colors[index % colors.length] ?? "#2563eb",
-    exclusiveGroup: null,
-  }));
 }
 
 function Field({
@@ -923,6 +1066,13 @@ const styles = stylex.create({
     textAlign: "center",
   },
   form: { display: "grid", gap: tokens.space5, margin: "0 auto", maxWidth: 760 },
+  editableFields: {
+    borderWidth: 0,
+    display: "grid",
+    gap: tokens.space4,
+    minWidth: 0,
+    padding: 0,
+  },
   detailHeader: {
     alignItems: "center",
     borderBlockEndColor: tokens.border,
@@ -967,6 +1117,32 @@ const styles = stylex.create({
     gridTemplateColumns: "repeat(5, minmax(112px, 1fr))",
     "@media (max-width: 980px)": { gridTemplateColumns: "repeat(2, minmax(0, 1fr))" },
     "@media (max-width: 560px)": { gridTemplateColumns: "1fr" },
+  },
+  tagEditor: {
+    borderWidth: 0,
+    display: "grid",
+    gap: tokens.space2,
+    margin: 0,
+    minWidth: 0,
+    padding: 0,
+  },
+  tagRow: {
+    alignItems: "center",
+    display: "grid",
+    gap: tokens.space2,
+    gridTemplateColumns: "minmax(120px, 0.8fr) minmax(160px, 1.4fr) 44px minmax(120px, 0.8fr) auto",
+    "@media (max-width: 900px)": { gridTemplateColumns: "1fr 1fr auto" },
+    "@media (max-width: 560px)": { gridTemplateColumns: "1fr" },
+  },
+  colorInput: {
+    backgroundColor: tokens.background,
+    borderColor: tokens.border,
+    borderRadius: tokens.radius2,
+    borderStyle: "solid",
+    borderWidth: 1,
+    height: 40,
+    padding: 4,
+    width: 44,
   },
   required: {
     color: tokens.foregroundMuted,

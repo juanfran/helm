@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -33,6 +33,7 @@ const backlog: Task = {
   size: null,
   tags: [],
   requiredCapabilities: [],
+  referencedPaths: [],
   upstreamRelations: [],
   downstreamRelations: [],
   description: emptyRichTextDocument,
@@ -54,6 +55,7 @@ function props(tasks: readonly Task[] = [backlog]) {
     project,
     theme: "system" as const,
     tasks,
+    tagDefinitions: tasks.flatMap((task) => task.tags),
     onCreateTask: vi.fn(),
     onPrepareTask: vi.fn(),
     onUpdateTaskPlanning: vi.fn(),
@@ -66,6 +68,45 @@ function props(tasks: readonly Task[] = [backlog]) {
 }
 
 describe("task workspace", () => {
+  it("orders the live task list with the shared Helm ranking rules", () => {
+    const low: Task = {
+      ...backlog,
+      id: "a-low",
+      sequence: 2,
+      title: "Low priority",
+      priority: "low",
+      position: 0,
+    };
+    const urgentLater: Task = {
+      ...backlog,
+      id: "b-urgent-later",
+      sequence: 3,
+      title: "Urgent later",
+      priority: "urgent",
+      position: 2,
+    };
+    const urgentFirst: Task = {
+      ...backlog,
+      id: "z-urgent-first",
+      sequence: 1,
+      title: "Urgent first",
+      priority: "urgent",
+      position: 1,
+    };
+
+    render(<TaskWorkspace {...props([low, urgentLater, urgentFirst])} />);
+
+    const taskButtons = within(screen.getByRole("navigation", { name: "Tasks" })).getAllByRole(
+      "button",
+    );
+    expect(taskButtons.map((button) => button.textContent)).toEqual([
+      expect.stringContaining("Urgent first"),
+      expect.stringContaining("Urgent later"),
+      expect.stringContaining("Low priority"),
+    ]);
+    expect(taskButtons[0]?.getAttribute("aria-current")).toBe("true");
+  });
+
   it("captures a title-only backlog task from the quick entry", async () => {
     const user = userEvent.setup();
     const workspace = props([]);
@@ -85,6 +126,7 @@ describe("task workspace", () => {
       acceptanceCriteria: "",
       agentContext: "",
       checklist: [],
+      referencedPaths: [],
       expectedVersion: 0,
       idempotencyKey: expect.any(String),
     });
@@ -99,10 +141,13 @@ describe("task workspace", () => {
     });
     render(<TaskWorkspace {...workspace} />);
 
+    expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
+
     await user.type(screen.getByLabelText(/Expected outcome/), "The task is complete.");
     await user.type(screen.getByLabelText(/Acceptance criteria/), "The test passes.");
     await user.type(screen.getByLabelText(/Agent context/), "Keep the seam shared.");
     await user.type(screen.getByLabelText(/Checklist/), "Run pnpm check");
+    await user.type(screen.getByLabelText("Referenced paths"), "src/domain/tasks.ts");
     await user.click(screen.getByRole("button", { name: "Move to ready" }));
 
     expect(workspace.onPrepareTask).toHaveBeenCalledWith({
@@ -113,6 +158,7 @@ describe("task workspace", () => {
       acceptanceCriteria: "The test passes.",
       agentContext: "Keep the seam shared.",
       checklist: [{ id: "item-1", text: "Run pnpm check", checked: false }],
+      referencedPaths: ["src/domain/tasks.ts"],
       priority: "normal",
       position: 1,
       notBefore: null,
@@ -140,7 +186,8 @@ describe("task workspace", () => {
     await user.type(screen.getByLabelText("Start date"), "2026-09-10");
     await user.type(screen.getByLabelText("Due date"), "2026-09-12");
     await user.selectOptions(screen.getByLabelText("Size"), "m");
-    await user.type(screen.getByLabelText("Tags"), "frontend");
+    await user.click(screen.getByRole("button", { name: "Add tag" }));
+    await user.type(screen.getByLabelText("Tag 1 name"), "frontend");
     await user.type(screen.getByLabelText("Required capabilities"), "react");
     await user.click(screen.getByRole("button", { name: "Save planning" }));
 
@@ -156,6 +203,38 @@ describe("task workspace", () => {
       expectedVersion: 1,
       idempotencyKey: expect.any(String),
     });
+  });
+
+  it("preserves canonical metadata when saving an existing project tag", async () => {
+    const user = userEvent.setup();
+    const canonicalTag = {
+      id: "tag-1",
+      name: "frontend",
+      description: "Browser work",
+      color: "#7c3aed",
+      exclusiveGroup: "area",
+    };
+    const workspace = { ...props(), tagDefinitions: [canonicalTag] };
+    workspace.onUpdateTaskPlanning.mockResolvedValue({ ok: true, task: backlog });
+    render(<TaskWorkspace {...workspace} />);
+
+    await user.click(screen.getByRole("button", { name: "Add tag" }));
+    await user.type(screen.getByLabelText("Tag 1 name"), "frontend");
+    expect(screen.getByLabelText("Tag 1 description")).toHaveProperty("disabled", true);
+    await user.click(screen.getByRole("button", { name: "Save planning" }));
+
+    expect(workspace.onUpdateTaskPlanning).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tags: [
+          {
+            name: "frontend",
+            description: "Browser work",
+            color: "#7c3aed",
+            exclusiveGroup: "area",
+          },
+        ],
+      }),
+    );
   });
 
   it("shows task relations and submits child and relation commands", async () => {
@@ -183,6 +262,7 @@ describe("task workspace", () => {
     };
     const parent: Task = {
       ...backlog,
+      lifecycle: "ready",
       childTaskIds: [dependent.id],
       downstreamRelations: dependent.upstreamRelations,
     };
@@ -262,6 +342,36 @@ describe("task workspace", () => {
       taskId: backlog.id,
       expectedVersion: 1,
       reason: "Archived from the task workspace",
+      idempotencyKey: expect.any(String),
+    });
+  });
+
+  it("requires reopening a done task before offering preparation actions", async () => {
+    const user = userEvent.setup();
+    const doneTask: Task = { ...backlog, lifecycle: "done" };
+    const workspace = props([doneTask]);
+    workspace.onReopenTask.mockResolvedValue({
+      ok: true,
+      task: { ...doneTask, lifecycle: "ready", version: 2 },
+    });
+    render(<TaskWorkspace {...workspace} />);
+
+    expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save planning" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Move to ready" })).toBeNull();
+    expect(screen.getByText("Reopen this task before editing it.")).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Editable task details" })).toHaveProperty(
+      "disabled",
+      true,
+    );
+    expect(screen.getByLabelText("Child task title").matches(":disabled")).toBe(false);
+    expect(screen.getByLabelText("Relation type").matches(":disabled")).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Reopen" }));
+
+    expect(workspace.onReopenTask).toHaveBeenCalledWith({
+      taskId: doneTask.id,
+      expectedVersion: doneTask.version,
+      reason: "Reopened from the task workspace",
       idempotencyKey: expect.any(String),
     });
   });

@@ -21,9 +21,13 @@ next launch.
 
 Coding-agent clients can connect to the local streamable HTTP MCP endpoint at
 `http://127.0.0.1:3000/api/mcp`. Register the connection with `register_agent_run` before using
-agent-attributed tools. Registered agents can discover paginated work with `find_work` and load a
+agent-attributed tools, using a fresh `idempotencyKey` for each logical registration. A reconnect can
+resume its run by ID; after an ungraceful client exit, set `takeoverActiveRun` explicitly to transfer
+that run from the stale session. Registered agents can discover paginated work with `find_work` and load a
 complete package with `get_task_context`; `list_projects` and `get_active_project` remain available
-as read-only project queries.
+as read-only project queries. Discovery cursors are bound to the queue revision, evaluation date, project,
+and normalized agent capabilities. If any of that context changes between pages, restart discovery without
+the stale cursor.
 
 ## Production build
 
