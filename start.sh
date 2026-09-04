@@ -1,8 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-if [ ! -f .output/server/index.mjs ]; then
-  pnpm build
-fi
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$project_root"
 
 exec pnpm start

@@ -1,12 +1,20 @@
-const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
-const host = process.env.HOST ?? "127.0.0.1";
+import { pathToFileURL } from "node:url";
+import { join } from "node:path";
 
-if (!loopbackHosts.has(host) && process.env.HELM_UNSAFE_ALLOW_REMOTE !== "1") {
-  throw new Error(
-    "Refusing to expose Helm outside this machine. Set HELM_UNSAFE_ALLOW_REMOTE=1 to acknowledge the risk.",
-  );
-}
+import { ensureProductionBuild } from "./build-state.mjs";
+import {
+  ensureDatabaseParent,
+  HELM_PROJECT_ROOT,
+  loadHelmEnvironment,
+  resolveHelmEnvironment,
+} from "./environment.mjs";
 
-process.env.HOST = host;
+process.chdir(HELM_PROJECT_ROOT);
+loadHelmEnvironment();
+const environment = resolveHelmEnvironment();
+ensureDatabaseParent(environment.databaseUrl, HELM_PROJECT_ROOT);
+process.env.DATABASE_URL = environment.databaseUrl;
+process.env.HOST = environment.host;
 
-await import("../.output/server/index.mjs");
+await ensureProductionBuild();
+await import(pathToFileURL(join(HELM_PROJECT_ROOT, ".output/server/index.mjs")).href);

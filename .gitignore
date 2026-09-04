@@ -4,7 +4,8 @@ data
 dist
 dist-ssr
 *.local
-.env
+.env*
+!.env.example
 .nitro
 .tanstack
 .wrangler

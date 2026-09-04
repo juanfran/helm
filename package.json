@@ -7,8 +7,8 @@
     "#/*": "./src/*"
   },
   "scripts": {
-    "dev": "vite dev --host 127.0.0.1 --port 3000",
-    "build": "vite build",
+    "dev": "vite dev --port 3000",
+    "build": "node scripts/build.mjs",
     "start": "node scripts/start.mjs",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
     "format": "oxfmt .",
@@ -17,12 +17,13 @@
     "lint:fix": "oxlint --type-aware --fix .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts --passWithNoTests",
+    "smoke:operational": "node scripts/operational-smoke.mjs",
     "generate-routes": "tsr generate",
-    "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate",
-    "db:push": "drizzle-kit push",
-    "db:pull": "drizzle-kit pull",
-    "db:studio": "drizzle-kit studio"
+    "db:generate": "node scripts/database-command.mjs generate",
+    "db:migrate": "node scripts/database-command.mjs migrate",
+    "db:push": "node scripts/database-command.mjs push",
+    "db:pull": "node scripts/database-command.mjs pull",
+    "db:studio": "node scripts/database-command.mjs studio"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
@@ -43,6 +44,7 @@
     "@tiptap/react": "^3.31.2",
     "@tiptap/starter-kit": "^3.31.2",
     "better-sqlite3": "^12.6.2",
+    "dotenv": "^17.3.1",
     "drizzle-orm": "^0.45.1",
     "effect": "^3.22.1",
     "lucide-react": "^0.577.0",
@@ -62,7 +64,6 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.1",
-    "dotenv": "^17.3.1",
     "drizzle-kit": "^0.31.10",
     "jsdom": "^30.0.1",
     "oxfmt": "^0.66.0",

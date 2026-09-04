@@ -5,26 +5,36 @@ import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { nitro } from "nitro/vite";
 
-const config = defineConfig(({ mode }) => ({
-  resolve: {
-    tsconfigPaths: true,
-  },
-  plugins: [
-    devtools(),
-    stylexPlugin({
-      dev: mode === "development",
-      fileName: "stylex.css",
-      runtimeInjection: mode === "development",
-      useCSSLayers: true,
-      unstable_moduleResolution: {
-        type: "commonJS",
-        rootDir: import.meta.dirname,
-      },
-    }),
-    tanstackStart(),
-    viteReact(),
-    nitro(),
-  ],
-}));
+import { loadHelmEnvironment, serverHostFromEnvironment } from "./scripts/environment.mjs";
+
+const environment = loadHelmEnvironment();
+
+const config = defineConfig(({ command, mode }) => {
+  const host = command === "serve" ? serverHostFromEnvironment(environment) : undefined;
+
+  return {
+    envDir: false,
+    resolve: {
+      tsconfigPaths: true,
+    },
+    server: host ? { host } : undefined,
+    plugins: [
+      devtools(),
+      stylexPlugin({
+        dev: mode === "development",
+        fileName: "stylex.css",
+        runtimeInjection: mode === "development",
+        useCSSLayers: true,
+        unstable_moduleResolution: {
+          type: "commonJS",
+          rootDir: import.meta.dirname,
+        },
+      }),
+      tanstackStart(),
+      viteReact(),
+      nitro(),
+    ],
+  };
+});
 
 export default config;
