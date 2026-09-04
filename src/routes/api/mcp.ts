@@ -4,6 +4,7 @@ import { createMcpRequestHandler } from "../../mcp/http-transport.server";
 import {
   activityServices,
   agentServices,
+  bulkTaskServices,
   projectServices,
   taskQueryServices,
   taskServices,
@@ -15,6 +16,7 @@ const handleMcpRequest = createMcpRequestHandler(
   agentServices,
   activityServices,
   taskQueryServices,
+  bulkTaskServices,
 );
 
 export const Route = createFileRoute("/api/mcp")({

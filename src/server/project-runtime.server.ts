@@ -2,10 +2,12 @@ import { Effect } from "effect";
 
 import { systemActivityClock } from "../application/activity";
 import { reconcileActiveAgentRuns } from "../application/agents";
+import { systemBulkTaskClock } from "../application/bulk-tasks";
 import { reconcileTaskLeases, systemTaskClock } from "../application/tasks";
 import { systemTaskQueryClock } from "../application/task-queries";
 import { createSqliteAgentStore } from "../infrastructure/sqlite-agent-store.server";
 import { createSqliteActivityStore } from "../infrastructure/sqlite-activity-store.server";
+import { createSqliteBulkTaskStore } from "../infrastructure/sqlite-bulk-task-store.server";
 import { createSqliteProjectStore } from "../infrastructure/sqlite-project-store.server";
 import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
 import { createSqliteTaskStore } from "../infrastructure/sqlite-task-store.server";
@@ -24,6 +26,10 @@ function createProjectRuntime() {
   const taskQueryServices = {
     store: createSqliteTaskQueryStore(projectStore.database),
     clock: systemTaskQueryClock,
+  };
+  const bulkTaskServices = {
+    store: createSqliteBulkTaskStore(projectStore.database),
+    clock: systemBulkTaskClock,
   };
   const agentServices = { store: createSqliteAgentStore(projectStore.database) };
   const activityServices = {
@@ -45,6 +51,7 @@ function createProjectRuntime() {
   return {
     activityServices,
     agentServices,
+    bulkTaskServices,
     leaseReconciliationTimer,
     projectServices,
     projectStore,
@@ -68,5 +75,11 @@ if (runtimeGlobal[legacyLeaseReconciliationTimerKey]) {
 
 const runtime = (runtimeGlobal[projectRuntimeKey] ??= createProjectRuntime());
 
-export const { activityServices, agentServices, projectServices, taskQueryServices, taskServices } =
-  runtime;
+export const {
+  activityServices,
+  agentServices,
+  bulkTaskServices,
+  projectServices,
+  taskQueryServices,
+  taskServices,
+} = runtime;

@@ -3,6 +3,10 @@ import { Effect } from "effect";
 
 import { listTaskAttempts, listTaskTags, listTasks } from "../application/tasks";
 import {
+  compiledBulkTaskIntentSchema,
+  compiledExecuteBulkTasksInputSchema,
+} from "../domain/bulk-tasks";
+import {
   compiledApproveTaskReviewInputSchema,
   compiledArchiveTaskInputSchema,
   compiledCancelTaskInputSchema,
@@ -19,10 +23,12 @@ import {
   compiledUpdateTaskPlanningInputSchema,
   type Actor,
 } from "../domain/tasks";
-import { taskServices } from "./project-runtime.server";
+import { bulkTaskServices, taskServices } from "./project-runtime.server";
 import {
   executeApproveTaskReview,
   executeArchiveTask,
+  executeBulkTaskOperation,
+  executeBulkTaskPreview,
   executeCancelTask,
   executeCreateTask,
   executeCreateTaskRelation,
@@ -35,6 +41,14 @@ import {
 } from "./task-adapter";
 
 const LOCAL_HUMAN: Actor = { type: "human", id: "local-human" };
+
+export const previewHumanBulkTasks = createServerFn({ method: "POST" })
+  .validator(compiledBulkTaskIntentSchema)
+  .handler(({ data }) => executeBulkTaskPreview(data, LOCAL_HUMAN, bulkTaskServices));
+
+export const executeHumanBulkTasks = createServerFn({ method: "POST" })
+  .validator(compiledExecuteBulkTasksInputSchema)
+  .handler(({ data }) => executeBulkTaskOperation(data, LOCAL_HUMAN, bulkTaskServices));
 
 export const readTasks = createServerFn({ method: "GET" })
   .validator(compiledListTasksInputSchema)

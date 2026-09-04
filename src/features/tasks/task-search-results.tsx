@@ -9,6 +9,7 @@ import type {
 import type { TaskSearchItem } from "../../domain/task-filters";
 import type { TaskLifecycle } from "../../domain/tasks";
 import { tokens } from "../../styles/tokens.stylex";
+import { Checkbox } from "../../components/ui/checkbox";
 
 const lifecycleOrder = [
   "backlog",
@@ -46,15 +47,15 @@ export type TaskSearchResultsProps = {
   presentation?: SavedViewPresentation;
   grouping?: SavedViewGrouping;
   visibleFields: readonly SavedViewVisibleField[];
-  selectedTaskId?: string | null;
-  onSelect?: (taskId: string) => void;
+  selectedTaskIds: ReadonlySet<string>;
+  onTaskSelected: (taskId: string, selected: boolean) => void;
 };
 
 type ResolvedTaskSearchResultsProps = {
   items: readonly TaskSearchItem[];
   visibleFields: readonly SavedViewVisibleField[];
-  selectedTaskId: string | null;
-  onSelect: (taskId: string) => void;
+  selectedTaskIds: ReadonlySet<string>;
+  onTaskSelected: (taskId: string, selected: boolean) => void;
 };
 
 export function TaskSearchResults({
@@ -62,8 +63,8 @@ export function TaskSearchResults({
   presentation = "list",
   grouping,
   visibleFields,
-  selectedTaskId = null,
-  onSelect = ignoreSelection,
+  selectedTaskIds,
+  onTaskSelected,
 }: TaskSearchResultsProps) {
   const resolvedGrouping =
     grouping ?? (presentation === "board" ? { type: "lifecycle" } : { type: "none" });
@@ -80,16 +81,16 @@ export function TaskSearchResults({
           items={items}
           grouping={resolvedGrouping}
           visibleFields={visibleFields}
-          selectedTaskId={selectedTaskId}
-          onSelect={onSelect}
+          selectedTaskIds={selectedTaskIds}
+          onTaskSelected={onTaskSelected}
         />
       ) : (
         <TaskGroupedList
           items={items}
           grouping={resolvedGrouping}
           visibleFields={visibleFields}
-          selectedTaskId={selectedTaskId}
-          onSelect={onSelect}
+          selectedTaskIds={selectedTaskIds}
+          onTaskSelected={onTaskSelected}
         />
       )}
     </section>
@@ -99,19 +100,19 @@ export function TaskSearchResults({
 function TaskList({
   items,
   visibleFields,
-  selectedTaskId,
-  onSelect,
+  selectedTaskIds,
+  onTaskSelected,
   ariaLabel = "Tasks",
 }: ResolvedTaskSearchResultsProps & { ariaLabel?: string }) {
   return (
     <ul aria-label={ariaLabel} {...stylex.props(styles.list)}>
       {items.map((item) => (
         <li key={item.task.id}>
-          <TaskResultButton
+          <TaskResultRow
             item={item}
             visibleFields={visibleFields}
-            selected={selectedTaskId === item.task.id}
-            onSelect={onSelect}
+            selected={selectedTaskIds.has(item.task.id)}
+            onSelectedChange={onTaskSelected}
             layout="list"
           />
         </li>
@@ -124,8 +125,8 @@ function TaskGroupedList({
   items,
   grouping,
   visibleFields,
-  selectedTaskId,
-  onSelect,
+  selectedTaskIds,
+  onTaskSelected,
 }: ResolvedTaskSearchResultsProps & { grouping: SavedViewGrouping }) {
   const headingPrefix = useId();
   if (grouping.type === "none") {
@@ -133,8 +134,8 @@ function TaskGroupedList({
       <TaskList
         items={items}
         visibleFields={visibleFields}
-        selectedTaskId={selectedTaskId}
-        onSelect={onSelect}
+        selectedTaskIds={selectedTaskIds}
+        onTaskSelected={onTaskSelected}
       />
     );
   }
@@ -155,8 +156,8 @@ function TaskGroupedList({
             <TaskList
               items={group.items}
               visibleFields={visibleFields}
-              selectedTaskId={selectedTaskId}
-              onSelect={onSelect}
+              selectedTaskIds={selectedTaskIds}
+              onTaskSelected={onTaskSelected}
               ariaLabel={`${group.label} tasks`}
             />
           </section>
@@ -170,8 +171,8 @@ function TaskBoard({
   items,
   grouping,
   visibleFields,
-  selectedTaskId,
-  onSelect,
+  selectedTaskIds,
+  onTaskSelected,
 }: ResolvedTaskSearchResultsProps & { grouping: SavedViewGrouping }) {
   const boardId = useId();
   return (
@@ -191,11 +192,11 @@ function TaskBoard({
             <ul aria-label={`${group.label} tasks`} {...stylex.props(styles.laneList)}>
               {group.items.map((item) => (
                 <li key={item.task.id}>
-                  <TaskResultButton
+                  <TaskResultRow
                     item={item}
                     visibleFields={visibleFields}
-                    selected={selectedTaskId === item.task.id}
-                    onSelect={onSelect}
+                    selected={selectedTaskIds.has(item.task.id)}
+                    onSelectedChange={onTaskSelected}
                     layout="board"
                   />
                 </li>
@@ -270,38 +271,54 @@ function taskGroups(
   return includeEmpty ? groups : groups.filter((group) => group.items.length > 0);
 }
 
-function TaskResultButton({
+function TaskResultRow({
   item,
   visibleFields,
   selected,
-  onSelect,
+  onSelectedChange,
   layout,
 }: {
   item: TaskSearchItem;
   visibleFields: readonly SavedViewVisibleField[];
   selected: boolean;
-  onSelect: (taskId: string) => void;
+  onSelectedChange: (taskId: string, selected: boolean) => void;
   layout: SavedViewPresentation;
 }) {
+  const checkboxId = useId();
   return (
-    <button
-      type="button"
-      aria-current={selected ? "true" : undefined}
-      aria-label={`Select task #${item.task.sequence}: ${item.task.title}`}
-      onClick={() => onSelect(item.task.id)}
+    <div
       {...stylex.props(
-        styles.taskButton,
-        layout === "list" ? styles.listButton : styles.boardButton,
+        styles.taskRow,
+        layout === "list" ? styles.listRow : styles.boardRow,
         selected && styles.selected,
       )}
     >
-      <span {...stylex.props(styles.reference)}>#{item.task.sequence}</span>
-      <span {...stylex.props(styles.fields)}>
-        {visibleFields.map((field) => (
-          <TaskResultField key={field} item={item} field={field} />
-        ))}
-      </span>
-    </button>
+      <Checkbox
+        id={checkboxId}
+        aria-label={`Select task #${item.task.sequence}: ${item.task.title}`}
+        checked={selected}
+        onCheckedChange={(checked) => onSelectedChange(item.task.id, checked)}
+      />
+      <label
+        htmlFor={checkboxId}
+        {...stylex.props(
+          styles.taskLabel,
+          layout === "list" ? styles.listLabel : styles.boardLabel,
+        )}
+      >
+        <span {...stylex.props(styles.srOnly)}>
+          Select task #{item.task.sequence}: {item.task.title}
+        </span>
+        <span aria-hidden="true" {...stylex.props(styles.reference)}>
+          #{item.task.sequence}
+        </span>
+        <span aria-hidden="true" {...stylex.props(styles.fields)}>
+          {visibleFields.map((field) => (
+            <TaskResultField key={field} item={item} field={field} />
+          ))}
+        </span>
+      </label>
+    </div>
   );
 }
 
@@ -345,8 +362,6 @@ function taskFieldValue(item: TaskSearchItem, field: SavedViewVisibleField) {
   }
 }
 
-function ignoreSelection() {}
-
 const styles = stylex.create({
   root: {
     display: "grid",
@@ -380,45 +395,53 @@ const styles = stylex.create({
     paddingInline: tokens.space2,
   },
   groupHeading: { fontSize: 13, margin: 0, textTransform: "capitalize" },
-  taskButton: {
+  taskRow: {
+    alignItems: "center",
     backgroundColor: tokens.surface,
     borderColor: tokens.border,
     borderRadius: tokens.radius2,
     borderStyle: "solid",
     borderWidth: 1,
     color: tokens.foreground,
-    cursor: "pointer",
-    font: "inherit",
-    textAlign: "start",
+    display: "grid",
+    gap: tokens.space3,
+    gridTemplateColumns: "18px minmax(0, 1fr)",
     width: "100%",
     ":hover": {
       borderColor: tokens.accent,
     },
-    ":focus-visible": {
-      outlineColor: tokens.accent,
-      outlineOffset: 2,
-      outlineStyle: "solid",
-      outlineWidth: 2,
-    },
   },
-  listButton: {
-    alignItems: "center",
-    display: "grid",
-    gap: tokens.space3,
-    gridTemplateColumns: "42px minmax(0, 1fr)",
+  listRow: {
     minHeight: 50,
-    paddingBlock: tokens.space2,
-    paddingInline: tokens.space3,
+    paddingInlineStart: tokens.space3,
   },
-  boardButton: {
-    display: "grid",
-    gap: tokens.space2,
+  boardRow: {
+    alignItems: "start",
     minHeight: 92,
     padding: tokens.space3,
   },
   selected: {
     borderColor: tokens.accent,
     backgroundColor: tokens.surfaceMuted,
+  },
+  taskLabel: {
+    cursor: "pointer",
+    font: "inherit",
+    minWidth: 0,
+    textAlign: "start",
+  },
+  listLabel: {
+    alignItems: "center",
+    display: "grid",
+    gap: tokens.space3,
+    gridTemplateColumns: "42px minmax(0, 1fr)",
+    minHeight: 48,
+    paddingBlock: tokens.space2,
+    paddingInlineEnd: tokens.space3,
+  },
+  boardLabel: {
+    display: "grid",
+    gap: tokens.space2,
   },
   reference: {
     color: tokens.foregroundMuted,

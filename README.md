@@ -64,6 +64,13 @@ routine activity quiet, persists a per-project read watermark, and links importa
 existing task controls. The light, dark, or system appearance control is available throughout the human
 workspace and applies optimistically without replacing the server-rendered first-paint theme.
 
+Task lists, search results, and saved views expose visible-task selection for bulk planning changes.
+Every bulk change must first be previewed; the preview reports the stable target set, projected field
+changes, no-ops, and validation failures. Execution accepts only that exact preview, applies all changes
+in one transaction, and records one attributed parent event linked to every affected task event.
+Registered agents use the same command engine through `preview_bulk_tasks` and `execute_bulk_tasks`,
+targeting either explicit task IDs or the structured filter language shared with `search_tasks`.
+
 `list_projects` and `get_active_project` expose the same current selection as the browser. Agent reads and
 mutations still require an explicit project ID, so an active-project change never leaks records between
 projects or silently redirects an agent's in-flight work. Discovery cursors are bound to the queue

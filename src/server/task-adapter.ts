@@ -1,6 +1,16 @@
 import { Effect, Either } from "effect";
 
 import {
+  executeBulkTasks as executeBulkTasksApplication,
+  previewBulkTasks,
+  type BulkTaskServices,
+} from "../application/bulk-tasks";
+import {
+  toBulkTaskErrorDto,
+  type BulkTaskCommandError,
+  type BulkTaskErrorDto,
+} from "../application/bulk-task-errors";
+import {
   approveTaskReview,
   archiveTask,
   cancelTask,
@@ -22,6 +32,7 @@ import {
   type TaskErrorDto,
 } from "../application/task-errors";
 import type { RegisteredAgentRun } from "../domain/agents";
+import type { BulkTaskExecutionResult, BulkTaskPreview } from "../domain/bulk-tasks";
 import type {
   Actor,
   Task,
@@ -48,6 +59,12 @@ export type TaskFailureCommandResponse =
 export type TaskTransitionCommandResponse =
   | { ok: true; result: TaskTransitionResult }
   | { ok: false; error: TaskErrorDto };
+export type BulkTaskPreviewCommandResponse =
+  | { ok: true; preview: BulkTaskPreview }
+  | { ok: false; error: BulkTaskErrorDto };
+export type BulkTaskExecutionCommandResponse =
+  | { ok: true; result: BulkTaskExecutionResult }
+  | { ok: false; error: BulkTaskErrorDto };
 
 async function execute(
   operation: Effect.Effect<Task, TaskCommandError>,
@@ -83,6 +100,38 @@ async function executeResult<A>(
   return Either.isRight(result)
     ? { ok: true, result: result.right }
     : { ok: false, error: toTaskErrorDto(result.left) };
+}
+
+async function executeBulkResult<A>(
+  operation: Effect.Effect<A, BulkTaskCommandError>,
+): Promise<{ ok: true; result: A } | { ok: false; error: BulkTaskErrorDto }> {
+  const result = await Effect.runPromise(Effect.either(operation));
+  return Either.isRight(result)
+    ? { ok: true, result: result.right }
+    : { ok: false, error: toBulkTaskErrorDto(result.left) };
+}
+
+export async function executeBulkTaskPreview(
+  data: unknown,
+  actor: Actor,
+  services: BulkTaskServices,
+  agentCapabilities: readonly string[] = [],
+): Promise<BulkTaskPreviewCommandResponse> {
+  const response = await executeBulkResult(
+    previewBulkTasks(data, actor, services, agentCapabilities),
+  );
+  return response.ok
+    ? { ok: true, preview: response.result }
+    : { ok: false, error: response.error };
+}
+
+export function executeBulkTaskOperation(
+  data: unknown,
+  actor: Actor,
+  services: BulkTaskServices,
+  agentCapabilities: readonly string[] = [],
+): Promise<BulkTaskExecutionCommandResponse> {
+  return executeBulkResult(executeBulkTasksApplication(data, actor, services, agentCapabilities));
 }
 
 export function executeCreateTask(

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "../../components/ui/button";
+import { Checkbox } from "../../components/ui/checkbox";
 import type {
   ActivityEntry,
   CreateHumanActivityEntryInput,
@@ -71,8 +72,10 @@ import { TaskCollaboration } from "../activity/task-collaboration";
 import { OperationalDashboard } from "../dashboard/operational-dashboard";
 import { ProjectReviewModeControl } from "../projects/project-review-mode-control";
 import { ThemeControl } from "../projects/theme-control";
+import { BulkTaskControls, type BulkTaskControlsProps } from "./bulk-task-controls";
 import { RichTextEditor } from "./rich-text-editor";
 import { TaskExecutionPanel } from "./task-execution-panel";
+import { useVisibleTaskSelection } from "./visible-task-selection";
 
 type TaskWorkspaceProps = {
   project: Project;
@@ -111,6 +114,8 @@ type TaskWorkspaceProps = {
   onResolveManualBlocker: (
     input: ResolveManualBlockerInput,
   ) => Promise<ManualBlockerCommandResponse>;
+  onPreviewBulkTasks: BulkTaskControlsProps["onPreview"];
+  onExecuteBulkTasks: BulkTaskControlsProps["onExecute"];
   onChangeTheme: (theme: Theme) => Promise<void>;
   onChangeProjectReviewMode: (input: SetProjectReviewModeInput) => Promise<ProjectCommandResponse>;
 };
@@ -147,6 +152,8 @@ export function TaskWorkspace({
   onWithdrawActivityEntry,
   onCreateManualBlocker,
   onResolveManualBlocker,
+  onPreviewBulkTasks,
+  onExecuteBulkTasks,
   onChangeTheme,
   onChangeProjectReviewMode,
 }: TaskWorkspaceProps) {
@@ -154,10 +161,19 @@ export function TaskWorkspace({
   const [captureTitle, setCaptureTitle] = useState("");
   const [workspaceView, setWorkspaceView] = useState<"dashboard" | "tasks" | "activity">("tasks");
   const [selectedId, setSelectedId] = useState<string | null>(orderedTasks[0]?.id ?? null);
+  const [bulkSelectedTaskIds, setBulkSelectedTaskIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [pendingCapture, setPendingCapture] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const selectedTask =
     orderedTasks.find((task) => task.id === selectedId) ?? orderedTasks[0] ?? null;
+  const visibleTaskIds = useMemo(() => orderedTasks.map((task) => task.id), [orderedTasks]);
+  const bulkSelection = useVisibleTaskSelection({
+    visibleTaskIds,
+    selectedTaskIds: bulkSelectedTaskIds,
+    onSelectedTaskIdsChange: setBulkSelectedTaskIds,
+  });
   const counts = useMemo(
     () => ({
       backlog: tasks.filter((task) => task.lifecycle === "backlog").length,
@@ -344,41 +360,59 @@ export function TaskWorkspace({
                 {captureError}
               </p>
             ) : null}
-            <nav aria-label="Tasks" {...stylex.props(styles.taskList)}>
+            <BulkTaskControls
+              projectId={project.id}
+              tagDefinitions={tagDefinitions}
+              selection={bulkSelection}
+              onPreview={onPreviewBulkTasks}
+              onExecute={onExecuteBulkTasks}
+            />
+            <ul aria-label="Tasks" {...stylex.props(styles.taskList)}>
               {orderedTasks.map((task) => (
-                <button
+                <li
                   key={task.id}
-                  type="button"
-                  onClick={() => selectTask(task.id)}
-                  aria-current={task.id === selectedTask?.id ? "true" : undefined}
                   {...stylex.props(
                     styles.taskRow,
+                    bulkSelection.isTaskSelected(task.id) && styles.taskRowBulkSelected,
                     task.id === selectedTask?.id && styles.taskRowSelected,
                   )}
                 >
-                  <span {...stylex.props(styles.taskReference)}>#{task.sequence}</span>
-                  <span {...stylex.props(styles.taskTitleGroup)}>
-                    <span {...stylex.props(styles.taskTitle)}>{task.title}</span>
-                    <span {...stylex.props(styles.taskMeta)}>
-                      {[
-                        task.priority,
-                        task.dueAt ? `due ${task.dueAt}` : null,
-                        task.size ? `size ${task.size}` : null,
-                      ]
-                        .filter(Boolean)
-                        .join(" · ")}
+                  <Checkbox
+                    aria-label={`Select task #${task.sequence}: ${task.title}`}
+                    checked={bulkSelection.isTaskSelected(task.id)}
+                    onCheckedChange={(checked) => bulkSelection.setTaskSelected(task.id, checked)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => selectTask(task.id)}
+                    aria-current={task.id === selectedTask?.id ? "true" : undefined}
+                    aria-label={`Open task #${task.sequence}: ${task.title}`}
+                    {...stylex.props(styles.taskDetailButton)}
+                  >
+                    <span {...stylex.props(styles.taskReference)}>#{task.sequence}</span>
+                    <span {...stylex.props(styles.taskTitleGroup)}>
+                      <span {...stylex.props(styles.taskTitle)}>{task.title}</span>
+                      <span {...stylex.props(styles.taskMeta)}>
+                        {[
+                          task.priority,
+                          task.dueAt ? `due ${task.dueAt}` : null,
+                          task.size ? `size ${task.size}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </span>
+                      {task.claim ? <ClaimLeaseSummary claim={task.claim} compact /> : null}
                     </span>
-                    {task.claim ? <ClaimLeaseSummary claim={task.claim} compact /> : null}
-                  </span>
-                  <span {...stylex.props(styles[task.lifecycle])}>
-                    {taskLifecycleLabel(task.lifecycle)}
-                  </span>
-                  {task.eligibility ? (
-                    <span {...stylex.props(styles.eligibility)}>{task.eligibility.status}</span>
-                  ) : null}
-                </button>
+                    <span {...stylex.props(styles[task.lifecycle])}>
+                      {taskLifecycleLabel(task.lifecycle)}
+                    </span>
+                    {task.eligibility ? (
+                      <span {...stylex.props(styles.eligibility)}>{task.eligibility.status}</span>
+                    ) : null}
+                  </button>
+                </li>
               ))}
-            </nav>
+            </ul>
           </aside>
         ) : null}
 
@@ -1390,7 +1424,13 @@ const styles = stylex.create({
     width: "100%",
     ":focus": { borderColor: tokens.accent, outline: "none" },
   },
-  taskList: { display: "grid", gap: tokens.space1, marginBlockStart: tokens.space5 },
+  taskList: {
+    display: "grid",
+    gap: tokens.space1,
+    listStyle: "none",
+    marginBlockStart: tokens.space5,
+    padding: 0,
+  },
   taskRow: {
     alignItems: "center",
     backgroundColor: "transparent",
@@ -1399,16 +1439,36 @@ const styles = stylex.create({
     borderStyle: "solid",
     borderWidth: 1,
     color: tokens.foreground,
-    cursor: "pointer",
     display: "grid",
     gap: tokens.space2,
-    gridTemplateColumns: "32px minmax(0, 1fr) auto",
+    gridTemplateColumns: "18px minmax(0, 1fr)",
     minHeight: 58,
-    paddingInline: tokens.space2,
-    textAlign: "start",
-    ":hover": { backgroundColor: tokens.surfaceMuted },
+    paddingInlineStart: tokens.space2,
   },
-  taskRowSelected: { backgroundColor: tokens.surface, borderColor: tokens.border },
+  taskRowBulkSelected: { backgroundColor: tokens.surfaceMuted, borderColor: tokens.border },
+  taskRowSelected: { backgroundColor: tokens.surface, borderColor: tokens.accent },
+  taskDetailButton: {
+    alignItems: "center",
+    backgroundColor: "transparent",
+    borderWidth: 0,
+    color: tokens.foreground,
+    cursor: "pointer",
+    display: "grid",
+    font: "inherit",
+    gap: tokens.space2,
+    gridTemplateColumns: "32px minmax(0, 1fr) auto",
+    minHeight: 56,
+    paddingInline: tokens.space1,
+    textAlign: "start",
+    width: "100%",
+    ":hover": { backgroundColor: tokens.surfaceMuted },
+    ":focus-visible": {
+      outlineColor: tokens.accent,
+      outlineOffset: -2,
+      outlineStyle: "solid",
+      outlineWidth: 2,
+    },
+  },
   taskReference: { color: tokens.foregroundMuted, fontSize: 11 },
   taskTitleGroup: { display: "grid", gap: 2, minWidth: 0 },
   taskTitle: {

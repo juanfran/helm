@@ -10,6 +10,7 @@ import { z } from "zod";
 
 import { createProject, getAppState } from "../application/projects";
 import { reconcileActiveAgentRuns } from "../application/agents";
+import type { BulkTaskStore } from "../application/bulk-tasks";
 import { createSavedView } from "../application/task-queries";
 import { registeredAgentRunSchema } from "../domain/agents";
 import {
@@ -19,6 +20,7 @@ import {
   manualBlockerMutationResultSchema,
 } from "../domain/activity";
 import { appStateSchema, projectSchema } from "../domain/projects";
+import { bulkTaskExecutionResultSchema, bulkTaskPreviewSchema } from "../domain/bulk-tasks";
 import { savedViewSchema } from "../domain/saved-views";
 import { taskSearchPageSchema } from "../domain/task-filters";
 import {
@@ -108,6 +110,14 @@ const successfulSavedViewSchema = z.object({
   ok: z.literal(true),
   view: savedViewSchema,
 });
+const successfulBulkTaskPreviewSchema = z.object({
+  ok: z.literal(true),
+  preview: bulkTaskPreviewSchema,
+});
+const successfulBulkTaskExecutionSchema = z.object({
+  ok: z.literal(true),
+  result: bulkTaskExecutionResultSchema,
+});
 const projectCatalogSchema = z.object({
   projects: z.array(projectSchema),
   activeProjectId: z.string().nullable(),
@@ -125,6 +135,9 @@ let taskServices: Parameters<typeof createMcpRequestHandler>[1];
 let agentServices: Parameters<typeof createMcpRequestHandler>[2];
 let activityServices: Parameters<typeof createMcpRequestHandler>[3];
 let taskQueryServices: Parameters<typeof createMcpRequestHandler>[4];
+let bulkTaskServices: Parameters<typeof createMcpRequestHandler>[5];
+let bulkPreviewOperation: BulkTaskStore["preview"];
+let bulkExecuteOperation: BulkTaskStore["execute"];
 
 async function connectClient() {
   transport = new StreamableHTTPClientTransport(new URL("http://helm.local/api/mcp"), {
@@ -178,12 +191,22 @@ beforeEach(async () => {
       now: () => now,
     },
   };
+  bulkPreviewOperation = () => Effect.die("The bulk task test store is not configured.");
+  bulkExecuteOperation = () => Effect.die("The bulk task test store is not configured.");
+  bulkTaskServices = {
+    store: {
+      preview: (...arguments_) => bulkPreviewOperation(...arguments_),
+      execute: (...arguments_) => bulkExecuteOperation(...arguments_),
+    },
+    clock: taskQueryServices.clock,
+  };
   handleMcpRequest = createMcpRequestHandler(
     projectServices,
     taskServices,
     agentServices,
     activityServices,
     taskQueryServices,
+    bulkTaskServices,
   );
   await connectClient();
 });
@@ -260,6 +283,14 @@ function failureReport() {
   };
 }
 
+function schemaRootPropertyNames(schema: unknown): string[] {
+  if (!schema || typeof schema !== "object") return [];
+  const variants = Reflect.get(schema, "anyOf");
+  if (Array.isArray(variants)) return variants.flatMap(schemaRootPropertyNames);
+  const properties = Reflect.get(schema, "properties");
+  return properties && typeof properties === "object" ? Object.keys(properties) : [];
+}
+
 describe("MCP project contract", () => {
   it("lists projects and resolves the current browser project from an existing HTTP session", async () => {
     const initialState = await Effect.runPromise(getAppState(projectServices));
@@ -272,7 +303,10 @@ describe("MCP project contract", () => {
     await mkdir(join(secondRepositoryRoot, ".git"), { recursive: true });
     const secondProject = await Effect.runPromise(
       createProject(
-        { repositoryRoot: secondRepositoryRoot, idempotencyKey: "mcp-project-two" },
+        {
+          repositoryRoot: secondRepositoryRoot,
+          idempotencyKey: "mcp-project-two",
+        },
         projectServices,
       ),
     );
@@ -313,7 +347,10 @@ describe("MCP project contract", () => {
     await mkdir(join(secondRepositoryRoot, ".git"), { recursive: true });
     const secondProject = await Effect.runPromise(
       createProject(
-        { repositoryRoot: secondRepositoryRoot, idempotencyKey: "mcp-scope-project-two" },
+        {
+          repositoryRoot: secondRepositoryRoot,
+          idempotencyKey: "mcp-scope-project-two",
+        },
         projectServices,
       ),
     );
@@ -347,7 +384,10 @@ describe("MCP project contract", () => {
     const secondTask = successfulTaskSchema.parse(secondTaskResult.structuredContent).task;
 
     const [firstDiscoveryResult, secondDiscoveryResult] = await Promise.all([
-      client.callTool({ name: "find_work", arguments: { projectId, limit: 20 } }),
+      client.callTool({
+        name: "find_work",
+        arguments: { projectId, limit: 20 },
+      }),
       client.callTool({
         name: "find_work",
         arguments: { projectId: secondProject.id, limit: 20 },
@@ -570,7 +610,9 @@ describe("MCP shared task-query contract", () => {
     });
     expect(getViewTool).toMatchObject({
       annotations: { readOnlyHint: true },
-      inputSchema: { required: expect.arrayContaining(["projectId", "savedViewId"]) },
+      inputSchema: {
+        required: expect.arrayContaining(["projectId", "savedViewId"]),
+      },
     });
     expect(tools.tools.map(({ name }) => name)).not.toEqual(
       expect.arrayContaining([
@@ -618,7 +660,10 @@ describe("MCP shared task-query contract", () => {
     });
     expect(unregisteredSearch).toMatchObject({
       isError: true,
-      structuredContent: { ok: false, error: { type: "AgentRunRequiredError" } },
+      structuredContent: {
+        ok: false,
+        error: { type: "AgentRunRequiredError" },
+      },
     });
 
     await client.callTool({
@@ -677,6 +722,161 @@ describe("MCP shared task-query contract", () => {
         error: { type: "TaskQueryCursorError", reason: "malformed" },
       },
     });
+  });
+});
+
+describe("MCP bulk task contract", () => {
+  it("requires a registered run and derives attribution and capabilities outside tool input", async () => {
+    const previewToken = `btp1:${"a".repeat(64)}:${"b".repeat(64)}`;
+    const previewActors: Array<{ type: string; id: string }> = [];
+    const executeActors: Array<{ type: string; id: string }> = [];
+    const previewCapabilities: string[][] = [];
+    bulkPreviewOperation = (_intent, actor, context) => {
+      previewActors.push(actor);
+      previewCapabilities.push([...context.agentCapabilities]);
+      return Effect.succeed({
+        schemaVersion: 1,
+        mode: "atomic",
+        kind: "update",
+        projectId,
+        matchedCount: 1,
+        affectedCount: 1,
+        executable: true,
+        targets: [
+          {
+            targetKey: "task-1",
+            clientId: null,
+            taskId: "task-1",
+            sequence: 1,
+            title: "Bulk target",
+            expectedVersion: 1,
+            projectedVersion: 2,
+            changed: true,
+            changes: [{ field: "priority", before: "normal", after: "high" }],
+            failures: [],
+          },
+        ],
+        failures: [],
+        previewToken,
+      });
+    };
+    bulkExecuteOperation = (_input, actor) => {
+      executeActors.push(actor);
+      return Effect.succeed({
+        schemaVersion: 1,
+        mode: "atomic",
+        kind: "update",
+        operationId: "bulk-operation-1",
+        projectId,
+        matchedCount: 1,
+        affectedCount: 1,
+        parentEventCursor: 10,
+        items: [
+          {
+            targetKey: "task-1",
+            clientId: null,
+            taskId: "task-1",
+            version: 2,
+            changed: true,
+          },
+        ],
+      });
+    };
+
+    const tools = await client.listTools();
+    const previewTool = tools.tools.find(({ name }) => name === "preview_bulk_tasks");
+    const executeTool = tools.tools.find(({ name }) => name === "execute_bulk_tasks");
+    expect(previewTool?.annotations).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+    });
+    expect(executeTool?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+    });
+
+    expect(schemaRootPropertyNames(previewTool?.inputSchema)).not.toEqual(
+      expect.arrayContaining(["actor", "agentCapabilities"]),
+    );
+    expect(schemaRootPropertyNames(executeTool?.inputSchema)).not.toEqual(
+      expect.arrayContaining(["actor", "agentCapabilities"]),
+    );
+
+    const intent = {
+      schemaVersion: 1 as const,
+      kind: "update" as const,
+      projectId,
+      reason: "Apply the reviewed planning decision.",
+      selection: { type: "ids" as const, taskIds: ["task-1"] },
+      patch: { priority: "high" as const },
+    };
+    const unregistered = await client.callTool({
+      name: "preview_bulk_tasks",
+      arguments: intent,
+    });
+    expect(unregistered).toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        error: { type: "AgentRunRequiredError" },
+      },
+    });
+    expect(previewActors).toEqual([]);
+
+    const registrationResult = await client.callTool({
+      name: "register_agent_run",
+      arguments: {
+        profileKey: "bulk-contract-agent",
+        displayName: "Bulk Contract Agent",
+        capabilities: ["typescript"],
+        idempotencyKey: "register-bulk-contract-agent",
+      },
+    });
+    const registration = successfulRegistrationSchema.parse(registrationResult.structuredContent);
+    const countsBeforePreview = {
+      events: projectStore.database.prepare("select count(*) from events").pluck().get(),
+      tasks: projectStore.database.prepare("select count(*) from tasks").pluck().get(),
+    };
+    const previewResult = await client.callTool({
+      name: "preview_bulk_tasks",
+      arguments: intent,
+    });
+    const preview = successfulBulkTaskPreviewSchema.parse(previewResult.structuredContent).preview;
+    expect(preview.previewToken).toBe(previewToken);
+    expect({
+      events: projectStore.database.prepare("select count(*) from events").pluck().get(),
+      tasks: projectStore.database.prepare("select count(*) from tasks").pluck().get(),
+    }).toEqual(countsBeforePreview);
+
+    const command = {
+      intent,
+      previewToken: preview.previewToken,
+      idempotencyKey: "execute-bulk-contract",
+    };
+    const executionResult = await client.callTool({
+      name: "execute_bulk_tasks",
+      arguments: command,
+    });
+    const retryResult = await client.callTool({
+      name: "execute_bulk_tasks",
+      arguments: command,
+    });
+    expect(
+      successfulBulkTaskExecutionSchema.parse(executionResult.structuredContent).result,
+    ).toEqual(
+      expect.objectContaining({
+        operationId: "bulk-operation-1",
+        affectedCount: 1,
+      }),
+    );
+    expect(retryResult.structuredContent).toEqual(executionResult.structuredContent);
+    expect(previewActors).toEqual([{ type: "agent", id: registration.registration.run.id }]);
+    expect(executeActors).toEqual([
+      { type: "agent", id: registration.registration.run.id },
+      { type: "agent", id: registration.registration.run.id },
+    ]);
+    expect(previewCapabilities).toEqual([["typescript"]]);
   });
 });
 
@@ -1701,6 +1901,7 @@ describe("MCP agent run, work discovery, and lease contract", () => {
       agentServices,
       activityServices,
       taskQueryServices,
+      bulkTaskServices,
     );
     await connectClient();
     const resumedResult = await client.callTool({

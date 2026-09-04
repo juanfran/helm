@@ -115,6 +115,8 @@ function props(tasks: readonly Task[] = [backlog]) {
     onWithdrawActivityEntry: vi.fn(),
     onCreateManualBlocker: vi.fn(),
     onResolveManualBlocker: vi.fn(),
+    onPreviewBulkTasks: vi.fn(),
+    onExecuteBulkTasks: vi.fn(),
     onChangeTheme: vi.fn(),
     onChangeProjectReviewMode: vi.fn(),
   };
@@ -237,15 +239,49 @@ describe("task workspace", () => {
 
     render(<TaskWorkspace {...props([low, urgentLater, urgentFirst])} />);
 
-    const taskButtons = within(screen.getByRole("navigation", { name: "Tasks" })).getAllByRole(
-      "button",
-    );
+    const taskButtons = within(screen.getByRole("list", { name: "Tasks" })).getAllByRole("button");
     expect(taskButtons.map((button) => button.textContent)).toEqual([
       expect.stringContaining("Urgent first"),
       expect.stringContaining("Urgent later"),
       expect.stringContaining("Low priority"),
     ]);
     expect(taskButtons[0]?.getAttribute("aria-current")).toBe("true");
+  });
+
+  it("keeps bulk selection separate from the task opened for detail", async () => {
+    const user = userEvent.setup();
+    const secondTask: Task = {
+      ...backlog,
+      id: "task-2",
+      sequence: 2,
+      title: "Second task",
+      position: 2,
+    };
+    render(<TaskWorkspace {...props([backlog, secondTask])} />);
+
+    const checkbox = screen.getByRole("checkbox", {
+      name: "Select task #2: Second task",
+    });
+    await user.click(checkbox);
+
+    expect(checkbox.getAttribute("aria-checked")).toBe("true");
+    expect(
+      screen
+        .getByRole("button", { name: "Open task #1: Captured task" })
+        .getAttribute("aria-current"),
+    ).toBe("true");
+    expect(screen.getByRole("button", { name: "Bulk edit" }).matches(":disabled")).toBe(false);
+    expect(
+      screen.getByRole("button", { name: "Open task #2: Second task" }).contains(checkbox),
+    ).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "Open task #2: Second task" }));
+    expect(
+      screen
+        .getByRole("button", { name: "Open task #2: Second task" })
+        .getAttribute("aria-current"),
+    ).toBe("true");
+    expect(checkbox.getAttribute("aria-checked")).toBe("true");
   });
 
   it("captures a title-only backlog task from the quick entry", async () => {
@@ -522,10 +558,9 @@ describe("task workspace", () => {
     render(<TaskWorkspace {...props([activeTask])} />);
 
     expect(screen.getByRole("region", { name: "Task counts" }).textContent).toContain("1 active");
-    const taskButton = within(screen.getByRole("navigation", { name: "Tasks" })).getByRole(
-      "button",
-      { name: /Claimed task/ },
-    );
+    const taskButton = within(screen.getByRole("list", { name: "Tasks" })).getByRole("button", {
+      name: /Open task #1: Claimed task/,
+    });
     expect(taskButton.textContent).toContain("Claimed by Build Agent");
     expect(taskButton.textContent).toContain("Lease expires");
 

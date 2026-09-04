@@ -51,8 +51,8 @@ describe("TaskSearchResults", () => {
       <TaskSearchResults
         items={[first, second]}
         visibleFields={["title", "priority"]}
-        selectedTaskId="task-1"
-        onSelect={onSelect}
+        selectedTaskIds={new Set(["task-1"])}
+        onTaskSelected={onSelect}
       />,
     );
 
@@ -62,12 +62,12 @@ describe("TaskSearchResults", () => {
     expect(screen.queryByText("Ready")).toBeNull();
     expect(
       screen
-        .getByRole("button", { name: "Select task #1: Design the search" })
-        .getAttribute("aria-current"),
+        .getByRole("checkbox", { name: "Select task #1: Design the search" })
+        .getAttribute("aria-checked"),
     ).toBe("true");
 
-    await user.click(screen.getByRole("button", { name: "Select task #2: Verify pagination" }));
-    expect(onSelect).toHaveBeenCalledWith("task-2");
+    await user.click(screen.getByText("Verify pagination"));
+    expect(onSelect).toHaveBeenCalledWith("task-2", true);
   });
 
   it("groups the same result items into all six lifecycle lanes", () => {
@@ -82,8 +82,8 @@ describe("TaskSearchResults", () => {
         items={items}
         presentation="board"
         visibleFields={["title", "lifecycle"]}
-        selectedTaskId={null}
-        onSelect={vi.fn()}
+        selectedTaskIds={new Set()}
+        onTaskSelected={vi.fn()}
       />,
     );
 
@@ -92,11 +92,11 @@ describe("TaskSearchResults", () => {
       expect(screen.getByRole("region", { name: lane })).toBeTruthy();
     }
     expect(
-      within(screen.getByRole("region", { name: "Ready" })).getByRole("button", {
+      within(screen.getByRole("region", { name: "Ready" })).getByRole("checkbox", {
         name: "Select task #2: Ship search",
       }),
     ).toBeTruthy();
-    expect(screen.getAllByRole("button")).toHaveLength(items.length);
+    expect(screen.getAllByRole("checkbox")).toHaveLength(items.length);
   });
 
   it("announces an empty result while preserving the board lanes", () => {
@@ -105,14 +105,14 @@ describe("TaskSearchResults", () => {
         items={[]}
         presentation="board"
         visibleFields={["title"]}
-        selectedTaskId={null}
-        onSelect={vi.fn()}
+        selectedTaskIds={new Set()}
+        onTaskSelected={vi.fn()}
       />,
     );
 
     expect(screen.getByRole("status").textContent).toBe("No tasks match this view.");
     expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(6);
-    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
   });
 
   it("honors a saved priority grouping in list presentation", () => {
@@ -124,6 +124,8 @@ describe("TaskSearchResults", () => {
         ]}
         grouping={{ type: "priority" }}
         visibleFields={["title", "priority"]}
+        selectedTaskIds={new Set()}
+        onTaskSelected={vi.fn()}
       />,
     );
 

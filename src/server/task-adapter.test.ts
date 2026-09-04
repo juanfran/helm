@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { BulkTaskPreviewStaleError } from "../application/bulk-task-errors";
+import type { BulkTaskServices } from "../application/bulk-tasks";
 import { createProject } from "../application/projects";
 import type { TaskServices } from "../application/tasks";
 import { emptyRichTextDocument } from "../domain/tasks";
@@ -15,6 +17,7 @@ import {
 } from "../infrastructure/sqlite-project-store.server";
 import { createSqliteTaskStore } from "../infrastructure/sqlite-task-store.server";
 import {
+  executeBulkTaskOperation,
   executeArchiveTask,
   executeCreateTask,
   executeCreateTaskRelation,
@@ -51,6 +54,57 @@ afterEach(async () => {
 });
 
 describe("task server adapter", () => {
+  it("serializes typed bulk-command errors", async () => {
+    const bulkServices: BulkTaskServices = {
+      clock: { today: () => "2026-09-03", now: () => "2026-09-03T12:00:00.000Z" },
+      store: {
+        preview: () =>
+          Effect.fail(
+            new BulkTaskPreviewStaleError({
+              reason: "target_version_changed",
+              taskIds: ["task-1"],
+              message: "Preview the operation again.",
+            }),
+          ),
+        execute: () =>
+          Effect.fail(
+            new BulkTaskPreviewStaleError({
+              reason: "target_version_changed",
+              taskIds: ["task-1"],
+              message: "Preview the operation again.",
+            }),
+          ),
+      },
+    };
+    const intent = {
+      schemaVersion: 1 as const,
+      kind: "update" as const,
+      projectId,
+      reason: "Keep the selected tasks together.",
+      selection: { type: "ids" as const, taskIds: ["task-1"] },
+      patch: { priority: "high" as const },
+    };
+    const response = await executeBulkTaskOperation(
+      {
+        intent,
+        previewToken: `btp1:${"a".repeat(64)}:${"b".repeat(64)}`,
+        idempotencyKey: "bulk-adapter-error",
+      },
+      actor,
+      bulkServices,
+    );
+
+    expect(response).toEqual({
+      ok: false,
+      error: {
+        type: "BulkTaskPreviewStaleError",
+        message: "Preview the operation again.",
+        reason: "target_version_changed",
+        taskIds: ["task-1"],
+      },
+    });
+  });
+
   it("serializes task success, preparation, and version-conflict results", async () => {
     const created = await executeCreateTask(
       {

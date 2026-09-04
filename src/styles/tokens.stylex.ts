@@ -27,6 +27,10 @@ export const tokens = stylex.defineVars({
     default: "#9f2d24",
     [DARK]: "#ff9b91",
   },
+  overlay: {
+    default: "rgb(7 12 8 / 56%)",
+    [DARK]: "rgb(0 0 0 / 68%)",
+  },
   surfaceMuted: {
     default: "#eef0eb",
     [DARK]: "#222822",
@@ -58,6 +62,7 @@ export const lightTheme = stylex.createTheme(tokens, {
   danger: "#9f2d24",
   foreground: "#172019",
   foregroundMuted: "#59635a",
+  overlay: "rgb(7 12 8 / 56%)",
   surface: "#ffffff",
   surfaceMuted: "#eef0eb",
   shadow: "0 16px 48px rgb(23 32 25 / 8%)",
@@ -70,6 +75,7 @@ export const darkTheme = stylex.createTheme(tokens, {
   danger: "#ff9b91",
   foreground: "#edf2eb",
   foregroundMuted: "#aeb7ac",
+  overlay: "rgb(0 0 0 / 68%)",
   surface: "#191d19",
   surfaceMuted: "#222822",
   shadow: "0 16px 48px rgb(0 0 0 / 24%)",

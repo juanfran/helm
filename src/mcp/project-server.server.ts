@@ -12,6 +12,7 @@ import {
 import { toActivityErrorDto, type ActivityErrorDto } from "../application/activity-errors";
 import { toAgentErrorDto, type AgentErrorDto } from "../application/agent-errors";
 import { registerAgentRun, requireAgentRun, type AgentServices } from "../application/agents";
+import type { BulkTaskServices } from "../application/bulk-tasks";
 import { getAppState, listProjects, type ProjectServices } from "../application/projects";
 import {
   getSavedView,
@@ -34,6 +35,13 @@ import {
 } from "../application/tasks";
 import { toTaskErrorDto } from "../application/task-errors";
 import { registeredAgentRunSchema, registerAgentRunInputSchema } from "../domain/agents";
+import {
+  bulkTaskExecutionResultSchema,
+  bulkTaskIntentSchema,
+  bulkTaskPreviewSchema,
+  bulkTaskValidationFailureSchema,
+  executeBulkTasksInputSchema,
+} from "../domain/bulk-tasks";
 import {
   activityEntryMutationResultSchema,
   activityEntrySchema,
@@ -78,7 +86,12 @@ import {
   executeCreateAgentActivityEntry,
   executeCreateAgentManualBlocker,
 } from "../server/activity-adapter";
-import { executeCreateTask, executeCreateTaskRelation } from "../server/task-adapter";
+import {
+  executeBulkTaskOperation,
+  executeBulkTaskPreview,
+  executeCreateTask,
+  executeCreateTaskRelation,
+} from "../server/task-adapter";
 
 type McpExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 export type McpClientIdentity = {
@@ -263,6 +276,47 @@ const taskQueryErrorSchema = z.object({
   name: z.string().optional(),
   key: z.string().optional(),
 });
+const bulkTaskErrorSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("InvalidBulkTaskInputError"),
+    message: z.string(),
+    issues: z.array(z.string()).optional(),
+  }),
+  z.object({
+    type: z.literal("BulkTaskPreviewValidationError"),
+    message: z.string(),
+    failures: z.array(bulkTaskValidationFailureSchema),
+  }),
+  z.object({
+    type: z.literal("BulkTaskPreviewMismatchError"),
+    message: z.string(),
+    reason: z.enum(["intent_changed", "actor_changed"]),
+  }),
+  z.object({
+    type: z.literal("BulkTaskPreviewStaleError"),
+    message: z.string(),
+    reason: z.enum([
+      "target_set_changed",
+      "target_version_changed",
+      "evaluation_context_changed",
+      "tag_definition_changed",
+      "sequence_changed",
+      "state_changed",
+    ]),
+    taskIds: z.array(z.string()).optional(),
+  }),
+  z.object({
+    type: z.literal("BulkTaskIdempotencyConflictError"),
+    message: z.string(),
+    key: z.string(),
+  }),
+  z.object({
+    type: z.literal("BulkTaskPersistenceError"),
+    message: z.string(),
+    correlationId: z.string(),
+  }),
+]);
+const bulkTaskToolErrorSchema = z.union([agentErrorSchema, bulkTaskErrorSchema]);
 const agentActivityEntryInputSchema = createAgentActivityEntryInputSchema.options[1].omit({
   kind: true,
 });
@@ -354,6 +408,7 @@ export function createHelmMcpServer(
   agentServices: AgentServices,
   activityServices: ActivityServices,
   taskQueryServices: TaskQueryServices,
+  bulkTaskServices: BulkTaskServices,
   client: McpClientIdentity = { clientName: null, clientVersion: null },
 ) {
   const server = new McpServer({ name: "helm", version: "0.1.0" });
@@ -506,6 +561,64 @@ export function createHelmMcpServer(
         ? { ok: true, page: result.right }
         : { ok: false, error: toTaskQueryErrorDto(result.left) };
       return jsonToolResult(structuredContent, !structuredContent.ok);
+    },
+  );
+
+  server.registerTool(
+    "preview_bulk_tasks",
+    {
+      title: "Preview a bulk task operation",
+      description:
+        "Resolve and validate an atomic bulk create or update without changing Helm state. Use the returned token with the same intent when executing.",
+      inputSchema: bulkTaskIntentSchema,
+      outputSchema: {
+        ok: z.boolean(),
+        preview: bulkTaskPreviewSchema.optional(),
+        error: bulkTaskToolErrorSchema.optional(),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async (input, extra) => {
+      const actor = await actorForTool(extra, agentServices, client);
+      if (!actor.ok) return jsonToolResult({ ok: false, error: actor.error }, true);
+      const response = await executeBulkTaskPreview(
+        input,
+        actor.actor,
+        bulkTaskServices,
+        actor.capabilities,
+      );
+      return jsonToolResult(response, !response.ok);
+    },
+  );
+
+  server.registerTool(
+    "execute_bulk_tasks",
+    {
+      title: "Execute a bulk task operation",
+      description:
+        "Atomically execute the exact bulk task intent that Helm previewed, rejecting changed targets or versions.",
+      inputSchema: executeBulkTasksInputSchema,
+      outputSchema: {
+        ok: z.boolean(),
+        result: bulkTaskExecutionResultSchema.optional(),
+        error: bulkTaskToolErrorSchema.optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+      },
+    },
+    async (input, extra) => {
+      const actor = await actorForTool(extra, agentServices, client);
+      if (!actor.ok) return jsonToolResult({ ok: false, error: actor.error }, true);
+      const response = await executeBulkTaskOperation(
+        input,
+        actor.actor,
+        bulkTaskServices,
+        actor.capabilities,
+      );
+      return jsonToolResult(response, !response.ok);
     },
   );
 

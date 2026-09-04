@@ -30,7 +30,11 @@ export function ProjectSwitcher({
     return [activeProject, ...projects];
   }, [activeProject, projects]);
   const selectItems = useMemo(
-    () => availableProjects.map((project) => ({ label: project.name, value: project.id })),
+    () =>
+      availableProjects.map((project) => ({
+        label: project.name,
+        value: project.id,
+      })),
     [availableProjects],
   );
   const [switchPending, setSwitchPending] = useState(false);
@@ -96,7 +100,10 @@ export function ProjectSwitcher({
     const intent =
       previousIntent?.repositoryRoot === canonicalInput
         ? previousIntent
-        : { repositoryRoot: canonicalInput, idempotencyKey: crypto.randomUUID() };
+        : {
+            repositoryRoot: canonicalInput,
+            idempotencyKey: crypto.randomUUID(),
+          };
     createIntentRef.current = intent;
     try {
       const response = await onCreate(intent);
@@ -391,8 +398,18 @@ const styles = stylex.create({
   itemIndicatorSlot: { minHeight: 18, paddingBlockStart: 2 },
   itemIndicator: { alignItems: "center", display: "inline-flex" },
   itemText: { display: "grid", gap: 2, minWidth: 0 },
-  itemHeading: { alignItems: "center", display: "flex", gap: tokens.space2, minWidth: 0 },
-  itemName: { fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis" },
+  itemHeading: {
+    alignItems: "center",
+    display: "flex",
+    gap: tokens.space2,
+    minWidth: 0,
+  },
+  itemName: {
+    fontSize: 13,
+    fontWeight: 700,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
   activeBadge: {
     backgroundColor: tokens.surfaceMuted,
     borderRadius: 999,
@@ -455,7 +472,7 @@ const styles = stylex.create({
     },
   },
   backdrop: {
-    backgroundColor: "rgb(7 12 8 / 56%)",
+    backgroundColor: tokens.overlay,
     inset: 0,
     minHeight: "100dvh",
     position: "fixed",
@@ -488,7 +505,12 @@ const styles = stylex.create({
     gap: tokens.space4,
     justifyContent: "space-between",
   },
-  dialogTitle: { fontSize: 20, fontWeight: 750, letterSpacing: "-0.02em", margin: 0 },
+  dialogTitle: {
+    fontSize: 20,
+    fontWeight: 750,
+    letterSpacing: "-0.02em",
+    margin: 0,
+  },
   dialogDescription: {
     color: tokens.foregroundMuted,
     fontSize: 13,
@@ -516,7 +538,10 @@ const styles = stylex.create({
       outlineStyle: "solid",
       outlineWidth: 2,
     },
-    ":hover": { backgroundColor: tokens.surfaceMuted, color: tokens.foreground },
+    ":hover": {
+      backgroundColor: tokens.surfaceMuted,
+      color: tokens.foreground,
+    },
   },
   form: { display: "grid", gap: tokens.space2 },
   inputLabel: { fontSize: 12, fontWeight: 700 },
@@ -541,7 +566,12 @@ const styles = stylex.create({
       outlineWidth: 1,
     },
   },
-  hint: { color: tokens.foregroundMuted, fontSize: 11, lineHeight: 1.45, margin: 0 },
+  hint: {
+    color: tokens.foregroundMuted,
+    fontSize: 11,
+    lineHeight: 1.45,
+    margin: 0,
+  },
   dialogActions: {
     display: "flex",
     gap: tokens.space2,

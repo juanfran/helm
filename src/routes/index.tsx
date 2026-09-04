@@ -23,6 +23,7 @@ import { ProjectSwitcher } from "../features/projects/project-switcher";
 import { activeAgentRunsQueryOptions } from "../features/dashboard/agent-runs-query";
 import { getTaskAttemptCollection } from "../features/tasks/task-attempt-collection";
 import { getTaskCollection } from "../features/tasks/task-collection";
+import { taskTagsQueryOptions } from "../features/tasks/task-tags-query";
 import { TaskWorkspace } from "../features/tasks/task-workspace";
 import { emptyTaskSearchParams } from "../features/tasks/task-search-params";
 import {
@@ -48,10 +49,11 @@ import {
   cancelHumanTask,
   createHumanTask,
   createHumanTaskRelation,
+  executeHumanBulkTasks,
   invalidateHumanTaskClaim,
   prepareHumanTask,
+  previewHumanBulkTasks,
   readTaskAttempts,
-  readTaskTags,
   readTasks,
   reopenHumanTask,
   requestHumanTaskChanges,
@@ -139,13 +141,6 @@ function HomeRouteError({ error }: { error: Error }) {
       onRetry={() => router.invalidate()}
     />
   );
-}
-
-function taskTagsQueryOptions(projectId: string) {
-  return {
-    queryKey: ["task-tags", projectId] as const,
-    queryFn: () => readTaskTags({ data: { projectId } }),
-  };
 }
 
 function Home() {
@@ -583,6 +578,14 @@ function ActiveProjectHome({
       onWithdrawActivityEntry={withdrawActivity}
       onCreateManualBlocker={createBlocker}
       onResolveManualBlocker={resolveBlocker}
+      onPreviewBulkTasks={(intent) => previewHumanBulkTasks({ data: intent })}
+      onExecuteBulkTasks={async (input) => {
+        const response = await executeHumanBulkTasks({ data: input });
+        if (response.ok) {
+          await refreshTaskRows(response.result.items.map((item) => item.taskId));
+        }
+        return response;
+      }}
       onChangeTheme={async (nextTheme) => {
         await applyThemeOptimistically({
           previousTheme: theme,

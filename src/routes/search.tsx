@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { useLiveSuspenseQuery } from "@tanstack/react-db";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
@@ -21,11 +21,14 @@ import {
   getTaskSearchCollection,
   taskSearchPageQueryOptions,
 } from "../features/tasks/task-search-collection";
+import { BulkTaskControls } from "../features/tasks/bulk-task-controls";
 import {
   taskSearchInputFromParams,
   taskSearchParamsSchema,
 } from "../features/tasks/task-search-params";
 import { TaskSearchResults } from "../features/tasks/task-search-results";
+import { taskTagsQueryOptions } from "../features/tasks/task-tags-query";
+import { useVisibleTaskSelection } from "../features/tasks/visible-task-selection";
 import { readProjectEvents } from "../server/activity-functions";
 import {
   createInitialProject,
@@ -34,7 +37,7 @@ import {
   readProjects,
   selectHumanProject,
 } from "../server/project-functions";
-import { readTaskTags } from "../server/task-functions";
+import { executeHumanBulkTasks, previewHumanBulkTasks } from "../server/task-functions";
 import { createHumanSavedView, readSavedViews } from "../server/task-query-functions";
 import { tokens } from "../styles/tokens.stylex";
 import { applyThemeOptimistically } from "../styles/theme";
@@ -53,13 +56,6 @@ function savedViewsQueryOptions(projectId: string) {
   return {
     queryKey: ["saved-views", projectId] as const,
     queryFn: () => readSavedViews({ data: { projectId, includeArchived: false } }),
-  };
-}
-
-function taskTagsQueryOptions(projectId: string) {
-  return {
-    queryKey: ["task-tags", projectId] as const,
-    queryFn: () => readTaskTags({ data: { projectId } }),
   };
 }
 
@@ -153,10 +149,16 @@ function SearchPage() {
   const { data: savedViews } = useSuspenseQuery(savedViewsQueryOptions(projectId));
   const { data: tags } = useSuspenseQuery(taskTagsQueryOptions(projectId));
   const [viewName, setViewName] = useState("");
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<ReadonlySet<string>>(() => new Set());
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [liveStatus, setLiveStatus] = useState<"connecting" | "live" | "retrying">("connecting");
+  const visibleTaskIds = useMemo(() => items.map(({ task }) => task.id), [items]);
+  const bulkSelection = useVisibleTaskSelection({
+    visibleTaskIds,
+    selectedTaskIds,
+    onSelectedTaskIdsChange: setSelectedTaskIds,
+  });
 
   useEffect(
     () =>
@@ -502,12 +504,24 @@ function SearchPage() {
             </div>
           </div>
 
+          <BulkTaskControls
+            projectId={projectId}
+            tagDefinitions={tags}
+            selection={bulkSelection}
+            onPreview={(intent) => previewHumanBulkTasks({ data: intent })}
+            onExecute={async (command) => {
+              const response = await executeHumanBulkTasks({ data: command });
+              if (response.ok) await collection.utils.refetch({ throwOnError: true });
+              return response;
+            }}
+          />
+
           <TaskSearchResults
             items={items}
             visibleFields={visibleFields}
             presentation={search.presentation}
-            selectedTaskId={selectedTaskId}
-            onSelect={setSelectedTaskId}
+            selectedTaskIds={bulkSelection.selectedTaskIds}
+            onTaskSelected={bulkSelection.setTaskSelected}
           />
         </section>
 

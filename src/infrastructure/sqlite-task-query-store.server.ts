@@ -381,7 +381,12 @@ function compareSearchItems(
   return left.task.id.localeCompare(right.task.id);
 }
 
-function resolveItems(
+/**
+ * Resolve the shared structured task query against the caller's current
+ * SQLite session. Bulk commands call this from their immediate transaction so
+ * target validation and writes observe one database snapshot.
+ */
+export function resolveSqliteTaskQueryItems(
   database: Database.Database,
   filterInput: TaskFilterV1,
   orderInput: readonly TaskSearchOrder[] | undefined,
@@ -460,7 +465,7 @@ function searchPage(
   }
   const asOf = cursor?.asOf ?? context.now;
   const offset = cursor?.offset ?? 0;
-  const result = resolveItems(database, filter, order, { ...context, now: asOf });
+  const result = resolveSqliteTaskQueryItems(database, filter, order, { ...context, now: asOf });
   if (offset > result.items.length)
     throw malformedCursor("The task-query cursor offset is invalid.");
   const items = result.items.slice(offset, offset + input.limit);
@@ -808,7 +813,7 @@ export function createSqliteTaskQueryStore(database: Database.Database): TaskQue
         try: () =>
           database
             .transaction(() =>
-              resolveItems(database, filter, order, context).items.map(
+              resolveSqliteTaskQueryItems(database, filter, order, context).items.map(
                 ({ task }): TaskSelectionItem => ({ id: task.id, version: task.version }),
               ),
             )
