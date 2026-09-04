@@ -252,14 +252,17 @@ async function completeReadyTask(task: Pick<Task, "id" | "version">, key: string
 function taskCommandWorkerSource() {
   const effectUrl = pathToFileURL(resolve("node_modules/effect/dist/esm/index.js")).href;
   const sqliteUrl = pathToFileURL(resolve("node_modules/better-sqlite3/lib/index.js")).href;
+  const tsxApiUrl = pathToFileURL(resolve("node_modules/tsx/dist/esm/api/index.mjs")).href;
   const applicationUrl = pathToFileURL(resolve("src/application/tasks.ts")).href;
   const storeUrl = pathToFileURL(resolve("src/infrastructure/sqlite-task-store.server.ts")).href;
+  const importerUrl = pathToFileURL(resolve("src/application/tasks.test.ts")).href;
 
   return `
     import { parentPort, workerData } from "node:worker_threads";
     import Database from ${JSON.stringify(sqliteUrl)};
     import { Effect } from ${JSON.stringify(effectUrl)};
-    import {
+    import { tsImport } from ${JSON.stringify(tsxApiUrl)};
+    const {
       claimNextTask,
       claimTask,
       completeTask,
@@ -269,8 +272,11 @@ function taskCommandWorkerSource() {
       reconcileTaskLeases,
       releaseTaskLease,
       renewTaskLease,
-    } from ${JSON.stringify(applicationUrl)};
-    import { createSqliteTaskStore } from ${JSON.stringify(storeUrl)};
+    } = await tsImport(${JSON.stringify(applicationUrl)}, ${JSON.stringify(importerUrl)});
+    const { createSqliteTaskStore } = await tsImport(
+      ${JSON.stringify(storeUrl)},
+      ${JSON.stringify(importerUrl)},
+    );
 
     const barrier = new Int32Array(workerData.barrier);
     const database = new Database(workerData.databasePath);
@@ -393,7 +399,7 @@ async function runContendingTaskOperations(
   const workers = operations.map(
     (operation) =>
       new Worker(new URL(`data:text/javascript,${encodeURIComponent(source)}`), {
-        execArgv: ["--import", "tsx"],
+        execArgv: [],
         workerData: { barrier: barrierBuffer, databasePath, operation },
       }),
   );

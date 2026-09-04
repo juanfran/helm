@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify clean checkout
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      CI: "true"
+
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          clean: true
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up pinned pnpm and Node.js
+        # pnpm/setup v2.0.2
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2
+        with:
+          version: 11.10.0
+          runtime: node@22.13.0
+          install: false
+          # This caches pnpm's content-addressed package store only, never the workspace,
+          # node_modules, databases, environment files, or credentials.
+          cache: true
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Verify pinned toolchain
+        run: |
+          node_version="$(node --version)"
+          pnpm_version="$(pnpm --version)"
+          printf 'Node.js %s\npnpm %s\n' "$node_version" "$pnpm_version"
+          test "$node_version" = "v22.13.0"
+          test "$pnpm_version" = "11.10.0"
+
+      - name: Install dependencies from lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Lint with warnings denied
+        run: pnpm lint
+
+      - name: Type-check
+        run: pnpm typecheck
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Build production application
+        run: pnpm build
+
+      - name: Verify committed Drizzle artifacts
+        env:
+          DATABASE_URL: ${{ runner.temp }}/helm-ci-generate/helm.db
+        run: |
+          pnpm db:generate
+
+          repository_status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ -n "$repository_status" ]]; then
+            echo "::error::Database generation changed committed Drizzle artifacts. Regenerate and commit them locally."
+            echo "::group::Repository status"
+            printf '%s\n' "$repository_status"
+            echo "::endgroup::"
+            echo "::group::Tracked artifact diff"
+            git --no-pager diff -- .
+            git --no-pager diff --cached -- .
+            echo "::endgroup::"
+            echo "::group::Untracked nonignored artifacts"
+            git ls-files --others --exclude-standard
+            echo "::endgroup::"
+            exit 1
+          fi
+
+      - name: Run production operational smoke test
+        run: pnpm smoke:operational
+
+      - name: Verify checkout remains clean
+        if: ${{ always() }}
+        run: |
+          if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            echo "::warning::Repository state is unavailable because checkout did not complete."
+            exit 0
+          fi
+
+          repository_status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ -n "$repository_status" ]]; then
+            echo "::error::Verification left modified or untracked nonignored repository files."
+            echo "::group::Repository status"
+            printf '%s\n' "$repository_status"
+            echo "::endgroup::"
+            echo "::group::Tracked diff"
+            git --no-pager diff -- .
+            git --no-pager diff --cached -- .
+            echo "::endgroup::"
+            echo "::group::Untracked nonignored files"
+            git ls-files --others --exclude-standard
+            echo "::endgroup::"
+            exit 1
+          fi

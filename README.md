@@ -6,7 +6,7 @@ The project is in its foundation phase. Product behavior is specified in [docs/p
 
 ## Run locally
 
-Requirements: Node.js 22.12+ and pnpm 11.
+Requirements: Node.js 22.13+ and pnpm 11.
 
 ```sh
 pnpm install
@@ -87,7 +87,12 @@ pnpm build
 pnpm smoke:operational
 ```
 
-The operational smoke test uses a temporary database and verifies migration, a stale-build rebuild,
-HTTP and MCP readiness, persisted preferences after restart, and clean shutdown through both launchers.
+The operational smoke test uses a temporary database and verifies a fresh nested-path migration, rejected
+unsafe remote binding, loopback-only HTTP readiness, a real MCP session and ping, a stale-build rebuild,
+persisted preferences after restart, and graceful port-releasing shutdown through both launchers.
+
+GitHub Actions runs the same repository-local gates from a clean checkout on pull requests and pushes to
+`main`, with pinned Node.js and pnpm versions and a frozen lockfile. The production build owns TanStack
+Start route generation; CI also replays Drizzle generation and rejects any resulting repository drift.
 
 See [docs/architecture.md](docs/architecture.md) for system boundaries and [CONTRIBUTING.md](CONTRIBUTING.md) before changing the project.
