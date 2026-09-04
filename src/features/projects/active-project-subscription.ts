@@ -12,6 +12,10 @@ export function isActiveProjectChangeEvent(event: ProjectEvent) {
   );
 }
 
+export function isAgentRunChangeEvent(event: ProjectEvent) {
+  return event.changes.scopes.includes("agents") && event.kind.startsWith("agent.run.");
+}
+
 export async function readApplicationEventCursor() {
   const page = await readProjectEvents({
     data: {
@@ -39,5 +43,27 @@ export function subscribeToActiveProjectChanges({
     afterCursor,
     createEventSource,
     onEvent: (event) => (isActiveProjectChangeEvent(event) ? onChange(event) : undefined),
+  });
+}
+
+export function subscribeToApplicationChanges({
+  afterCursor,
+  onActiveProjectChange,
+  onAgentRunChange,
+  createEventSource,
+}: {
+  afterCursor: number;
+  onActiveProjectChange: (event: ProjectEvent) => void | Promise<void>;
+  onAgentRunChange: (event: ProjectEvent) => void | Promise<void>;
+  createEventSource?: (url: string) => EventSourceLike;
+}) {
+  return subscribeToProjectEvents({
+    projectId: null,
+    afterCursor,
+    createEventSource,
+    onEvent: async (event) => {
+      if (isActiveProjectChangeEvent(event)) await onActiveProjectChange(event);
+      if (isAgentRunChangeEvent(event)) await onAgentRunChange(event);
+    },
   });
 }

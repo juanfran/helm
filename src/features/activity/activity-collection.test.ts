@@ -10,6 +10,7 @@ import {
 } from "../../server/activity-functions";
 import {
   getActivityEntryCollection,
+  getImportantProjectEventCollection,
   getManualBlockerCollection,
   getProjectEventCollection,
 } from "./activity-collection";
@@ -25,7 +26,7 @@ afterEach(() => {
 });
 
 describe("activity collection project scope", () => {
-  it("builds distinct activity, blocker, and event collections for every project", async () => {
+  it("builds distinct activity, blocker, event, and important-event collections per project", async () => {
     vi.mocked(readActivityEntries).mockResolvedValue([]);
     vi.mocked(readManualBlockers).mockResolvedValue([]);
     vi.mocked(readProjectEvents).mockResolvedValue({
@@ -41,13 +42,21 @@ describe("activity collection project scope", () => {
     const activityA = getActivityEntryCollection(queryClient, "project-a");
     const blockersA = getManualBlockerCollection(queryClient, "project-a");
     const eventsA = getProjectEventCollection(queryClient, "project-a");
+    const importantEventsA = getImportantProjectEventCollection(queryClient, "project-a");
 
     expect(getActivityEntryCollection(queryClient, "project-a")).toBe(activityA);
     expect(getActivityEntryCollection(queryClient, "project-b")).not.toBe(activityA);
     expect(getManualBlockerCollection(queryClient, "project-b")).not.toBe(blockersA);
     expect(getProjectEventCollection(queryClient, "project-b")).not.toBe(eventsA);
+    expect(getImportantProjectEventCollection(queryClient, "project-a")).toBe(importantEventsA);
+    expect(getImportantProjectEventCollection(queryClient, "project-b")).not.toBe(importantEventsA);
 
-    await Promise.all([activityA.preload(), blockersA.preload(), eventsA.preload()]);
+    await Promise.all([
+      activityA.preload(),
+      blockersA.preload(),
+      eventsA.preload(),
+      importantEventsA.preload(),
+    ]);
 
     expect(readActivityEntries).toHaveBeenCalledWith({
       data: { projectId: "project-a", limit: 200 },
@@ -58,6 +67,16 @@ describe("activity collection project scope", () => {
     expect(readProjectEvents).toHaveBeenCalledWith({
       data: {
         projectId: "project-a",
+        direction: "backward",
+        beforeCursor: null,
+        afterCursor: 0,
+        limit: 200,
+      },
+    });
+    expect(readProjectEvents).toHaveBeenCalledWith({
+      data: {
+        projectId: "project-a",
+        importance: ["attention", "critical"],
         direction: "backward",
         beforeCursor: null,
         afterCursor: 0,

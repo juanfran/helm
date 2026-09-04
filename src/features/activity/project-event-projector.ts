@@ -22,6 +22,7 @@ export type ProjectEventProjector = {
   activityCollection: ProjectionCollection<ActivityEntry>;
   blockerCollection?: ProjectionCollection<ManualBlocker>;
   eventCollection?: ProjectionCollection<ProjectEvent>;
+  importantEventCollection?: ProjectionCollection<ProjectEvent>;
   readTaskDelta: (taskIds: readonly string[]) => Promise<ProjectionDelta<Task>>;
   readAttemptDelta?: (taskIds: readonly string[]) => Promise<ProjectionDelta<TaskAttemptSummary>>;
   readActivityDelta: (entryIds: readonly string[]) => Promise<ProjectionDelta<ActivityEntry>>;
@@ -38,6 +39,15 @@ export function applyProjectionDelta<T extends { id: string }>(
     if (presentDeleteIds.length > 0) collection.utils.writeDelete(presentDeleteIds);
     if (delta.upserts.length > 0) collection.utils.writeUpsert([...delta.upserts]);
   });
+}
+
+export function projectImportantEvent(
+  event: ProjectEvent,
+  collection?: ProjectionCollection<ProjectEvent>,
+) {
+  if (!collection || event.importance === "routine") return false;
+  collection.utils.writeUpsert(event);
+  return true;
 }
 
 export async function projectEvent(event: ProjectEvent, projector: ProjectEventProjector) {
@@ -74,4 +84,5 @@ export async function projectEvent(event: ProjectEvent, projector: ProjectEventP
     applyProjectionDelta(projector.blockerCollection, blockerDelta);
   }
   projector.eventCollection?.utils.writeUpsert(event);
+  projectImportantEvent(event, projector.importantEventCollection);
 }

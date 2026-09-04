@@ -3,8 +3,10 @@ import { Link, createFileRoute, useRouter } from "@tanstack/react-router";
 import { useLiveSuspenseQuery } from "@tanstack/react-db";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 
+import { RouteErrorState, RoutePendingState } from "../components/route-state";
 import {
   getActivityEntryCollection,
+  getImportantProjectEventCollection,
   getManualBlockerCollection,
   getProjectEventCollection,
 } from "../features/activity/activity-collection";
@@ -18,6 +20,7 @@ import { reconcileOptimisticCommand } from "../features/activity/optimistic-reco
 import { ProjectLanding } from "../features/projects/project-landing";
 import { executeProjectChange } from "../features/projects/project-navigation";
 import { ProjectSwitcher } from "../features/projects/project-switcher";
+import { activeAgentRunsQueryOptions } from "../features/dashboard/agent-runs-query";
 import { getTaskAttemptCollection } from "../features/tasks/task-attempt-collection";
 import { getTaskCollection } from "../features/tasks/task-collection";
 import { TaskWorkspace } from "../features/tasks/task-workspace";
@@ -55,7 +58,7 @@ import {
   restoreCancelledHumanTask,
   updateHumanTaskPlanning,
 } from "../server/task-functions";
-import { applyThemeToDocument } from "../styles/theme";
+import { applyThemeOptimistically } from "../styles/theme";
 import { richTextToPlainText } from "../domain/rich-text";
 import {
   activityEntrySchema,
@@ -92,6 +95,10 @@ export const Route = createFileRoute("/")({
       const activityCollection = getActivityEntryCollection(context.queryClient, projectId);
       const blockerCollection = getManualBlockerCollection(context.queryClient, projectId);
       const eventCollection = getProjectEventCollection(context.queryClient, projectId);
+      const importantEventCollection = getImportantProjectEventCollection(
+        context.queryClient,
+        projectId,
+      );
       await syncCoordinator.run(() =>
         waitForAllProjectSync([
           taskCollection.isReady()
@@ -109,14 +116,30 @@ export const Route = createFileRoute("/")({
           eventCollection.isReady()
             ? eventCollection.utils.refetch({ throwOnError: true })
             : eventCollection.preload(),
+          importantEventCollection.isReady()
+            ? importantEventCollection.utils.refetch({ throwOnError: true })
+            : importantEventCollection.preload(),
           context.queryClient.ensureQueryData(taskTagsQueryOptions(projectId)),
         ]),
       );
     }
     return { ...state, projects: [...projects], eventCursor };
   },
+  pendingComponent: RoutePendingState,
+  errorComponent: HomeRouteError,
   component: Home,
 });
+
+function HomeRouteError({ error }: { error: Error }) {
+  const router = useRouter();
+  return (
+    <RouteErrorState
+      error={error}
+      title="Workspace could not be loaded"
+      onRetry={() => router.invalidate()}
+    />
+  );
+}
 
 function taskTagsQueryOptions(projectId: string) {
   return {
@@ -177,6 +200,7 @@ function ActiveProjectHome({
   const activityCollection = getActivityEntryCollection(queryClient, project.id);
   const blockerCollection = getManualBlockerCollection(queryClient, project.id);
   const eventCollection = getProjectEventCollection(queryClient, project.id);
+  const importantEventCollection = getImportantProjectEventCollection(queryClient, project.id);
   const syncCoordinator = getProjectSyncCoordinator(queryClient, project.id);
   const [liveStatus, setLiveStatus] = useState<"connecting" | "live" | "retrying">("connecting");
   const { data: tasks } = useLiveSuspenseQuery({
@@ -194,7 +218,11 @@ function ActiveProjectHome({
   const { data: projectEvents } = useLiveSuspenseQuery({
     query: (query) => query.from({ event: eventCollection }),
   });
+  const { data: importantEvents } = useLiveSuspenseQuery({
+    query: (query) => query.from({ event: importantEventCollection }),
+  });
   const { data: tagDefinitions } = useSuspenseQuery(taskTagsQueryOptions(project.id));
+  const { data: activeAgentRuns } = useSuspenseQuery(activeAgentRunsQueryOptions());
 
   const refetchProjectCollections = useCallback(
     () =>
@@ -204,8 +232,16 @@ function ActiveProjectHome({
         activityCollection.utils.refetch({ throwOnError: true }),
         blockerCollection.utils.refetch({ throwOnError: true }),
         eventCollection.utils.refetch({ throwOnError: true }),
+        importantEventCollection.utils.refetch({ throwOnError: true }),
       ]),
-    [activityCollection, attemptCollection, blockerCollection, eventCollection, taskCollection],
+    [
+      activityCollection,
+      attemptCollection,
+      blockerCollection,
+      eventCollection,
+      importantEventCollection,
+      taskCollection,
+    ],
   );
 
   const readTaskDelta = useCallback(
@@ -242,6 +278,7 @@ function ActiveProjectHome({
       activityCollection,
       blockerCollection,
       eventCollection,
+      importantEventCollection,
       readTaskDelta,
       readAttemptDelta,
       async readActivityDelta(entryIds: readonly string[]) {
@@ -274,6 +311,7 @@ function ActiveProjectHome({
       attemptCollection,
       blockerCollection,
       eventCollection,
+      importantEventCollection,
       project.id,
       readAttemptDelta,
       readTaskDelta,
@@ -481,6 +519,8 @@ function ActiveProjectHome({
       activityEntries={activityEntries}
       manualBlockers={manualBlockers}
       projectEvents={projectEvents}
+      importantEvents={importantEvents}
+      activeAgentRuns={activeAgentRuns}
       liveStatus={liveStatus}
       projectSwitcher={
         <ProjectSwitcher
@@ -544,15 +584,16 @@ function ActiveProjectHome({
       onCreateManualBlocker={createBlocker}
       onResolveManualBlocker={resolveBlocker}
       onChangeTheme={async (nextTheme) => {
-        const previous = theme;
-        applyThemeToDocument(nextTheme);
-        const response = await changeTheme({
-          data: { theme: nextTheme, idempotencyKey: crypto.randomUUID() },
+        await applyThemeOptimistically({
+          previousTheme: theme,
+          nextTheme,
+          persist: async () => {
+            const response = await changeTheme({
+              data: { theme: nextTheme, idempotencyKey: crypto.randomUUID() },
+            });
+            if (!response.ok) throw new Error(response.error.message);
+          },
         });
-        if (!response.ok) {
-          applyThemeToDocument(previous);
-          throw new Error(response.error.message);
-        }
         await router.invalidate({ sync: true });
       }}
       onChangeProjectReviewMode={async (input) => {

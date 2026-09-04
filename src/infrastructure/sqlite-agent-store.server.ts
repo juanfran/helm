@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import Database from "better-sqlite3";
-import { and, eq } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Effect } from "effect";
 
@@ -14,11 +14,14 @@ import {
 } from "../application/agent-errors";
 import type { AgentStore } from "../application/agents";
 import {
+  compiledAgentRunSummarySchema,
   agentProfileSchema,
   agentRunSchema,
   registeredAgentRunSchema,
   type AgentProfile,
   type AgentRun,
+  type AgentRunSummary,
+  type ListAgentRunsInput,
   type McpSessionContext,
   type RegisteredAgentRun,
   type RegisterAgentRunInput,
@@ -74,6 +77,22 @@ function registeredFromRows(profile: AgentProfileRow, run: AgentRunRow): Registe
   });
 }
 
+function summaryFromRows(profile: AgentProfileRow, run: AgentRunRow): AgentRunSummary {
+  return compiledAgentRunSummarySchema.parse({
+    id: run.id,
+    profileId: profile.id,
+    profileKey: profile.profileKey,
+    displayName: profile.displayName,
+    capabilities: JSON.parse(profile.capabilitiesJson),
+    status: run.status,
+    clientName: run.clientName,
+    clientVersion: run.clientVersion,
+    createdAt: run.createdAt,
+    lastSeenAt: run.lastSeenAt,
+    endedAt: run.endedAt,
+  });
+}
+
 function recordRunEvent(
   db: DatabaseSession,
   run: AgentRunRow,
@@ -96,7 +115,6 @@ function recordRunEvent(
       entityId: run.id,
       payloadJson: JSON.stringify({
         profileId: run.profileId,
-        mcpSessionId: run.mcpSessionId,
         status: kind === "agent.run.closed" ? "closed" : "active",
         ...(options.reason ? { reason: options.reason } : {}),
       }),
@@ -263,6 +281,21 @@ export function createSqliteAgentStore(database: Database.Database): AgentStore 
   const db = drizzle(database, { schema });
 
   return {
+    listRuns(input: ListAgentRunsInput) {
+      return Effect.try({
+        try: () =>
+          db
+            .select({ profile: agentProfiles, run: agentRuns })
+            .from(agentRuns)
+            .innerJoin(agentProfiles, eq(agentRuns.profileId, agentProfiles.id))
+            .where(eq(agentRuns.status, input.status))
+            .orderBy(desc(agentRuns.lastSeenAt), asc(agentRuns.id))
+            .limit(input.limit)
+            .all()
+            .map(({ profile, run }) => summaryFromRows(profile, run)),
+        catch: persistenceError,
+      });
+    },
     registerRun(input: RegisterAgentRunInput, session: McpSessionContext) {
       return Effect.try({
         try: () =>

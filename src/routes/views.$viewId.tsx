@@ -8,10 +8,14 @@ import { z } from "zod";
 
 import { Button } from "../components/ui/button";
 import { RouteErrorState, RoutePendingState } from "../components/route-state";
-import type { AppState } from "../domain/projects";
+import type { AppState, Theme } from "../domain/projects";
 import { subscribeToProjectEvents } from "../features/activity/project-event-subscription";
+import { projectImportantEvent } from "../features/activity/project-event-projector";
+import { getImportantProjectEventCollection } from "../features/activity/activity-collection";
+import { NotificationCenter } from "../features/activity/notification-center";
 import { executeProjectChange } from "../features/projects/project-navigation";
 import { ProjectSwitcher } from "../features/projects/project-switcher";
+import { ThemeControl } from "../features/projects/theme-control";
 import {
   getTaskSearchCollection,
   taskSearchPageQueryOptions,
@@ -23,6 +27,7 @@ import {
 import { TaskSearchResults } from "../features/tasks/task-search-results";
 import { readProjectEvents } from "../server/activity-functions";
 import {
+  changeTheme,
   createInitialProject,
   readAppState,
   readProjects,
@@ -30,6 +35,7 @@ import {
 } from "../server/project-functions";
 import { archiveHumanSavedView, readSavedView } from "../server/task-query-functions";
 import { tokens } from "../styles/tokens.stylex";
+import { applyThemeOptimistically } from "../styles/theme";
 
 const viewSearchSchema = z.object({
   cursor: taskSearchCursorParamSchema,
@@ -65,9 +71,18 @@ export const Route = createFileRoute("/views/$viewId")({
       cursor: deps.cursor,
     };
     const collection = getTaskSearchCollection(context.queryClient, input);
-    await (collection.isReady()
-      ? collection.utils.refetch({ throwOnError: true })
-      : collection.preload());
+    const importantEventCollection = getImportantProjectEventCollection(
+      context.queryClient,
+      projectId,
+    );
+    await Promise.all([
+      collection.isReady()
+        ? collection.utils.refetch({ throwOnError: true })
+        : collection.preload(),
+      importantEventCollection.isReady()
+        ? importantEventCollection.utils.refetch({ throwOnError: true })
+        : importantEventCollection.preload(),
+    ]);
     return {
       state,
       projects: [...projects],
@@ -104,8 +119,12 @@ function SavedViewPage() {
   const project = activeProjectFromState(state);
   const projectId = project.id;
   const collection = getTaskSearchCollection(queryClient, input);
+  const importantEventCollection = getImportantProjectEventCollection(queryClient, projectId);
   const { data: items } = useLiveSuspenseQuery({
     query: (query) => query.from({ hit: collection }).orderBy(({ hit }) => hit.rank, "asc"),
+  });
+  const { data: importantEvents } = useLiveSuspenseQuery({
+    query: (query) => query.from({ event: importantEventCollection }),
   });
   const { data: page } = useSuspenseQuery(taskSearchPageQueryOptions(input));
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -121,6 +140,7 @@ function SavedViewPage() {
         onOpen: () => setLiveStatus("live"),
         onError: () => setLiveStatus("retrying"),
         onEvent: async (event) => {
+          projectImportantEvent(event, importantEventCollection);
           if (input.cursor) {
             await navigate({ search: { cursor: null }, replace: true });
             return;
@@ -145,7 +165,16 @@ function SavedViewPage() {
           setLiveStatus("live");
         },
       }),
-    [collection, eventCursor, input.cursor, navigate, projectId, router, view.id],
+    [
+      collection,
+      eventCursor,
+      importantEventCollection,
+      input.cursor,
+      navigate,
+      projectId,
+      router,
+      view.id,
+    ],
   );
 
   async function archiveView() {
@@ -174,6 +203,20 @@ function SavedViewPage() {
     }
   }
 
+  async function persistTheme(nextTheme: Theme) {
+    await applyThemeOptimistically({
+      previousTheme: state.theme,
+      nextTheme,
+      persist: async () => {
+        const response = await changeTheme({
+          data: { theme: nextTheme, idempotencyKey: crypto.randomUUID() },
+        });
+        if (!response.ok) throw new Error(response.error.message);
+      },
+    });
+    await router.invalidate({ sync: true });
+  }
+
   return (
     <main {...stylex.props(styles.page)}>
       <header {...stylex.props(styles.header)}>
@@ -193,9 +236,21 @@ function SavedViewPage() {
           </Link>
           <span {...stylex.props(styles.navLink, styles.navLinkActive)}>Saved view</span>
         </nav>
-        <span aria-live="polite" {...stylex.props(styles.liveStatus)}>
-          {liveStatus === "live" ? "Live" : liveStatus === "retrying" ? "Retrying…" : "Connecting…"}
-        </span>
+        <div {...stylex.props(styles.headerUtilities)}>
+          <span aria-live="polite" {...stylex.props(styles.liveStatus)}>
+            {liveStatus === "live"
+              ? "Live"
+              : liveStatus === "retrying"
+                ? "Retrying…"
+                : "Connecting…"}
+          </span>
+          <NotificationCenter
+            projectId={projectId}
+            events={importantEvents}
+            tasks={items.map(({ task }) => task)}
+          />
+          <ThemeControl theme={state.theme} onChange={persistTheme} />
+        </div>
       </header>
 
       <div {...stylex.props(styles.projectToolbar)}>
@@ -332,11 +387,16 @@ const styles = stylex.create({
     textDecoration: "none",
   },
   navLinkActive: { backgroundColor: tokens.surfaceMuted, color: tokens.foreground },
+  headerUtilities: {
+    alignItems: "center",
+    display: "flex",
+    gap: tokens.space3,
+    justifySelf: "end",
+    "@media (max-width: 760px)": { justifySelf: "start" },
+  },
   liveStatus: {
     color: tokens.foregroundMuted,
     fontSize: 12,
-    justifySelf: "end",
-    "@media (max-width: 760px)": { display: "none" },
   },
   projectToolbar: {
     borderBlockEndColor: tokens.border,

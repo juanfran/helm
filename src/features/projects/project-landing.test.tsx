@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -94,5 +94,26 @@ describe("project setup UI", () => {
     expect(screen.getByRole("button", { name: "Dark theme" }).getAttribute("aria-pressed")).toBe(
       "true",
     );
+  });
+
+  it("restores the first-run theme when persistence is unavailable", async () => {
+    const user = userEvent.setup();
+    render(
+      <ProjectLanding
+        state={emptyState}
+        onCreateProject={vi.fn()}
+        onChangeTheme={vi.fn().mockRejectedValue(new Error("Theme service unavailable."))}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Dark theme" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "System theme" }).getAttribute("aria-pressed"),
+      ).toBe("true"),
+    );
+    expect(document.documentElement.dataset.theme).toBe("system");
+    expect(screen.getByRole("alert").textContent).toContain("Theme service unavailable");
   });
 });

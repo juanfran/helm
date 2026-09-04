@@ -25,3 +25,21 @@ export function applyThemeToDocument(theme: Theme) {
   if (className) root.classList.add(...className.split(" "));
   root.dataset.theme = theme;
 }
+
+export async function applyThemeOptimistically({
+  previousTheme,
+  nextTheme,
+  persist,
+}: {
+  previousTheme: Theme;
+  nextTheme: Theme;
+  persist: () => Promise<void>;
+}) {
+  applyThemeToDocument(nextTheme);
+  try {
+    await persist();
+  } catch (error) {
+    applyThemeToDocument(previousTheme);
+    throw error;
+  }
+}

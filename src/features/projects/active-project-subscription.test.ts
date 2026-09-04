@@ -5,7 +5,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { ProjectEvent } from "../../domain/activity";
 import type { EventSourceLike } from "../activity/project-event-subscription";
 import {
+  isAgentRunChangeEvent,
   isActiveProjectChangeEvent,
+  subscribeToApplicationChanges,
   subscribeToActiveProjectChanges,
 } from "./active-project-subscription";
 
@@ -83,6 +85,44 @@ describe("active project subscription", () => {
 
     expect(createEventSource).toHaveBeenCalledWith("/api/events?after=11");
     expect(onChange).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it("classifies and dispatches global agent-run changes from the same durable cursor", async () => {
+    const runEvent: ProjectEvent = {
+      ...event("agent.run.registered", ["agents"]),
+      projectId: null,
+      actor: { type: "agent", id: "run-1" },
+      entity: { type: "agent_run", id: "run-1" },
+      changes: {
+        ...event("agent.run.registered", ["agents"]).changes,
+        projectIds: [],
+        agentRunIds: ["run-1"],
+      },
+    };
+    expect(isAgentRunChangeEvent(runEvent)).toBe(true);
+    expect(isAgentRunChangeEvent(event("task.claimed", ["tasks", "agents"]))).toBe(false);
+
+    const source = new FakeEventSource();
+    const onActiveProjectChange = vi.fn();
+    const onAgentRunChange = vi.fn();
+    const stop = subscribeToApplicationChanges({
+      afterCursor: 11,
+      onActiveProjectChange,
+      onAgentRunChange,
+      createEventSource: () => source,
+    });
+
+    source.emit(runEvent);
+    source.emit({
+      ...event("project.selected", ["preferences", "projects"]),
+      id: "event-13",
+      cursor: 13,
+    });
+    await drainProjection();
+
+    expect(onAgentRunChange).toHaveBeenCalledWith(runEvent);
+    expect(onActiveProjectChange).toHaveBeenCalledTimes(1);
     stop();
   });
 });

@@ -2,7 +2,7 @@
 
 Helm is a local control plane for one developer and many coding agents. It keeps work discoverable, claimable, reviewable, and auditable through a human interface and MCP.
 
-The project is in its foundation phase. Product behavior is specified in [docs/product.md](docs/product.md).
+Helm is under active development. Product behavior is specified in [docs/product.md](docs/product.md).
 
 ## Run locally
 
@@ -47,15 +47,22 @@ Registered agents can use `add_comment`, `record_decision`, and `request_change`
 task history. `report_progress` additionally requires the active claim's lease token, which binds the
 entry to its execution attempt. `report_blocker` uses the same lease proof to create an explicit manual
 blocker for human attention; only the local human resolves it. `list_task_entries` returns stable text
-projections, and `read_events` reads one project's durable event log after a monotonic cursor. Helm records automatic
-lease expiry and agent-session closure as system timeline entries. The browser's task, list, and activity
-views use the same event log through `/api/events`; reconnects replay missed commits and update only
-affected local records. Humans can add the same semantic entries, report or resolve explicit manual
-blockers, and withdraw human or agent entries without deleting their audit metadata.
+projections, and `read_events` reads one project's durable event log after a monotonic cursor. Helm
+records automatic lease expiry and agent-session closure as system timeline entries. The browser's task,
+list, dashboard, and activity views use the same event log through `/api/events`; reconnects replay
+missed commits and update only affected local records. Humans can add the same semantic entries, report
+or resolve explicit manual blockers, and withdraw human or agent entries without deleting their audit
+metadata.
 
 The human workspace shows immutable attempt reports and supports approval, structured change requests,
 explicit task cancellation and restoration, and reasoned reopening. Reopening never rewrites an earlier
 attempt; a new attempt is created only when the reopened task is claimed again.
+
+The operational dashboard projects claimable work, active agents and lease expiry, review, blockers,
+latest failures, schedules, and reopened work from those same live records. Its notification center keeps
+routine activity quiet, persists a per-project read watermark, and links important events back to the
+existing task controls. The light, dark, or system appearance control is available throughout the human
+workspace and applies optimistically without replacing the server-rendered first-paint theme.
 
 `list_projects` and `get_active_project` expose the same current selection as the browser. Agent reads and
 mutations still require an explicit project ID, so an active-project change never leaks records between

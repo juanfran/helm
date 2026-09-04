@@ -1,8 +1,11 @@
 import { Effect } from "effect";
 
 import {
+  compiledListAgentRunsInputSchema,
   compiledMcpSessionContextSchema,
   compiledRegisterAgentRunInputSchema,
+  type AgentRunSummary,
+  type ListAgentRunsInput,
   type McpSessionContext,
   type RegisteredAgentRun,
   type RegisterAgentRunInput,
@@ -15,6 +18,9 @@ import {
 } from "./agent-errors";
 
 export interface AgentStore {
+  listRuns(
+    input: ListAgentRunsInput,
+  ): Effect.Effect<readonly AgentRunSummary[], AgentPersistenceError>;
   registerRun(
     input: RegisterAgentRunInput,
     session: McpSessionContext,
@@ -43,6 +49,13 @@ export function registerAgentRun(input: unknown, session: unknown, services: Age
       parseInput(() => compiledRegisterAgentRunInputSchema.parse(input)),
       (parsedInput) => services.store.registerRun(parsedInput, parsedSession),
     ),
+  );
+}
+
+export function listAgentRuns(input: unknown, services: AgentServices) {
+  return Effect.flatMap(
+    parseInput(() => compiledListAgentRunsInputSchema.parse(input)),
+    (parsed) => services.store.listRuns(parsed),
   );
 }
 

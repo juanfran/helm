@@ -218,6 +218,7 @@ export type ListManualBlockersInput = z.infer<typeof listManualBlockersInputSche
 
 export const readActivityEventsInputSchema = z.object({
   projectId: z.string().trim().min(1).nullable().optional().default(null),
+  importance: z.array(eventImportanceSchema).min(1).max(3).optional(),
   direction: z.enum(["forward", "backward"]).optional().default("forward"),
   afterCursor: z.number().int().nonnegative().optional().default(0),
   beforeCursor: z.number().int().positive().nullable().optional().default(null),

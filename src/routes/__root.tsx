@@ -12,8 +12,12 @@ import { TanStackDevtools } from "@tanstack/react-devtools";
 import TanStackQueryDevtools from "../integrations/tanstack-query/devtools";
 import {
   readApplicationEventCursor,
-  subscribeToActiveProjectChanges,
+  subscribeToApplicationChanges,
 } from "../features/projects/active-project-subscription";
+import {
+  activeAgentRunsQueryKey,
+  refreshActiveAgentRuns,
+} from "../features/dashboard/agent-runs-query";
 import { resetProjectNavigation } from "../features/projects/project-navigation";
 import { readAppState } from "../server/project-functions";
 import { getThemeProps } from "../styles/theme";
@@ -22,17 +26,22 @@ import { tokens } from "../styles/tokens.stylex";
 import appCss from "../styles.css?url";
 
 import type { QueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 
 interface MyRouterContext {
   queryClient: QueryClient;
 }
 
 export const Route = createRootRouteWithContext<MyRouterContext>()({
-  loader: async () => {
-    // Capture the global cursor before state. A selection committed between these reads is either
-    // reflected in state or replayed by the application-wide subscription after hydration.
+  loader: async ({ context }) => {
+    // Capture the global cursor before every application snapshot. A selection or agent-run change
+    // committed later is either reflected in a snapshot or replayed by the replacement subscription.
     const applicationEventCursor = await readApplicationEventCursor();
-    return { ...(await readAppState()), applicationEventCursor };
+    const [state] = await Promise.all([
+      readAppState(),
+      refreshActiveAgentRuns(context.queryClient),
+    ]);
+    return { ...state, applicationEventCursor };
   },
   head: () => ({
     meta: [
@@ -72,18 +81,21 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 function RootDocument({ children }: { children: React.ReactNode }) {
   const { theme, applicationEventCursor } = Route.useLoaderData();
   const router = useRouter();
+  const queryClient = useQueryClient();
 
   useEffect(
     () =>
-      subscribeToActiveProjectChanges({
+      subscribeToApplicationChanges({
         afterCursor: applicationEventCursor,
-        onChange: () =>
+        onActiveProjectChange: () =>
           resetProjectNavigation({
             navigateToWorkspace: () => router.navigate({ to: "/", replace: true }),
             refreshRoutes: () => router.invalidate({ sync: true }),
           }),
+        onAgentRunChange: () =>
+          queryClient.invalidateQueries({ queryKey: activeAgentRunsQueryKey }),
       }),
-    [applicationEventCursor, router],
+    [applicationEventCursor, queryClient, router],
   );
 
   return (

@@ -4,7 +4,7 @@ import { FolderGit2, MonitorCog, Moon, Sun } from "lucide-react";
 
 import type { ProjectCommandResponse, ThemeCommandResponse } from "../../server/project-adapter";
 import type { AppState, Theme } from "../../domain/projects";
-import { applyThemeToDocument } from "../../styles/theme";
+import { applyThemeOptimistically } from "../../styles/theme";
 import { tokens } from "../../styles/tokens.stylex";
 import { Button } from "../../components/ui/button";
 
@@ -43,15 +43,24 @@ export function ProjectLanding({ state, onCreateProject, onChangeTheme }: Projec
   async function handleTheme(nextTheme: Theme) {
     const previousTheme = theme;
     setTheme(nextTheme);
-    applyThemeToDocument(nextTheme);
-    const response = await onChangeTheme({
-      theme: nextTheme,
-      idempotencyKey: crypto.randomUUID(),
-    });
-    if (!response.ok) {
+    setError(null);
+    try {
+      await applyThemeOptimistically({
+        previousTheme,
+        nextTheme,
+        persist: async () => {
+          const response = await onChangeTheme({
+            theme: nextTheme,
+            idempotencyKey: crypto.randomUUID(),
+          });
+          if (!response.ok) throw new Error(response.error.message);
+        },
+      });
+    } catch (cause) {
       setTheme(previousTheme);
-      applyThemeToDocument(previousTheme);
-      setError(response.error.message);
+      setError(
+        cause instanceof Error ? cause.message : "Helm could not save the appearance setting.",
+      );
     }
   }
 

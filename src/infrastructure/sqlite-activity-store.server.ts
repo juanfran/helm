@@ -307,6 +307,16 @@ function blockerFromRow(row: ManualBlockerRow): ManualBlocker {
   });
 }
 
+function publicEventPayload(row: EventRow) {
+  const payload = projectEventSchema.shape.payload.parse(JSON.parse(row.payloadJson));
+  if (row.kind.startsWith("agent.run.") && Object.hasOwn(payload, "mcpSessionId")) {
+    const sanitized = { ...payload };
+    delete sanitized.mcpSessionId;
+    return sanitized;
+  }
+  return payload;
+}
+
 function eventFromRow(row: EventRow): ProjectEvent {
   return projectEventSchema.parse({
     id: String(row.cursor),
@@ -316,7 +326,7 @@ function eventFromRow(row: EventRow): ProjectEvent {
     importance: row.importance,
     actor: { type: row.actorType, id: row.actorId },
     entity: { type: row.entityType, id: row.entityId },
-    payload: JSON.parse(row.payloadJson),
+    payload: publicEventPayload(row),
     changes: JSON.parse(row.changesJson),
     occurredAt: row.occurredAt,
   });
@@ -954,7 +964,11 @@ export function createSqliteActivityStore(database: Database.Database): Activity
                 ? lt(events.cursor, input.beforeCursor)
                 : undefined
               : gt(events.cursor, input.afterCursor);
-          const condition = and(projectCondition, cursorCondition);
+          const condition = and(
+            projectCondition,
+            cursorCondition,
+            input.importance ? inArray(events.importance, input.importance) : undefined,
+          );
           const queriedRows = db
             .select()
             .from(events)

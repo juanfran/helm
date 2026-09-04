@@ -180,6 +180,7 @@ describe("activity application seam", () => {
     expect(
       compiledReadActivityEventsInputSchema.parse({
         projectId: "project",
+        importance: ["attention", "critical"],
         direction: "backward",
         beforeCursor: null,
         limit: 20,
@@ -187,6 +188,7 @@ describe("activity application seam", () => {
     ).toEqual(
       readActivityEventsInputSchema.parse({
         projectId: "project",
+        importance: ["attention", "critical"],
         direction: "backward",
         beforeCursor: null,
         limit: 20,
@@ -527,6 +529,103 @@ describe("activity application seam", () => {
       "attention",
     ]);
     expect(importanceForEventKind("task.attempt.failed")).toBe("critical");
+  });
+
+  it("filters events by importance without changing the project cursor high-water mark", async () => {
+    const task = await createReadyTask("importance-filter");
+    const baseline = await Effect.runPromise(
+      readActivityEvents(
+        { projectId, direction: "backward", beforeCursor: null, limit: 1 },
+        activityServices,
+      ),
+    );
+    const createEvent = (kind: "comment" | "change_request" | "decision", index: number) =>
+      Effect.runPromise(
+        createHumanActivityEntry(
+          {
+            entryId: `entry-importance-${index}`,
+            projectId,
+            taskId: task.id,
+            kind,
+            content: richText(`Importance event ${index}.`),
+            expectedTaskVersion: task.version,
+            idempotencyKey: `importance-event-${index}`,
+          },
+          human,
+          activityServices,
+        ),
+      );
+    const routineBefore = await createEvent("comment", 0);
+    const important = await createEvent("change_request", 1);
+    const routineAfter = await createEvent("decision", 2);
+    const createdEvents = [routineBefore.event, important.event, routineAfter.event];
+
+    const filtered = await Effect.runPromise(
+      readActivityEvents(
+        {
+          projectId,
+          importance: ["attention", "critical"],
+          afterCursor: baseline.latestCursor,
+          limit: 200,
+        },
+        activityServices,
+      ),
+    );
+    const unfiltered = await Effect.runPromise(
+      readActivityEvents(
+        { projectId, afterCursor: baseline.latestCursor, limit: 200 },
+        activityServices,
+      ),
+    );
+
+    expect(filtered.events).toEqual([createdEvents[1]]);
+    expect(filtered).toMatchObject({
+      direction: "forward",
+      nextCursor: createdEvents[1]!.cursor,
+      hasMore: false,
+      latestCursor: createdEvents[2]!.cursor,
+    });
+    expect(unfiltered.events).toEqual(createdEvents);
+  });
+
+  it("redacts legacy MCP session identifiers at the durable event read boundary", async () => {
+    projectStore.database
+      .prepare(
+        `insert into events (
+          project_id, kind, importance, actor_type, actor_id, entity_type, entity_id,
+          payload_json, changes_json, occurred_at
+        ) values (null, 'agent.run.registered', 'routine', 'agent', 'run-legacy',
+          'agent_run', 'run-legacy', ?, ?, ?)`,
+      )
+      .run(
+        JSON.stringify({
+          profileId: "profile-legacy",
+          mcpSessionId: "private-session-legacy",
+          status: "active",
+        }),
+        JSON.stringify({
+          projectIds: [],
+          taskIds: [],
+          activityEntryIds: [],
+          agentRunIds: ["run-legacy"],
+          scopes: ["agents"],
+        }),
+        now,
+      );
+
+    const page = await Effect.runPromise(
+      readActivityEvents({ projectId: null, afterCursor: 0, limit: 200 }, activityServices),
+    );
+    const event = page.events.find((candidate) => candidate.entity.id === "run-legacy");
+
+    expect(event?.payload).toEqual({ profileId: "profile-legacy", status: "active" });
+    expect(JSON.stringify(event)).not.toContain("private-session-legacy");
+    expect(
+      projectStore.database
+        .prepare("select payload_json from events where entity_id = 'run-legacy'")
+        .pluck()
+        .get(),
+    ).toContain("private-session-legacy");
   });
 
   it("creates and resolves versioned manual blockers that control eligibility", async () => {

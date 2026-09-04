@@ -5,69 +5,14 @@ import { AlertCircle, Bot, Circle, UserRound } from "lucide-react";
 import type { ActivityEntry, ProjectEvent } from "../../domain/activity";
 import type { Task, TaskAttemptSummary } from "../../domain/tasks";
 import { tokens } from "../../styles/tokens.stylex";
-
-function eventTitle(kind: string) {
-  return kind
-    .split(".")
-    .map((part) => part.replaceAll("_", " "))
-    .join(" · ");
-}
-
-function eventActor(event: ProjectEvent, entry?: ActivityEntry, attempt?: TaskAttemptSummary) {
-  if (event.actor.type === "human") return "Human";
-  if (event.actor.type === "system") return "Helm";
-  if (entry?.author.type === "agent" && entry.authorDisplayName) return entry.authorDisplayName;
-  if (attempt?.agentDisplayName) return attempt.agentDisplayName;
-  return "Agent";
-}
-
-function eventEntry(event: ProjectEvent, entriesById: ReadonlyMap<string, ActivityEntry>) {
-  const payloadEntryId = event.payload.entryId;
-  const entryId =
-    typeof payloadEntryId === "string"
-      ? payloadEntryId
-      : event.entity.type === "activity_entry"
-        ? event.entity.id
-        : null;
-  return entryId ? entriesById.get(entryId) : undefined;
-}
-
-function eventAttempt(
-  event: ProjectEvent,
-  entry: ActivityEntry | undefined,
-  attemptsById: ReadonlyMap<string, TaskAttemptSummary>,
-) {
-  const payloadAttemptId = event.payload.attemptId;
-  const attemptId =
-    typeof payloadAttemptId === "string"
-      ? payloadAttemptId
-      : (entry?.attemptId ?? (event.entity.type === "task_attempt" ? event.entity.id : null));
-  return attemptId ? attemptsById.get(attemptId) : undefined;
-}
-
-function eventDetail(event: ProjectEvent, entry?: ActivityEntry) {
-  if (entry?.withdrawnAt) {
-    return entry.withdrawalReason
-      ? `Content withdrawn — ${entry.withdrawalReason}`
-      : "Content withdrawn.";
-  }
-  if (entry?.contentText.trim()) return entry.contentText;
-
-  for (const key of ["message", "reason", "summary", "title"] as const) {
-    const value = event.payload[key];
-    if (typeof value === "string" && value.trim()) return value;
-  }
-  return null;
-}
-
-function formatTimestamp(value: string) {
-  const timestamp = new Date(value);
-  if (Number.isNaN(timestamp.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(timestamp);
-}
+import {
+  formatProjectTimestamp,
+  projectEventActor,
+  projectEventAttempt,
+  projectEventDetail,
+  projectEventEntry,
+  projectEventTitle,
+} from "./project-event-presentation";
 
 export function ProjectActivityFeed({
   events,
@@ -116,9 +61,9 @@ export function ProjectActivityFeed({
           orderedEvents.map((event) => {
             const taskId = event.changes.taskIds[0];
             const taskName = taskId ? taskNames.get(taskId) : null;
-            const entry = eventEntry(event, entriesById);
-            const attempt = eventAttempt(event, entry, attemptsById);
-            const detail = eventDetail(event, entry);
+            const entry = projectEventEntry(event, entriesById);
+            const attempt = projectEventAttempt(event, entry, attemptsById);
+            const detail = projectEventDetail(event, entry);
             return (
               <article
                 key={event.id}
@@ -137,7 +82,7 @@ export function ProjectActivityFeed({
                 </span>
                 <div {...stylex.props(styles.body)}>
                   <div {...stylex.props(styles.eventHeader)}>
-                    <strong>{eventTitle(event.kind)}</strong>
+                    <strong>{projectEventTitle(event.kind)}</strong>
                     {event.importance !== "routine" ? (
                       <span {...stylex.props(styles.importance)}>{event.importance}</span>
                     ) : null}
@@ -150,8 +95,10 @@ export function ProjectActivityFeed({
                     ) : (
                       <UserRound size={13} aria-hidden="true" />
                     )}
-                    <span>{eventActor(event, entry, attempt)}</span>
-                    <time dateTime={event.occurredAt}>{formatTimestamp(event.occurredAt)}</time>
+                    <span>{projectEventActor(event, entry, attempt)}</span>
+                    <time dateTime={event.occurredAt}>
+                      {formatProjectTimestamp(event.occurredAt)}
+                    </time>
                     <span>cursor {event.cursor}</span>
                   </div>
                 </div>

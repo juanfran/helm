@@ -9,10 +9,14 @@ import { Button } from "../components/ui/button";
 import { RouteErrorState, RoutePendingState } from "../components/route-state";
 import type { SavedViewVisibleField } from "../domain/saved-views";
 import { canonicalizeTaskSearchOrder } from "../domain/task-filters";
-import type { AppState } from "../domain/projects";
+import type { AppState, Theme } from "../domain/projects";
 import { subscribeToProjectEvents } from "../features/activity/project-event-subscription";
+import { projectImportantEvent } from "../features/activity/project-event-projector";
+import { getImportantProjectEventCollection } from "../features/activity/activity-collection";
+import { NotificationCenter } from "../features/activity/notification-center";
 import { executeProjectChange } from "../features/projects/project-navigation";
 import { ProjectSwitcher } from "../features/projects/project-switcher";
+import { ThemeControl } from "../features/projects/theme-control";
 import {
   getTaskSearchCollection,
   taskSearchPageQueryOptions,
@@ -25,6 +29,7 @@ import { TaskSearchResults } from "../features/tasks/task-search-results";
 import { readProjectEvents } from "../server/activity-functions";
 import {
   createInitialProject,
+  changeTheme,
   readAppState,
   readProjects,
   selectHumanProject,
@@ -32,6 +37,7 @@ import {
 import { readTaskTags } from "../server/task-functions";
 import { createHumanSavedView, readSavedViews } from "../server/task-query-functions";
 import { tokens } from "../styles/tokens.stylex";
+import { applyThemeOptimistically } from "../styles/theme";
 
 const visibleFields: SavedViewVisibleField[] = [
   "title",
@@ -86,12 +92,19 @@ export const Route = createFileRoute("/search")({
     });
     const input = taskSearchInputFromParams(projectId, deps);
     const collection = getTaskSearchCollection(context.queryClient, input);
+    const importantEventCollection = getImportantProjectEventCollection(
+      context.queryClient,
+      projectId,
+    );
     await Promise.all([
       collection.isReady()
         ? collection.utils.refetch({ throwOnError: true })
         : collection.preload(),
       context.queryClient.ensureQueryData(savedViewsQueryOptions(projectId)),
       context.queryClient.ensureQueryData(taskTagsQueryOptions(projectId)),
+      importantEventCollection.isReady()
+        ? importantEventCollection.utils.refetch({ throwOnError: true })
+        : importantEventCollection.preload(),
     ]);
     return {
       state,
@@ -129,8 +142,12 @@ function SearchPage() {
   const project = activeProjectFromState(state);
   const projectId = project.id;
   const collection = getTaskSearchCollection(queryClient, input);
+  const importantEventCollection = getImportantProjectEventCollection(queryClient, projectId);
   const { data: items } = useLiveSuspenseQuery({
     query: (query) => query.from({ hit: collection }).orderBy(({ hit }) => hit.rank, "asc"),
+  });
+  const { data: importantEvents } = useLiveSuspenseQuery({
+    query: (query) => query.from({ event: importantEventCollection }),
   });
   const { data: page } = useSuspenseQuery(taskSearchPageQueryOptions(input));
   const { data: savedViews } = useSuspenseQuery(savedViewsQueryOptions(projectId));
@@ -149,6 +166,7 @@ function SearchPage() {
         onOpen: () => setLiveStatus("live"),
         onError: () => setLiveStatus("retrying"),
         onEvent: async (event) => {
+          projectImportantEvent(event, importantEventCollection);
           if (input.cursor) {
             await navigate({
               search: (previous) => ({ ...previous, cursor: null }),
@@ -172,7 +190,16 @@ function SearchPage() {
           setLiveStatus("live");
         },
       }),
-    [collection, eventCursor, input.cursor, navigate, projectId, queryClient, router],
+    [
+      collection,
+      eventCursor,
+      importantEventCollection,
+      input.cursor,
+      navigate,
+      projectId,
+      queryClient,
+      router,
+    ],
   );
 
   const searchFormKey = JSON.stringify({
@@ -245,6 +272,20 @@ function SearchPage() {
     }
   }
 
+  async function persistTheme(nextTheme: Theme) {
+    await applyThemeOptimistically({
+      previousTheme: state.theme,
+      nextTheme,
+      persist: async () => {
+        const response = await changeTheme({
+          data: { theme: nextTheme, idempotencyKey: crypto.randomUUID() },
+        });
+        if (!response.ok) throw new Error(response.error.message);
+      },
+    });
+    await router.invalidate({ sync: true });
+  }
+
   return (
     <main {...stylex.props(styles.page)}>
       <header {...stylex.props(styles.header)}>
@@ -261,9 +302,21 @@ function SearchPage() {
           </Link>
           <span {...stylex.props(styles.navLink, styles.navLinkActive)}>Search</span>
         </nav>
-        <span aria-live="polite" {...stylex.props(styles.liveStatus)}>
-          {liveStatus === "live" ? "Live" : liveStatus === "retrying" ? "Retrying…" : "Connecting…"}
-        </span>
+        <div {...stylex.props(styles.headerUtilities)}>
+          <span aria-live="polite" {...stylex.props(styles.liveStatus)}>
+            {liveStatus === "live"
+              ? "Live"
+              : liveStatus === "retrying"
+                ? "Retrying…"
+                : "Connecting…"}
+          </span>
+          <NotificationCenter
+            projectId={projectId}
+            events={importantEvents}
+            tasks={items.map(({ task }) => task)}
+          />
+          <ThemeControl theme={state.theme} onChange={persistTheme} />
+        </div>
       </header>
 
       <div {...stylex.props(styles.projectToolbar)}>
@@ -529,7 +582,7 @@ const styles = stylex.create({
     display: "grid",
     gap: tokens.space4,
     gridTemplateColumns: "1fr auto 1fr",
-    "@media (max-width: 700px)": { gridTemplateColumns: "1fr auto" },
+    "@media (max-width: 700px)": { gridTemplateColumns: "minmax(0, 1fr)" },
   },
   brand: {
     alignItems: "center",
@@ -558,6 +611,13 @@ const styles = stylex.create({
     borderWidth: 1,
     display: "flex",
     padding: 3,
+    "@media (max-width: 700px)": {
+      gridColumn: 1,
+      gridRow: 2,
+      justifySelf: "start",
+      maxWidth: "100%",
+      overflowX: "auto",
+    },
   },
   navLink: {
     borderRadius: 6,
@@ -569,11 +629,17 @@ const styles = stylex.create({
     textDecoration: "none",
   },
   navLinkActive: { backgroundColor: tokens.surfaceMuted, color: tokens.foreground },
+  headerUtilities: {
+    alignItems: "center",
+    display: "flex",
+    flexWrap: "wrap",
+    gap: tokens.space3,
+    justifySelf: "end",
+    "@media (max-width: 700px)": { justifySelf: "start" },
+  },
   liveStatus: {
     color: tokens.foregroundMuted,
     fontSize: 12,
-    justifySelf: "end",
-    "@media (max-width: 700px)": { display: "none" },
   },
   projectToolbar: {
     borderBlockEndColor: tokens.border,

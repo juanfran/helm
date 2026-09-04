@@ -7,7 +7,11 @@ import {
   type Task,
   type TaskAttemptSummary,
 } from "../../domain/tasks";
-import { projectEvent, type ProjectionCollection } from "./project-event-projector";
+import {
+  projectEvent,
+  projectImportantEvent,
+  type ProjectionCollection,
+} from "./project-event-projector";
 
 function collection<T extends { id: string }>() {
   const writeBatch = vi.fn((callback: () => void) => callback());
@@ -180,5 +184,15 @@ describe("project event projector", () => {
     });
 
     expect(taskCollection.writeDelete).not.toHaveBeenCalled();
+  });
+
+  it("projects only important events into the notification history", () => {
+    const importantEventCollection = collection<ProjectEvent>();
+    expect(projectImportantEvent(event(), importantEventCollection.value)).toBe(false);
+    expect(importantEventCollection.writeUpsert).not.toHaveBeenCalled();
+
+    const important = event({ importance: "attention", kind: "task.blocker.created" });
+    expect(projectImportantEvent(important, importantEventCollection.value)).toBe(true);
+    expect(importantEventCollection.writeUpsert).toHaveBeenCalledWith(important);
   });
 });

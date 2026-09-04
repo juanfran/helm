@@ -25,12 +25,8 @@ import type {
   ResolveManualBlockerInput,
   WithdrawActivityEntryInput,
 } from "../../domain/activity";
-import {
-  themeSchema,
-  type Project,
-  type SetProjectReviewModeInput,
-  type Theme,
-} from "../../domain/projects";
+import type { AgentRunSummary } from "../../domain/agents";
+import { type Project, type SetProjectReviewModeInput, type Theme } from "../../domain/projects";
 import {
   emptyRichTextDocument,
   compareTaskOrder,
@@ -70,8 +66,11 @@ import type {
 } from "../../server/task-adapter";
 import { tokens } from "../../styles/tokens.stylex";
 import { ProjectActivityFeed } from "../activity/project-activity-feed";
+import { NotificationCenter } from "../activity/notification-center";
 import { TaskCollaboration } from "../activity/task-collaboration";
+import { OperationalDashboard } from "../dashboard/operational-dashboard";
 import { ProjectReviewModeControl } from "../projects/project-review-mode-control";
+import { ThemeControl } from "../projects/theme-control";
 import { RichTextEditor } from "./rich-text-editor";
 import { TaskExecutionPanel } from "./task-execution-panel";
 
@@ -84,6 +83,8 @@ type TaskWorkspaceProps = {
   activityEntries: readonly ActivityEntry[];
   manualBlockers: readonly ManualBlocker[];
   projectEvents: readonly ProjectEvent[];
+  importantEvents?: readonly ProjectEvent[];
+  activeAgentRuns?: readonly AgentRunSummary[];
   liveStatus: "connecting" | "live" | "retrying";
   projectSwitcher?: ReactNode;
   renderSearchLink?: (props: { className?: string; style?: CSSProperties }) => ReactNode;
@@ -115,6 +116,7 @@ type TaskWorkspaceProps = {
 };
 
 type TagDraft = TagInput & { draftId: string };
+const noActiveAgentRuns: readonly AgentRunSummary[] = [];
 
 export function TaskWorkspace({
   project,
@@ -125,6 +127,8 @@ export function TaskWorkspace({
   activityEntries,
   manualBlockers,
   projectEvents,
+  importantEvents = projectEvents,
+  activeAgentRuns = noActiveAgentRuns,
   liveStatus,
   projectSwitcher,
   renderSearchLink,
@@ -148,7 +152,7 @@ export function TaskWorkspace({
 }: TaskWorkspaceProps) {
   const orderedTasks = useMemo(() => tasks.toSorted(compareTaskOrder), [tasks]);
   const [captureTitle, setCaptureTitle] = useState("");
-  const [workspaceView, setWorkspaceView] = useState<"tasks" | "activity">("tasks");
+  const [workspaceView, setWorkspaceView] = useState<"dashboard" | "tasks" | "activity">("tasks");
   const [selectedId, setSelectedId] = useState<string | null>(orderedTasks[0]?.id ?? null);
   const [pendingCapture, setPendingCapture] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
@@ -165,6 +169,11 @@ export function TaskWorkspace({
     }),
     [tasks],
   );
+
+  function selectTask(taskId: string) {
+    setSelectedId(taskId);
+    setWorkspaceView("tasks");
+  }
 
   async function capture(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -213,6 +222,17 @@ export function TaskWorkspace({
         <nav aria-label="Workspace views" {...stylex.props(styles.viewNavigation)}>
           <button
             type="button"
+            aria-pressed={workspaceView === "dashboard"}
+            onClick={() => setWorkspaceView("dashboard")}
+            {...stylex.props(
+              styles.viewButton,
+              workspaceView === "dashboard" && styles.viewButtonActive,
+            )}
+          >
+            Dashboard
+          </button>
+          <button
+            type="button"
             aria-pressed={workspaceView === "tasks"}
             onClick={() => setWorkspaceView("tasks")}
             {...stylex.props(
@@ -235,138 +255,146 @@ export function TaskWorkspace({
           </button>
           {renderSearchLink?.(stylex.props(styles.viewButton, styles.viewLink))}
         </nav>
-        <span
-          aria-live="polite"
-          {...stylex.props(styles.liveStatus, liveStatus === "live" && styles.liveStatusReady)}
-        >
-          <span {...stylex.props(styles.liveDot)} aria-hidden="true" />
-          {liveStatus === "live"
-            ? "Live"
-            : liveStatus === "retrying"
-              ? "Reconnecting"
-              : "Connecting"}
-        </span>
-        <label {...stylex.props(styles.appearance)}>
-          <span>Appearance</span>
-          <select
-            aria-label="Appearance"
-            value={theme}
-            onChange={(event) => void onChangeTheme(themeSchema.parse(event.target.value))}
-            {...stylex.props(styles.select)}
+        <div {...stylex.props(styles.headerUtilities)}>
+          <span
+            aria-live="polite"
+            {...stylex.props(styles.liveStatus, liveStatus === "live" && styles.liveStatusReady)}
           >
-            <option value="system">System</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
-        </label>
+            <span {...stylex.props(styles.liveDot)} aria-hidden="true" />
+            {liveStatus === "live"
+              ? "Live"
+              : liveStatus === "retrying"
+                ? "Reconnecting"
+                : "Connecting"}
+          </span>
+          <NotificationCenter
+            projectId={project.id}
+            events={importantEvents}
+            tasks={orderedTasks}
+            onSelectTask={selectTask}
+          />
+          <ThemeControl theme={theme} onChange={onChangeTheme} />
+        </div>
       </header>
 
       {projectSwitcher ? (
         <div {...stylex.props(styles.projectToolbar)}>{projectSwitcher}</div>
       ) : null}
 
-      <div {...stylex.props(styles.workspace)}>
-        <aside {...stylex.props(styles.sidebar)}>
-          <div {...stylex.props(styles.queueHeader)}>
-            <div>
-              <p {...stylex.props(styles.eyebrow)}>Work queue</p>
-              <h1 {...stylex.props(styles.heading)}>Tasks</h1>
+      <div
+        {...stylex.props(styles.workspace, workspaceView !== "tasks" && styles.workspaceOverview)}
+      >
+        {workspaceView === "tasks" ? (
+          <aside {...stylex.props(styles.sidebar)}>
+            <div {...stylex.props(styles.queueHeader)}>
+              <div>
+                <p {...stylex.props(styles.eyebrow)}>Work queue</p>
+                <h1 {...stylex.props(styles.heading)}>Tasks</h1>
+              </div>
+              <span {...stylex.props(styles.total)}>{orderedTasks.length}</span>
             </div>
-            <span {...stylex.props(styles.total)}>{orderedTasks.length}</span>
-          </div>
-          <section aria-label="Task counts" {...stylex.props(styles.counts)}>
-            <span>
-              <Inbox size={14} aria-hidden="true" /> {counts.backlog} backlog
-            </span>
-            <span>
-              <CheckCircle2 size={14} aria-hidden="true" /> {counts.ready} ready
-            </span>
-            <span>
-              <Activity size={14} aria-hidden="true" /> {counts.active} active
-            </span>
-            <span>
-              <Clock3 size={14} aria-hidden="true" /> {counts.review} review
-            </span>
-            <span>
-              <CheckCircle2 size={14} aria-hidden="true" /> {counts.done} done
-            </span>
-            <span>
-              <SlidersHorizontal size={14} aria-hidden="true" /> {counts.claimable} claimable
-            </span>
-          </section>
-          <ProjectReviewModeControl
-            key={`${project.id}:${project.version}`}
-            project={project}
-            onChange={onChangeProjectReviewMode}
-          />
-          <form onSubmit={capture} {...stylex.props(styles.capture)} aria-label="Quick capture">
-            <label htmlFor="capture-title" {...stylex.props(styles.srOnly)}>
-              Task title
-            </label>
-            <input
-              id="capture-title"
-              value={captureTitle}
-              onChange={(event) => setCaptureTitle(event.target.value)}
-              placeholder="Capture a task…"
-              maxLength={300}
-              required
-              {...stylex.props(styles.input)}
+            <section aria-label="Task counts" {...stylex.props(styles.counts)}>
+              <span>
+                <Inbox size={14} aria-hidden="true" /> {counts.backlog} backlog
+              </span>
+              <span>
+                <CheckCircle2 size={14} aria-hidden="true" /> {counts.ready} ready
+              </span>
+              <span>
+                <Activity size={14} aria-hidden="true" /> {counts.active} active
+              </span>
+              <span>
+                <Clock3 size={14} aria-hidden="true" /> {counts.review} review
+              </span>
+              <span>
+                <CheckCircle2 size={14} aria-hidden="true" /> {counts.done} done
+              </span>
+              <span>
+                <SlidersHorizontal size={14} aria-hidden="true" /> {counts.claimable} claimable
+              </span>
+            </section>
+            <ProjectReviewModeControl
+              key={`${project.id}:${project.version}`}
+              project={project}
+              onChange={onChangeProjectReviewMode}
             />
-            <Button
-              type="submit"
-              aria-label="Add backlog task"
-              disabled={pendingCapture || captureTitle.trim().length === 0}
-            >
-              <Plus size={17} aria-hidden="true" />
-            </Button>
-          </form>
-          {captureError ? (
-            <p role="alert" {...stylex.props(styles.error)}>
-              {captureError}
-            </p>
-          ) : null}
-          <nav aria-label="Tasks" {...stylex.props(styles.taskList)}>
-            {orderedTasks.map((task) => (
-              <button
-                key={task.id}
-                type="button"
-                onClick={() => {
-                  setSelectedId(task.id);
-                  setWorkspaceView("tasks");
-                }}
-                aria-current={task.id === selectedTask?.id ? "true" : undefined}
-                {...stylex.props(
-                  styles.taskRow,
-                  task.id === selectedTask?.id && styles.taskRowSelected,
-                )}
+            <form onSubmit={capture} {...stylex.props(styles.capture)} aria-label="Quick capture">
+              <label htmlFor="capture-title" {...stylex.props(styles.srOnly)}>
+                Task title
+              </label>
+              <input
+                id="capture-title"
+                value={captureTitle}
+                onChange={(event) => setCaptureTitle(event.target.value)}
+                placeholder="Capture a task…"
+                maxLength={300}
+                required
+                {...stylex.props(styles.input)}
+              />
+              <Button
+                type="submit"
+                aria-label="Add backlog task"
+                disabled={pendingCapture || captureTitle.trim().length === 0}
               >
-                <span {...stylex.props(styles.taskReference)}>#{task.sequence}</span>
-                <span {...stylex.props(styles.taskTitleGroup)}>
-                  <span {...stylex.props(styles.taskTitle)}>{task.title}</span>
-                  <span {...stylex.props(styles.taskMeta)}>
-                    {[
-                      task.priority,
-                      task.dueAt ? `due ${task.dueAt}` : null,
-                      task.size ? `size ${task.size}` : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
+                <Plus size={17} aria-hidden="true" />
+              </Button>
+            </form>
+            {captureError ? (
+              <p role="alert" {...stylex.props(styles.error)}>
+                {captureError}
+              </p>
+            ) : null}
+            <nav aria-label="Tasks" {...stylex.props(styles.taskList)}>
+              {orderedTasks.map((task) => (
+                <button
+                  key={task.id}
+                  type="button"
+                  onClick={() => selectTask(task.id)}
+                  aria-current={task.id === selectedTask?.id ? "true" : undefined}
+                  {...stylex.props(
+                    styles.taskRow,
+                    task.id === selectedTask?.id && styles.taskRowSelected,
+                  )}
+                >
+                  <span {...stylex.props(styles.taskReference)}>#{task.sequence}</span>
+                  <span {...stylex.props(styles.taskTitleGroup)}>
+                    <span {...stylex.props(styles.taskTitle)}>{task.title}</span>
+                    <span {...stylex.props(styles.taskMeta)}>
+                      {[
+                        task.priority,
+                        task.dueAt ? `due ${task.dueAt}` : null,
+                        task.size ? `size ${task.size}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </span>
+                    {task.claim ? <ClaimLeaseSummary claim={task.claim} compact /> : null}
                   </span>
-                  {task.claim ? <ClaimLeaseSummary claim={task.claim} compact /> : null}
-                </span>
-                <span {...stylex.props(styles[task.lifecycle])}>
-                  {taskLifecycleLabel(task.lifecycle)}
-                </span>
-                {task.eligibility ? (
-                  <span {...stylex.props(styles.eligibility)}>{task.eligibility.status}</span>
-                ) : null}
-              </button>
-            ))}
-          </nav>
-        </aside>
+                  <span {...stylex.props(styles[task.lifecycle])}>
+                    {taskLifecycleLabel(task.lifecycle)}
+                  </span>
+                  {task.eligibility ? (
+                    <span {...stylex.props(styles.eligibility)}>{task.eligibility.status}</span>
+                  ) : null}
+                </button>
+              ))}
+            </nav>
+          </aside>
+        ) : null}
 
-        <section {...stylex.props(styles.detail)}>
-          {workspaceView === "activity" ? (
+        <section
+          data-task-detail={workspaceView === "tasks" ? "true" : undefined}
+          {...stylex.props(styles.detail, workspaceView !== "tasks" && styles.overviewDetail)}
+        >
+          {workspaceView === "dashboard" ? (
+            <OperationalDashboard
+              tasks={orderedTasks}
+              attempts={attempts}
+              events={projectEvents}
+              activeAgentRuns={activeAgentRuns}
+              onSelectTask={selectTask}
+            />
+          ) : workspaceView === "activity" ? (
             <ProjectActivityFeed
               events={projectEvents}
               tasks={orderedTasks}
@@ -1254,6 +1282,13 @@ const styles = stylex.create({
     display: "flex",
     gap: tokens.space1,
     padding: tokens.space1,
+    overflowX: "auto",
+    maxWidth: "100%",
+  },
+  headerUtilities: {
+    alignItems: "center",
+    display: "flex",
+    gap: tokens.space3,
   },
   viewButton: {
     backgroundColor: "transparent",
@@ -1295,13 +1330,6 @@ const styles = stylex.create({
     height: 7,
     width: 7,
   },
-  appearance: {
-    alignItems: "center",
-    color: tokens.foregroundMuted,
-    display: "flex",
-    fontSize: 12,
-    gap: tokens.space2,
-  },
   select: {
     backgroundColor: tokens.surface,
     borderColor: tokens.border,
@@ -1316,11 +1344,19 @@ const styles = stylex.create({
     minHeight: "calc(100vh - 65px)",
     "@media (max-width: 760px)": { gridTemplateColumns: "1fr" },
   },
+  workspaceOverview: { gridTemplateColumns: "minmax(0, 1fr)" },
   sidebar: {
     borderInlineEndColor: tokens.border,
     borderInlineEndStyle: "solid",
     borderInlineEndWidth: 1,
     padding: tokens.space5,
+    "@media (max-width: 760px)": {
+      borderInlineEndWidth: 0,
+      borderBlockStartColor: tokens.border,
+      borderBlockStartStyle: "solid",
+      borderBlockStartWidth: 1,
+      order: 2,
+    },
   },
   queueHeader: { alignItems: "end", display: "flex", justifyContent: "space-between" },
   eyebrow: {
@@ -1430,7 +1466,13 @@ const styles = stylex.create({
     gridColumn: "2 / 4",
     textTransform: "uppercase",
   },
-  detail: { backgroundColor: tokens.surface, padding: "clamp(24px, 5vw, 64px)" },
+  detail: {
+    backgroundColor: tokens.surface,
+    order: 1,
+    padding: "clamp(24px, 5vw, 64px)",
+    "@media (max-width: 600px)": { padding: tokens.space4 },
+  },
+  overviewDetail: { backgroundColor: tokens.background, padding: 0 },
   detailStack: { marginInline: "auto", maxWidth: 960, width: "100%" },
   empty: {
     alignItems: "center",

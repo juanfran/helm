@@ -56,6 +56,7 @@ const backlog: Task = {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
 });
 
 function claimedTask(): Task {
@@ -119,7 +120,66 @@ function props(tasks: readonly Task[] = [backlog]) {
   };
 }
 
+function useNarrowViewport() {
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+  window.dispatchEvent(new Event("resize"));
+}
+
 describe("task workspace", () => {
+  it("drills from the live dashboard into narrow-screen review and comment actions", async () => {
+    useNarrowViewport();
+    const user = userEvent.setup();
+    const reviewTask: Task = {
+      ...backlog,
+      id: "review-task",
+      title: "Review agent delivery",
+      lifecycle: "review",
+      reviewAttemptId: "attempt-review",
+      eligibility: {
+        claimable: false,
+        status: "not_ready",
+        reasons: ["Awaiting human review."],
+        orderingExplanation: "high lane",
+        missingCapabilities: [],
+        blockingTaskIds: [],
+      },
+    };
+    const workspace = props([reviewTask]);
+    workspace.onApproveTaskReview.mockResolvedValue({ ok: true, result: {} });
+    workspace.onCreateActivityEntry.mockResolvedValue({ ok: true, result: {} });
+    render(<TaskWorkspace {...workspace} />);
+
+    expect(screen.getByRole("combobox", { name: "Appearance" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Notifications, none unread" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Dashboard" }));
+    const reviewPanel = screen.getByRole("heading", { name: "Awaiting review" }).closest("section");
+    await user.click(within(reviewPanel!).getByRole("button", { name: /Review agent delivery/ }));
+
+    expect(screen.getByRole("form", { name: "Approve task review" })).toBeTruthy();
+    expect(screen.getByRole("form", { name: "Request task changes" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Collaboration" })).toBeTruthy();
+
+    const approveForm = screen.getByRole("form", { name: "Approve task review" });
+    await user.type(
+      within(approveForm).getByLabelText("Approval summary"),
+      "Verified from a phone-sized workspace.",
+    );
+    await user.click(within(approveForm).getByRole("button", { name: "Approve" }));
+    expect(workspace.onApproveTaskReview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: reviewTask.id,
+        attemptId: "attempt-review",
+        summary: "Verified from a phone-sized workspace.",
+      }),
+    );
+
+    await user.type(screen.getByLabelText("Activity update"), "Human mobile note");
+    await user.click(screen.getByRole("button", { name: "Add comment" }));
+    expect(workspace.onCreateActivityEntry).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: reviewTask.id, kind: "comment" }),
+    );
+  });
+
   it("switches to the durable project activity view", async () => {
     const user = userEvent.setup();
     const activityEvent: ProjectEvent = {
@@ -252,7 +312,8 @@ describe("task workspace", () => {
     });
   });
 
-  it("updates planning metadata without changing preparation text", async () => {
+  it("reprioritizes work from the narrow-screen task controls", async () => {
+    useNarrowViewport();
     const user = userEvent.setup();
     const workspace = props();
     workspace.onUpdateTaskPlanning.mockResolvedValue({
@@ -417,7 +478,8 @@ describe("task workspace", () => {
     });
   });
 
-  it("requires reopening a done task before offering preparation actions", async () => {
+  it("reopens completed work from the narrow-screen task controls", async () => {
+    useNarrowViewport();
     const user = userEvent.setup();
     const doneTask: Task = { ...backlog, lifecycle: "done" };
     const workspace = props([doneTask]);
