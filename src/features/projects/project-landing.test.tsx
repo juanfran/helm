@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppState } from "../../domain/projects";
 import { ProjectLanding } from "./project-landing";
 
-const emptyState: AppState = { activeProject: null, theme: "system" };
+const emptyState: AppState = {
+  activeProject: null,
+  activeProjectVersion: 0,
+  theme: "system",
+};
 
 afterEach(() => {
   cleanup();
@@ -50,6 +54,7 @@ describe("project setup UI", () => {
       <ProjectLanding
         state={{
           theme: "dark",
+          activeProjectVersion: 1,
           activeProject: {
             id: "project-1",
             sequence: 1,

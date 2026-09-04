@@ -2,6 +2,7 @@ import { Effect, Either } from "effect";
 
 import {
   createProject,
+  selectActiveProject,
   setProjectReviewMode,
   setTheme,
   type ProjectServices,
@@ -15,6 +16,10 @@ export type ProjectCommandResponse =
   | { ok: false; error: ProjectErrorDto };
 
 export type ThemeCommandResponse =
+  | { ok: true; state: AppState }
+  | { ok: false; error: ProjectErrorDto };
+
+export type ProjectSelectionCommandResponse =
   | { ok: true; state: AppState }
   | { ok: false; error: ProjectErrorDto };
 
@@ -33,6 +38,17 @@ export async function executeChangeTheme(
   services: ProjectServices,
 ): Promise<ThemeCommandResponse> {
   const result = await Effect.runPromise(Effect.either(setTheme(data, services)));
+  return Either.isRight(result)
+    ? { ok: true, state: result.right }
+    : { ok: false, error: toProjectErrorDto(result.left) };
+}
+
+export async function executeSelectActiveProject(
+  data: unknown,
+  actor: ActivityActor,
+  services: ProjectServices,
+): Promise<ProjectSelectionCommandResponse> {
+  const result = await Effect.runPromise(Effect.either(selectActiveProject(data, actor, services)));
   return Either.isRight(result)
     ? { ok: true, state: result.right }
     : { ok: false, error: toProjectErrorDto(result.left) };

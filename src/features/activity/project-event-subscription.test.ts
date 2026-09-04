@@ -161,6 +161,25 @@ describe("project event subscription", () => {
 
     expect(onEvent).not.toHaveBeenCalled();
   });
+
+  it("accepts events from every project on the application-wide stream", async () => {
+    const source = new FakeEventSource();
+    const onEvent = vi.fn();
+    const createEventSource = vi.fn(() => source);
+    const stop = subscribeToProjectEvents({
+      projectId: null,
+      afterCursor: 8,
+      onEvent,
+      createEventSource,
+    });
+
+    source.emitProjectEvent(event(9, "project-2"));
+    await drainProjection();
+
+    expect(createEventSource).toHaveBeenCalledWith("/api/events?after=8");
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ projectId: "project-2" }));
+    stop();
+  });
 });
 
 describe("project event stream URL", () => {
@@ -168,5 +187,6 @@ describe("project event stream URL", () => {
     expect(projectEventStreamUrl("project / one", 42)).toBe(
       "/api/events?projectId=project+%2F+one&after=42",
     );
+    expect(projectEventStreamUrl(null, 42)).toBe("/api/events?after=42");
   });
 });

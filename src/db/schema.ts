@@ -368,6 +368,7 @@ export const manualBlockers = sqliteTable(
 export const preferences = sqliteTable("preferences", {
   id: integer("id").primaryKey(),
   activeProjectId: text("active_project_id").references(() => projects.id),
+  activeProjectVersion: integer("active_project_version").notNull().default(0),
   theme: text("theme", { enum: ["light", "dark", "system"] })
     .notNull()
     .default("system"),

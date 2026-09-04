@@ -16,6 +16,8 @@ import {
 } from "../features/activity/project-sync-coordinator";
 import { reconcileOptimisticCommand } from "../features/activity/optimistic-reconciliation";
 import { ProjectLanding } from "../features/projects/project-landing";
+import { executeProjectChange } from "../features/projects/project-navigation";
+import { ProjectSwitcher } from "../features/projects/project-switcher";
 import { getTaskAttemptCollection } from "../features/tasks/task-attempt-collection";
 import { getTaskCollection } from "../features/tasks/task-collection";
 import { TaskWorkspace } from "../features/tasks/task-workspace";
@@ -33,6 +35,8 @@ import {
   changeProjectReviewMode,
   changeTheme,
   createInitialProject,
+  readProjects,
+  selectHumanProject,
 } from "../server/project-functions";
 import { readAppState } from "../server/project-functions";
 import {
@@ -68,7 +72,7 @@ import type { Project, Theme } from "../domain/projects";
 export const Route = createFileRoute("/")({
   ssr: false,
   loader: async ({ context }) => {
-    const state = await readAppState();
+    const [state, projects] = await Promise.all([readAppState(), readProjects()]);
     let eventCursor = 0;
     if (state.activeProject) {
       const projectId = state.activeProject.id;
@@ -109,7 +113,7 @@ export const Route = createFileRoute("/")({
         ]),
       );
     }
-    return { ...state, eventCursor };
+    return { ...state, projects: [...projects], eventCursor };
   },
   component: Home,
 });
@@ -126,7 +130,15 @@ function Home() {
   const router = useRouter();
 
   if (state.activeProject) {
-    return <ActiveProjectHome project={state.activeProject} theme={state.theme} />;
+    return (
+      <ActiveProjectHome
+        key={state.activeProject.id}
+        project={state.activeProject}
+        projects={state.projects}
+        activeProjectVersion={state.activeProjectVersion}
+        theme={state.theme}
+      />
+    );
   }
 
   return (
@@ -146,7 +158,17 @@ function Home() {
   );
 }
 
-function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme }) {
+function ActiveProjectHome({
+  project,
+  projects,
+  activeProjectVersion,
+  theme,
+}: {
+  project: Project;
+  projects: readonly Project[];
+  activeProjectVersion: number;
+  theme: Theme;
+}) {
   const { eventCursor } = Route.useLoaderData();
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -460,6 +482,25 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
       manualBlockers={manualBlockers}
       projectEvents={projectEvents}
       liveStatus={liveStatus}
+      projectSwitcher={
+        <ProjectSwitcher
+          projects={projects}
+          activeProject={project}
+          activeProjectVersion={activeProjectVersion}
+          onSelect={(input) =>
+            executeProjectChange(() => selectHumanProject({ data: input }), {
+              navigateToWorkspace: () => router.navigate({ to: "/", replace: true }),
+              refreshRoutes: () => router.invalidate({ sync: true }),
+            })
+          }
+          onCreate={(input) =>
+            executeProjectChange(() => createInitialProject({ data: input }), {
+              navigateToWorkspace: () => router.navigate({ to: "/", replace: true }),
+              refreshRoutes: () => router.invalidate({ sync: true }),
+            })
+          }
+        />
+      }
       renderSearchLink={(props) => (
         <Link to="/search" search={emptyTaskSearchParams} {...props}>
           Search

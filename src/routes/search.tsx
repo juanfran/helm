@@ -11,6 +11,8 @@ import type { SavedViewVisibleField } from "../domain/saved-views";
 import { canonicalizeTaskSearchOrder } from "../domain/task-filters";
 import type { AppState } from "../domain/projects";
 import { subscribeToProjectEvents } from "../features/activity/project-event-subscription";
+import { executeProjectChange } from "../features/projects/project-navigation";
+import { ProjectSwitcher } from "../features/projects/project-switcher";
 import {
   getTaskSearchCollection,
   taskSearchPageQueryOptions,
@@ -21,7 +23,12 @@ import {
 } from "../features/tasks/task-search-params";
 import { TaskSearchResults } from "../features/tasks/task-search-results";
 import { readProjectEvents } from "../server/activity-functions";
-import { readAppState } from "../server/project-functions";
+import {
+  createInitialProject,
+  readAppState,
+  readProjects,
+  selectHumanProject,
+} from "../server/project-functions";
 import { readTaskTags } from "../server/task-functions";
 import { createHumanSavedView, readSavedViews } from "../server/task-query-functions";
 import { tokens } from "../styles/tokens.stylex";
@@ -65,7 +72,7 @@ export const Route = createFileRoute("/search")({
   validateSearch: taskSearchParamsSchema,
   loaderDeps: ({ search: { presentation: _presentation, ...query } }) => query,
   loader: async ({ context, deps }) => {
-    const state = await readAppState();
+    const [state, projects] = await Promise.all([readAppState(), readProjects()]);
     if (!state.activeProject) throw redirect({ to: "/" });
     const projectId = state.activeProject.id;
     const eventPage = await readProjectEvents({
@@ -86,7 +93,12 @@ export const Route = createFileRoute("/search")({
       context.queryClient.ensureQueryData(savedViewsQueryOptions(projectId)),
       context.queryClient.ensureQueryData(taskTagsQueryOptions(projectId)),
     ]);
-    return { state, input, eventCursor: eventPage.latestCursor };
+    return {
+      state,
+      projects: [...projects],
+      input,
+      eventCursor: eventPage.latestCursor,
+    };
   },
   pendingComponent: RoutePendingState,
   errorComponent: SearchRouteError,
@@ -109,7 +121,7 @@ function SearchRouteError({ error }: { error: Error }) {
 }
 
 function SearchPage() {
-  const { state, input, eventCursor } = Route.useLoaderData();
+  const { state, projects, input, eventCursor } = Route.useLoaderData();
   const search = Route.useSearch();
   const router = useRouter();
   const navigate = Route.useNavigate();
@@ -253,6 +265,26 @@ function SearchPage() {
           {liveStatus === "live" ? "Live" : liveStatus === "retrying" ? "Retrying…" : "Connecting…"}
         </span>
       </header>
+
+      <div {...stylex.props(styles.projectToolbar)}>
+        <ProjectSwitcher
+          projects={projects}
+          activeProject={project}
+          activeProjectVersion={state.activeProjectVersion}
+          onSelect={(selection) =>
+            executeProjectChange(() => selectHumanProject({ data: selection }), {
+              navigateToWorkspace: () => navigate({ to: "/", replace: true }),
+              refreshRoutes: () => router.invalidate({ sync: true }),
+            })
+          }
+          onCreate={(projectInput) =>
+            executeProjectChange(() => createInitialProject({ data: projectInput }), {
+              navigateToWorkspace: () => navigate({ to: "/", replace: true }),
+              refreshRoutes: () => router.invalidate({ sync: true }),
+            })
+          }
+        />
+      </div>
 
       <section {...stylex.props(styles.hero)}>
         <p {...stylex.props(styles.eyebrow)}>Shared task query</p>
@@ -542,6 +574,13 @@ const styles = stylex.create({
     fontSize: 12,
     justifySelf: "end",
     "@media (max-width: 700px)": { display: "none" },
+  },
+  projectToolbar: {
+    borderBlockEndColor: tokens.border,
+    borderBlockEndStyle: "solid",
+    borderBlockEndWidth: 1,
+    marginBlockStart: tokens.space4,
+    paddingBlockEnd: tokens.space4,
   },
   hero: { marginBlock: tokens.space8, maxWidth: 760 },
   eyebrow: {

@@ -39,6 +39,7 @@ const migrationNamesThrough0009 = [
   "0008_secret_patriot.sql",
   "0009_supreme_blue_shield.sql",
 ] as const;
+const migrationNamesThrough0010 = [...migrationNamesThrough0009, "0010_polite_bishop.sql"] as const;
 
 function temporaryDirectory(prefix: string) {
   const path = mkdtempSync(join(tmpdir(), prefix));
@@ -737,6 +738,81 @@ describe("SQLite forward migrations", () => {
         projectStore.database
           .prepare(
             "select count(*) from sqlite_master where type = 'table' and name = 'saved_views'",
+          )
+          .pluck()
+          .get(),
+      ).toBe(1);
+    } finally {
+      projectStore.close();
+    }
+  });
+
+  it("backfills the active-project selection version from 0010", () => {
+    const root = temporaryDirectory("helm-project-selection-migration-fixture-");
+    const databasePath = join(root, "helm.db");
+    const previousMigrations = createPreviousMigrationFolder(migrationNamesThrough0010);
+    const legacyDatabase = new Database(databasePath);
+    legacyDatabase.pragma("foreign_keys = ON");
+    migrate(drizzle(legacyDatabase), { migrationsFolder: previousMigrations });
+    const createdAt = "2026-08-01T10:00:00.000Z";
+
+    legacyDatabase
+      .prepare(
+        `insert into projects (
+          id, sequence, name, repository_root, review_mode, version, created_at, updated_at
+        ) values ('legacy-project', 1, 'legacy', ?, 'required', 1, ?, ?)`,
+      )
+      .run(root, createdAt, createdAt);
+    legacyDatabase
+      .prepare(
+        `insert into preferences (id, active_project_id, theme, updated_at)
+         values (1, 'legacy-project', 'dark', ?)`,
+      )
+      .run(createdAt);
+    legacyDatabase
+      .prepare(
+        `insert into idempotency_records (key, command, input_hash, result_json, created_at)
+         values ('legacy-theme', 'preference.theme.set', 'legacy-hash', ?, ?)`,
+      )
+      .run(
+        JSON.stringify({
+          activeProject: {
+            id: "legacy-project",
+            sequence: 1,
+            name: "legacy",
+            repositoryRoot: root,
+            reviewMode: "required",
+            version: 1,
+            createdAt,
+            updatedAt: createdAt,
+          },
+          theme: "dark",
+        }),
+        createdAt,
+      );
+    legacyDatabase.close();
+
+    const projectStore = createSqliteProjectStore(databasePath);
+    try {
+      expect(
+        projectStore.database
+          .prepare(
+            `select active_project_id as activeProjectId,
+                    active_project_version as activeProjectVersion,
+                    theme
+             from preferences where id = 1`,
+          )
+          .get(),
+      ).toEqual({
+        activeProjectId: "legacy-project",
+        activeProjectVersion: 1,
+        theme: "dark",
+      });
+      expect(
+        projectStore.database
+          .prepare(
+            `select json_extract(result_json, '$.activeProjectVersion')
+             from idempotency_records where key = 'legacy-theme'`,
           )
           .pluck()
           .get(),

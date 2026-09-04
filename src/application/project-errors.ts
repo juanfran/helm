@@ -26,6 +26,22 @@ export class ProjectVersionConflictError extends Data.TaggedError("ProjectVersio
   readonly projectId: string;
   readonly expectedVersion: number;
   readonly currentVersion: number;
+  readonly changeSummary: string;
+  readonly message: string;
+}> {}
+
+export class ProjectNotFoundError extends Data.TaggedError("ProjectNotFoundError")<{
+  readonly projectId: string;
+  readonly message: string;
+}> {}
+
+export class ActiveProjectVersionConflictError extends Data.TaggedError(
+  "ActiveProjectVersionConflictError",
+)<{
+  readonly projectId: string;
+  readonly expectedVersion: number;
+  readonly currentVersion: number;
+  readonly changeSummary: string;
   readonly message: string;
 }> {}
 
@@ -43,6 +59,8 @@ export type ProjectCommandError =
   | DuplicateRepositoryRootError
   | IdempotencyConflictError
   | ProjectVersionConflictError
+  | ProjectNotFoundError
+  | ActiveProjectVersionConflictError
   | ProjectAuthorizationError
   | ProjectPersistenceError;
 
@@ -53,12 +71,15 @@ export type ProjectErrorDto = {
     | "DuplicateRepositoryRootError"
     | "IdempotencyConflictError"
     | "ProjectVersionConflictError"
+    | "ProjectNotFoundError"
+    | "ActiveProjectVersionConflictError"
     | "ProjectAuthorizationError"
     | "ProjectPersistenceError";
   message: string;
   projectId?: string;
   expectedVersion?: number;
   currentVersion?: number;
+  changeSummary?: string;
   path?: string;
   reason?: RepositoryRootReason;
 };
@@ -74,6 +95,13 @@ export function toProjectErrorDto(error: ProjectCommandError): ProjectErrorDto {
       };
     case "DuplicateRepositoryRootError":
       return { type: error["_tag"], message: error.message, path: error.path };
+    case "ProjectNotFoundError":
+      return {
+        type: error["_tag"],
+        message: error.message,
+        projectId: error.projectId,
+      };
+    case "ActiveProjectVersionConflictError":
     case "ProjectVersionConflictError":
       return {
         type: error["_tag"],
@@ -81,6 +109,7 @@ export function toProjectErrorDto(error: ProjectCommandError): ProjectErrorDto {
         projectId: error.projectId,
         expectedVersion: error.expectedVersion,
         currentVersion: error.currentVersion,
+        changeSummary: error.changeSummary,
       };
     default:
       return { type: error["_tag"], message: error.message };

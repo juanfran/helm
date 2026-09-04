@@ -5,11 +5,20 @@ import { tmpdir } from "node:os";
 import { Effect, Either } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createProject, getAppState, setProjectReviewMode, setTheme } from "./projects";
+import {
+  createProject,
+  getAppState,
+  listProjects,
+  selectActiveProject,
+  setProjectReviewMode,
+  setTheme,
+} from "./projects";
 import {
   compiledCreateProjectInputSchema,
+  compiledSelectActiveProjectInputSchema,
   compiledSetProjectReviewModeInputSchema,
   createProjectInputSchema,
+  selectActiveProjectInputSchema,
   setProjectReviewModeInputSchema,
 } from "../domain/projects";
 import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
@@ -64,11 +73,196 @@ describe("project application commands", () => {
     expect(retry).toEqual(first);
     expect(projectCount?.count).toBe(1);
     expect(state.activeProject).toEqual(first);
+    expect(state.activeProjectVersion).toBe(1);
     expect(event).toEqual({
       kind: "project.created",
       actorType: "human",
       actorId: "local-human",
     });
+    store.close();
+  });
+
+  it("creates and selects another project after first run in stable sequence order", async () => {
+    const store = createSqliteProjectStore(":memory:");
+    const firstRoot = await repository("first");
+    const secondRoot = await repository("second");
+
+    const first = await Effect.runPromise(
+      createProject({ repositoryRoot: firstRoot, idempotencyKey: "create-first" }, services(store)),
+    );
+    const second = await Effect.runPromise(
+      createProject(
+        { repositoryRoot: secondRoot, idempotencyKey: "create-second" },
+        services(store),
+      ),
+    );
+    const projects = await Effect.runPromise(listProjects(services(store)));
+    const state = await Effect.runPromise(getAppState(services(store)));
+
+    expect(projects).toEqual([first, second]);
+    expect(projects.map((project) => project.sequence)).toEqual([1, 2]);
+    expect(state).toEqual({ activeProject: second, activeProjectVersion: 2, theme: "system" });
+    expect(
+      store.database
+        .prepare<[], number>("select count(*) from events where kind = 'project.created'")
+        .pluck()
+        .get(),
+    ).toBe(2);
+    store.close();
+  });
+
+  it("selects idempotently with human attribution and rejects stale or missing projects", async () => {
+    const store = createSqliteProjectStore(":memory:");
+    const firstRoot = await repository("selection-first");
+    const secondRoot = await repository("selection-second");
+    const first = await Effect.runPromise(
+      createProject(
+        { repositoryRoot: firstRoot, idempotencyKey: "selection-create-first" },
+        services(store),
+      ),
+    );
+    const second = await Effect.runPromise(
+      createProject(
+        { repositoryRoot: secondRoot, idempotencyKey: "selection-create-second" },
+        services(store),
+      ),
+    );
+    const command = {
+      projectId: first.id,
+      expectedVersion: 2,
+      idempotencyKey: "select-first",
+    };
+
+    const selected = await Effect.runPromise(
+      selectActiveProject(command, { type: "human", id: "local-human" }, services(store)),
+    );
+    const retry = await Effect.runPromise(
+      selectActiveProject(command, { type: "human", id: "local-human" }, services(store)),
+    );
+    const stale = await Effect.runPromise(
+      Effect.either(
+        selectActiveProject(
+          { projectId: second.id, expectedVersion: 2, idempotencyKey: "stale-selection" },
+          { type: "human", id: "local-human" },
+          services(store),
+        ),
+      ),
+    );
+    const missing = await Effect.runPromise(
+      Effect.either(
+        selectActiveProject(
+          { projectId: "missing-project", expectedVersion: 3, idempotencyKey: "missing-selection" },
+          { type: "human", id: "local-human" },
+          services(store),
+        ),
+      ),
+    );
+    const unauthorized = await Effect.runPromise(
+      Effect.either(
+        selectActiveProject(
+          { projectId: second.id, expectedVersion: 3, idempotencyKey: "agent-selection" },
+          { type: "agent", id: "agent-run" },
+          services(store),
+        ),
+      ),
+    );
+    const selectionEvents = store.database
+      .prepare<
+        [],
+        {
+          actorId: string;
+          actorType: string;
+          changesJson: string;
+          projectId: string;
+          payloadJson: string;
+        }
+      >(
+        `select
+          actor_id as actorId,
+          actor_type as actorType,
+          changes_json as changesJson,
+          project_id as projectId,
+          payload_json as payloadJson
+        from events
+        where kind = 'project.selected'`,
+      )
+      .all();
+
+    expect(selected).toEqual({ activeProject: first, activeProjectVersion: 3, theme: "system" });
+    expect(retry).toEqual(selected);
+    expect(Either.isLeft(stale) && stale.left).toMatchObject({
+      _tag: "ActiveProjectVersionConflictError",
+      projectId: second.id,
+      expectedVersion: 2,
+      currentVersion: 3,
+    });
+    expect(Either.isLeft(missing) && missing.left).toMatchObject({
+      _tag: "ProjectNotFoundError",
+      projectId: "missing-project",
+    });
+    expect(Either.isLeft(unauthorized) && unauthorized.left).toMatchObject({
+      _tag: "ProjectAuthorizationError",
+    });
+    expect(selectionEvents).toHaveLength(1);
+    expect(selectionEvents[0]).toMatchObject({
+      actorId: "local-human",
+      actorType: "human",
+      projectId: first.id,
+    });
+    expect(JSON.parse(selectionEvents[0]?.payloadJson ?? "null")).toEqual({
+      previousProjectId: second.id,
+      projectId: first.id,
+      previousVersion: 2,
+      version: 3,
+    });
+    expect(JSON.parse(selectionEvents[0]?.changesJson ?? "null")).toMatchObject({
+      projectIds: [first.id, second.id].toSorted(),
+      scopes: ["preferences", "projects"],
+    });
+    expect(await Effect.runPromise(getAppState(services(store)))).toEqual(selected);
+    store.close();
+  });
+
+  it("rolls active selection and idempotency back when its audit event cannot be written", async () => {
+    const store = createSqliteProjectStore(":memory:");
+    const firstRoot = await repository("selection-rollback-first");
+    const secondRoot = await repository("selection-rollback-second");
+    const first = await Effect.runPromise(
+      createProject(
+        { repositoryRoot: firstRoot, idempotencyKey: "selection-rollback-create-first" },
+        services(store),
+      ),
+    );
+    const second = await Effect.runPromise(
+      createProject(
+        { repositoryRoot: secondRoot, idempotencyKey: "selection-rollback-create-second" },
+        services(store),
+      ),
+    );
+    store.database.exec(`
+      create trigger reject_project_selection_event
+      before insert on events when NEW.kind = 'project.selected'
+      begin select raise(abort, 'selection event rejected'); end;
+    `);
+
+    const result = await Effect.runPromise(
+      Effect.either(
+        selectActiveProject(
+          { projectId: first.id, expectedVersion: 2, idempotencyKey: "selection-rollback" },
+          { type: "human", id: "local-human" },
+          services(store),
+        ),
+      ),
+    );
+    const state = await Effect.runPromise(getAppState(services(store)));
+    const idempotencyCount = store.database
+      .prepare<[string], number>("select count(*) from idempotency_records where key = ?")
+      .pluck()
+      .get("selection-rollback");
+
+    expect(Either.isLeft(result) && result.left).toMatchObject({ _tag: "ProjectPersistenceError" });
+    expect(state).toEqual({ activeProject: second, activeProjectVersion: 2, theme: "system" });
+    expect(idempotencyCount).toBe(0);
     store.close();
   });
 
@@ -155,6 +349,7 @@ describe("project application commands", () => {
 
     expect(Either.isLeft(result) && result.left["_tag"]).toBe("ProjectPersistenceError");
     expect(state.activeProject).toBeNull();
+    expect(state.activeProjectVersion).toBe(0);
     expect(
       store.database.prepare<[], { count: number }>("select count(*) as count from projects").get()
         ?.count,
@@ -165,11 +360,25 @@ describe("project application commands", () => {
   it("restores the active project and theme after opening a new database process", async () => {
     const parent = await temporaryDirectory();
     const databasePath = join(parent, "helm.db");
-    const root = await repository("persistent");
+    const firstRoot = await repository("persistent-first");
+    const secondRoot = await repository("persistent-second");
     const firstStore = createSqliteProjectStore(databasePath);
-    const project = await Effect.runPromise(
+    const first = await Effect.runPromise(
       createProject(
-        { repositoryRoot: root, idempotencyKey: "persistent-project" },
+        { repositoryRoot: firstRoot, idempotencyKey: "persistent-project-first" },
+        services(firstStore),
+      ),
+    );
+    await Effect.runPromise(
+      createProject(
+        { repositoryRoot: secondRoot, idempotencyKey: "persistent-project-second" },
+        services(firstStore),
+      ),
+    );
+    const selected = await Effect.runPromise(
+      selectActiveProject(
+        { projectId: first.id, expectedVersion: 2, idempotencyKey: "persistent-selection" },
+        { type: "human", id: "local-human" },
         services(firstStore),
       ),
     );
@@ -181,7 +390,7 @@ describe("project application commands", () => {
     const reopenedStore = createSqliteProjectStore(databasePath);
     const restored = await Effect.runPromise(getAppState(services(reopenedStore)));
 
-    expect(restored).toEqual({ activeProject: project, theme: "dark" });
+    expect(restored).toEqual({ ...selected, theme: "dark" });
     reopenedStore.close();
   });
 
@@ -307,6 +516,19 @@ describe("project application commands", () => {
     expect(() => createProjectInputSchema.parse({ ...valid, repositoryRoot: "" })).toThrow();
     expect(() =>
       compiledCreateProjectInputSchema.parse({ ...valid, repositoryRoot: "" }),
+    ).toThrow();
+    const selection = {
+      projectId: "project-1",
+      expectedVersion: 0,
+      idempotencyKey: "select-project",
+    };
+    expect(selectActiveProjectInputSchema.parse(selection)).toEqual(selection);
+    expect(compiledSelectActiveProjectInputSchema.parse(selection)).toEqual(selection);
+    expect(() =>
+      selectActiveProjectInputSchema.parse({ ...selection, expectedVersion: -1 }),
+    ).toThrow();
+    expect(() =>
+      compiledSelectActiveProjectInputSchema.parse({ ...selection, expectedVersion: -1 }),
     ).toThrow();
     const reviewMode = {
       projectId: "project-1",

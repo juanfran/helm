@@ -85,6 +85,7 @@ type TaskWorkspaceProps = {
   manualBlockers: readonly ManualBlocker[];
   projectEvents: readonly ProjectEvent[];
   liveStatus: "connecting" | "live" | "retrying";
+  projectSwitcher?: ReactNode;
   renderSearchLink?: (props: { className?: string; style?: CSSProperties }) => ReactNode;
   onCreateTask: (input: CreateTaskInput) => Promise<TaskCommandResponse>;
   onPrepareTask: (input: PrepareTaskInput) => Promise<TaskCommandResponse>;
@@ -125,6 +126,7 @@ export function TaskWorkspace({
   manualBlockers,
   projectEvents,
   liveStatus,
+  projectSwitcher,
   renderSearchLink,
   onCreateTask,
   onPrepareTask,
@@ -258,6 +260,10 @@ export function TaskWorkspace({
           </select>
         </label>
       </header>
+
+      {projectSwitcher ? (
+        <div {...stylex.props(styles.projectToolbar)}>{projectSwitcher}</div>
+      ) : null}
 
       <div {...stylex.props(styles.workspace)}>
         <aside {...stylex.props(styles.sidebar)}>
@@ -1216,6 +1222,19 @@ const styles = stylex.create({
     justifyContent: "space-between",
     minHeight: 64,
     paddingInline: tokens.space6,
+    "@media (max-width: 900px)": {
+      flexWrap: "wrap",
+      gap: tokens.space3,
+      paddingBlock: tokens.space3,
+    },
+  },
+  projectToolbar: {
+    borderBlockEndColor: tokens.border,
+    borderBlockEndStyle: "solid",
+    borderBlockEndWidth: 1,
+    paddingBlock: tokens.space3,
+    paddingInline: tokens.space6,
+    "@media (max-width: 600px)": { paddingInline: tokens.space4 },
   },
   brand: { alignItems: "center", display: "flex", gap: tokens.space3 },
   mark: {

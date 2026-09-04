@@ -1,9 +1,20 @@
-import { HeadContent, Scripts, createRootRouteWithContext } from "@tanstack/react-router";
+import { useEffect } from "react";
+import {
+  HeadContent,
+  Scripts,
+  createRootRouteWithContext,
+  useRouter,
+} from "@tanstack/react-router";
 import * as stylex from "@stylexjs/stylex";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
 import { TanStackDevtools } from "@tanstack/react-devtools";
 
 import TanStackQueryDevtools from "../integrations/tanstack-query/devtools";
+import {
+  readApplicationEventCursor,
+  subscribeToActiveProjectChanges,
+} from "../features/projects/active-project-subscription";
+import { resetProjectNavigation } from "../features/projects/project-navigation";
 import { readAppState } from "../server/project-functions";
 import { getThemeProps } from "../styles/theme";
 import { tokens } from "../styles/tokens.stylex";
@@ -17,7 +28,12 @@ interface MyRouterContext {
 }
 
 export const Route = createRootRouteWithContext<MyRouterContext>()({
-  loader: () => readAppState(),
+  loader: async () => {
+    // Capture the global cursor before state. A selection committed between these reads is either
+    // reflected in state or replayed by the application-wide subscription after hydration.
+    const applicationEventCursor = await readApplicationEventCursor();
+    return { ...(await readAppState()), applicationEventCursor };
+  },
   head: () => ({
     meta: [
       {
@@ -54,7 +70,22 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 });
 
 function RootDocument({ children }: { children: React.ReactNode }) {
-  const { theme } = Route.useLoaderData();
+  const { theme, applicationEventCursor } = Route.useLoaderData();
+  const router = useRouter();
+
+  useEffect(
+    () =>
+      subscribeToActiveProjectChanges({
+        afterCursor: applicationEventCursor,
+        onChange: () =>
+          resetProjectNavigation({
+            navigateToWorkspace: () => router.navigate({ to: "/", replace: true }),
+            refreshRoutes: () => router.invalidate({ sync: true }),
+          }),
+      }),
+    [applicationEventCursor, router],
+  );
+
   return (
     <html lang="en" data-theme={theme} {...getThemeProps(theme)}>
       <head>

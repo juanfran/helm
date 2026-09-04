@@ -117,6 +117,32 @@ describe("task search collection", () => {
     secondClient.clear();
   });
 
+  it("keeps otherwise identical searches isolated by project", async () => {
+    vi.mocked(readTaskSearchPage).mockResolvedValue({
+      items: [],
+      nextCursor: null,
+      hasMore: false,
+      total: 0,
+      revision: 0,
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const firstProject = searchInput();
+    const secondProject = searchInput({
+      filter: { ...firstProject.filter, projectId: "project-2" },
+    });
+
+    const firstCollection = getTaskSearchCollection(queryClient, firstProject);
+    const secondCollection = getTaskSearchCollection(queryClient, secondProject);
+
+    expect(secondCollection).not.toBe(firstCollection);
+    expect(taskSearchQueryKey(secondProject)).not.toEqual(taskSearchQueryKey(firstProject));
+    await Promise.all([firstCollection.preload(), secondCollection.preload()]);
+    expect(
+      vi.mocked(readTaskSearchPage).mock.calls.map(([request]) => request.data.filter.projectId),
+    ).toEqual(expect.arrayContaining(["project-1", "project-2"]));
+    queryClient.clear();
+  });
+
   it("loads the canonical input and exposes page items by task id", async () => {
     const page = {
       items: [searchItem],

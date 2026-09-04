@@ -2,11 +2,13 @@ import { Effect } from "effect";
 
 import {
   compiledCreateProjectInputSchema,
+  compiledSelectActiveProjectInputSchema,
   compiledSetProjectReviewModeInputSchema,
   compiledSetThemeInputSchema,
   type AppState,
   type CreateProjectInput,
   type Project,
+  type SelectActiveProjectInput,
   type SetProjectReviewModeInput,
   type SetThemeInput,
 } from "../domain/projects";
@@ -31,6 +33,10 @@ export interface ProjectStore {
     input: CreateProjectInput,
     repository: RepositoryDetails,
   ): Effect.Effect<Project, ProjectCommandError>;
+  selectActiveProject(
+    input: SelectActiveProjectInput,
+    actor: ActivityActor,
+  ): Effect.Effect<AppState, ProjectCommandError>;
   setTheme(input: SetThemeInput): Effect.Effect<AppState, ProjectCommandError>;
   setReviewMode(
     input: SetProjectReviewModeInput,
@@ -70,6 +76,24 @@ export function setTheme(
   return Effect.flatMap(
     parseInput(() => compiledSetThemeInputSchema.parse(input)),
     (parsed) => services.store.setTheme(parsed),
+  );
+}
+
+export function selectActiveProject(
+  input: unknown,
+  actor: ActivityActor,
+  services: ProjectServices,
+): Effect.Effect<AppState, ProjectCommandError> {
+  if (actor.type !== "human") {
+    return Effect.fail(
+      new ProjectAuthorizationError({
+        message: "Only the local human can select the active project.",
+      }),
+    );
+  }
+  return Effect.flatMap(
+    parseInput(() => compiledSelectActiveProjectInputSchema.parse(input)),
+    (parsed) => services.store.selectActiveProject(parsed, actor),
   );
 }
 

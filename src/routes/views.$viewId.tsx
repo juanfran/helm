@@ -10,6 +10,8 @@ import { Button } from "../components/ui/button";
 import { RouteErrorState, RoutePendingState } from "../components/route-state";
 import type { AppState } from "../domain/projects";
 import { subscribeToProjectEvents } from "../features/activity/project-event-subscription";
+import { executeProjectChange } from "../features/projects/project-navigation";
+import { ProjectSwitcher } from "../features/projects/project-switcher";
 import {
   getTaskSearchCollection,
   taskSearchPageQueryOptions,
@@ -20,7 +22,12 @@ import {
 } from "../features/tasks/task-search-params";
 import { TaskSearchResults } from "../features/tasks/task-search-results";
 import { readProjectEvents } from "../server/activity-functions";
-import { readAppState } from "../server/project-functions";
+import {
+  createInitialProject,
+  readAppState,
+  readProjects,
+  selectHumanProject,
+} from "../server/project-functions";
 import { archiveHumanSavedView, readSavedView } from "../server/task-query-functions";
 import { tokens } from "../styles/tokens.stylex";
 
@@ -38,7 +45,7 @@ export const Route = createFileRoute("/views/$viewId")({
   validateSearch: viewSearchSchema,
   loaderDeps: ({ search }) => search,
   loader: async ({ context, deps, params }) => {
-    const state = await readAppState();
+    const [state, projects] = await Promise.all([readAppState(), readProjects()]);
     if (!state.activeProject) throw redirect({ to: "/" });
     const projectId = state.activeProject.id;
     const eventPage = await readProjectEvents({
@@ -61,7 +68,13 @@ export const Route = createFileRoute("/views/$viewId")({
     await (collection.isReady()
       ? collection.utils.refetch({ throwOnError: true })
       : collection.preload());
-    return { state, view, input, eventCursor: eventPage.latestCursor };
+    return {
+      state,
+      projects: [...projects],
+      view,
+      input,
+      eventCursor: eventPage.latestCursor,
+    };
   },
   pendingComponent: RoutePendingState,
   errorComponent: ViewRouteError,
@@ -84,7 +97,7 @@ function ViewRouteError({ error }: { error: Error }) {
 }
 
 function SavedViewPage() {
-  const { state, view, input, eventCursor } = Route.useLoaderData();
+  const { state, projects, view, input, eventCursor } = Route.useLoaderData();
   const router = useRouter();
   const navigate = Route.useNavigate();
   const queryClient = useQueryClient();
@@ -184,6 +197,26 @@ function SavedViewPage() {
           {liveStatus === "live" ? "Live" : liveStatus === "retrying" ? "Retrying…" : "Connecting…"}
         </span>
       </header>
+
+      <div {...stylex.props(styles.projectToolbar)}>
+        <ProjectSwitcher
+          projects={projects}
+          activeProject={project}
+          activeProjectVersion={state.activeProjectVersion}
+          onSelect={(selection) =>
+            executeProjectChange(() => selectHumanProject({ data: selection }), {
+              navigateToWorkspace: () => navigate({ to: "/", replace: true }),
+              refreshRoutes: () => router.invalidate({ sync: true }),
+            })
+          }
+          onCreate={(projectInput) =>
+            executeProjectChange(() => createInitialProject({ data: projectInput }), {
+              navigateToWorkspace: () => navigate({ to: "/", replace: true }),
+              refreshRoutes: () => router.invalidate({ sync: true }),
+            })
+          }
+        />
+      </div>
 
       <section {...stylex.props(styles.hero)}>
         <div>
@@ -304,6 +337,13 @@ const styles = stylex.create({
     fontSize: 12,
     justifySelf: "end",
     "@media (max-width: 760px)": { display: "none" },
+  },
+  projectToolbar: {
+    borderBlockEndColor: tokens.border,
+    borderBlockEndStyle: "solid",
+    borderBlockEndWidth: 1,
+    marginBlockStart: tokens.space4,
+    paddingBlockEnd: tokens.space4,
   },
   hero: {
     alignItems: "end",

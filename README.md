@@ -25,9 +25,10 @@ directories before opening or migrating it.
 `HELM_UNSAFE_ALLOW_REMOTE=1` explicitly acknowledges that unsupported exposure. Do not put provider
 credentials in Helm environment files or task records.
 
-On first launch, Helm asks for the absolute path to a local Git repository root. The selected
-project and light, dark, or system appearance preference are stored in SQLite and restored on the
-next launch.
+On first launch, Helm asks for the absolute path to a local Git repository root. Use the project
+switcher in the application header to add another repository or change the active project. Helm
+canonicalizes every root, keeps browser data scoped to its project, and restores the selected project
+and light, dark, or system appearance preference on the next launch.
 
 Coding-agent clients can connect to the local streamable HTTP MCP endpoint at
 `http://127.0.0.1:3000/api/mcp`. Register the connection with `register_agent_run` before using
@@ -46,7 +47,7 @@ Registered agents can use `add_comment`, `record_decision`, and `request_change`
 task history. `report_progress` additionally requires the active claim's lease token, which binds the
 entry to its execution attempt. `report_blocker` uses the same lease proof to create an explicit manual
 blocker for human attention; only the local human resolves it. `list_task_entries` returns stable text
-projections, and `read_events` reads the durable event log after a monotonic cursor. Helm records automatic
+projections, and `read_events` reads one project's durable event log after a monotonic cursor. Helm records automatic
 lease expiry and agent-session closure as system timeline entries. The browser's task, list, and activity
 views use the same event log through `/api/events`; reconnects replay missed commits and update only
 affected local records. Humans can add the same semantic entries, report or resolve explicit manual
@@ -56,9 +57,11 @@ The human workspace shows immutable attempt reports and supports approval, struc
 explicit task cancellation and restoration, and reasoned reopening. Reopening never rewrites an earlier
 attempt; a new attempt is created only when the reopened task is claimed again.
 
-`list_projects` and `get_active_project` remain available as read-only project queries. Discovery cursors
-are bound to the queue revision, evaluation date, project, and normalized agent capabilities. If any of
-that context changes between pages, restart discovery without the stale cursor.
+`list_projects` and `get_active_project` expose the same current selection as the browser. Agent reads and
+mutations still require an explicit project ID, so an active-project change never leaks records between
+projects or silently redirects an agent's in-flight work. Discovery cursors are bound to the queue
+revision, evaluation date, project, and normalized agent capabilities. If any of that context changes
+between pages, restart discovery without the stale cursor.
 
 ## Production build
 
@@ -88,8 +91,9 @@ pnpm smoke:operational
 ```
 
 The operational smoke test uses a temporary database and verifies a fresh nested-path migration, rejected
-unsafe remote binding, loopback-only HTTP readiness, a real MCP session and ping, a stale-build rebuild,
-persisted preferences after restart, and graceful port-releasing shutdown through both launchers.
+unsafe remote binding, loopback-only HTTP readiness, a real MCP session, a stale-build rebuild, persisted
+project selection through browser and MCP reads after restart, and graceful port-releasing shutdown
+through both launchers.
 
 GitHub Actions runs the same repository-local gates from a clean checkout on pull requests and pushes to
 `main`, with pinned Node.js and pnpm versions and a frozen lockfile. The production build owns TanStack

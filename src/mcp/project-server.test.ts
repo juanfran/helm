@@ -8,7 +8,7 @@ import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createProject } from "../application/projects";
+import { createProject, getAppState } from "../application/projects";
 import { reconcileActiveAgentRuns } from "../application/agents";
 import { createSavedView } from "../application/task-queries";
 import { registeredAgentRunSchema } from "../domain/agents";
@@ -18,6 +18,7 @@ import {
   activityEventPageSchema,
   manualBlockerMutationResultSchema,
 } from "../domain/activity";
+import { appStateSchema, projectSchema } from "../domain/projects";
 import { savedViewSchema } from "../domain/saved-views";
 import { taskSearchPageSchema } from "../domain/task-filters";
 import {
@@ -106,6 +107,10 @@ const successfulSavedViewListSchema = z.object({
 const successfulSavedViewSchema = z.object({
   ok: z.literal(true),
   view: savedViewSchema,
+});
+const projectCatalogSchema = z.object({
+  projects: z.array(projectSchema),
+  activeProjectId: z.string().nullable(),
 });
 
 let temporaryRoot: string;
@@ -254,6 +259,190 @@ function failureReport() {
     followUpWork: ["Restore the dependency and claim the task again."],
   };
 }
+
+describe("MCP project contract", () => {
+  it("lists projects and resolves the current browser project from an existing HTTP session", async () => {
+    const initialState = await Effect.runPromise(getAppState(projectServices));
+    if (!initialState.activeProject) throw new Error("Expected the initial project fixture");
+
+    const initialResult = await client.callTool({ name: "get_active_project" });
+    expect(appStateSchema.parse(initialResult.structuredContent)).toEqual(initialState);
+
+    const secondRepositoryRoot = join(temporaryRoot, "repository-two");
+    await mkdir(join(secondRepositoryRoot, ".git"), { recursive: true });
+    const secondProject = await Effect.runPromise(
+      createProject(
+        { repositoryRoot: secondRepositoryRoot, idempotencyKey: "mcp-project-two" },
+        projectServices,
+      ),
+    );
+    const expectedState = await Effect.runPromise(getAppState(projectServices));
+    const eventCountBeforeReads = projectStore.database
+      .prepare("select count(*) from events")
+      .pluck()
+      .get();
+
+    const tools = await client.listTools();
+    expect(tools.tools.find(({ name }) => name === "list_projects")?.annotations).toMatchObject({
+      readOnlyHint: true,
+    });
+    expect(
+      tools.tools.find(({ name }) => name === "get_active_project")?.annotations,
+    ).toMatchObject({ readOnlyHint: true });
+
+    const listedResult = await client.callTool({ name: "list_projects" });
+    const activeResult = await client.callTool({ name: "get_active_project" });
+    const listed = projectCatalogSchema.parse(listedResult.structuredContent);
+    const active = appStateSchema.parse(activeResult.structuredContent);
+    const eventCountAfterReads = projectStore.database
+      .prepare("select count(*) from events")
+      .pluck()
+      .get();
+
+    expect(listed).toEqual({
+      projects: [initialState.activeProject, secondProject],
+      activeProjectId: secondProject.id,
+    });
+    expect(active).toEqual(expectedState);
+    expect(active.activeProject).toEqual(secondProject);
+    expect(eventCountAfterReads).toBe(eventCountBeforeReads);
+  });
+
+  it("keeps task discovery, context, mutations, and event reads inside the requested project", async () => {
+    const secondRepositoryRoot = join(temporaryRoot, "repository-two");
+    await mkdir(join(secondRepositoryRoot, ".git"), { recursive: true });
+    const secondProject = await Effect.runPromise(
+      createProject(
+        { repositoryRoot: secondRepositoryRoot, idempotencyKey: "mcp-scope-project-two" },
+        projectServices,
+      ),
+    );
+    await client.callTool({
+      name: "register_agent_run",
+      arguments: {
+        profileKey: "project-scope-agent",
+        displayName: "Project Scope Agent",
+        capabilities: ["typescript"],
+        idempotencyKey: "register-project-scope-agent",
+      },
+    });
+
+    const firstTaskResult = await client.callTool({
+      name: "create_task",
+      arguments: readyTaskArguments("Shared scope signal A", "create-project-a-scope-task", [
+        "typescript",
+      ]),
+    });
+    const secondTaskResult = await client.callTool({
+      name: "create_task",
+      arguments: {
+        ...readyTaskArguments("Shared scope signal B", "create-project-b-scope-task", [
+          "typescript",
+        ]),
+        projectId: secondProject.id,
+        referencedPaths: [],
+      },
+    });
+    const firstTask = successfulTaskSchema.parse(firstTaskResult.structuredContent).task;
+    const secondTask = successfulTaskSchema.parse(secondTaskResult.structuredContent).task;
+
+    const [firstDiscoveryResult, secondDiscoveryResult] = await Promise.all([
+      client.callTool({ name: "find_work", arguments: { projectId, limit: 20 } }),
+      client.callTool({
+        name: "find_work",
+        arguments: { projectId: secondProject.id, limit: 20 },
+      }),
+    ]);
+    const firstDiscovery = successfulDiscoverySchema.parse(
+      firstDiscoveryResult.structuredContent,
+    ).page;
+    const secondDiscovery = successfulDiscoverySchema.parse(
+      secondDiscoveryResult.structuredContent,
+    ).page;
+    expect(firstDiscovery.candidates.map(({ id }) => id)).toContain(firstTask.id);
+    expect(firstDiscovery.candidates.map(({ id }) => id)).not.toContain(secondTask.id);
+    expect(secondDiscovery.candidates.map(({ id }) => id)).toContain(secondTask.id);
+    expect(secondDiscovery.candidates.map(({ id }) => id)).not.toContain(firstTask.id);
+
+    const searchResult = await client.callTool({
+      name: "search_tasks",
+      arguments: {
+        filter: {
+          schemaVersion: 1,
+          projectId,
+          search: { text: "shared scope signal", mode: "all" },
+        },
+        limit: 20,
+      },
+    });
+    const searchPage = successfulTaskSearchSchema.parse(searchResult.structuredContent).page;
+    expect(searchPage.items.map(({ task }) => task.id)).toEqual([firstTask.id]);
+
+    const crossProjectContext = await client.callTool({
+      name: "get_task_context",
+      arguments: { projectId, taskId: secondTask.id },
+    });
+    expect(crossProjectContext).toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        error: { type: "TaskNotFoundError", taskId: secondTask.id },
+      },
+    });
+
+    const crossProjectComment = await client.callTool({
+      name: "add_comment",
+      arguments: {
+        entryId: "cross-project-comment",
+        projectId,
+        taskId: secondTask.id,
+        content: activityContent("This entry must not cross project scope."),
+        expectedTaskVersion: secondTask.version,
+        idempotencyKey: "cross-project-comment",
+      },
+    });
+    expect(crossProjectComment).toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        error: { type: "TaskNotFoundError", taskId: secondTask.id },
+      },
+    });
+    expect(
+      projectStore.database
+        .prepare("select count(*) from activity_entries where id = ?")
+        .pluck()
+        .get("cross-project-comment"),
+    ).toBe(0);
+
+    const tools = await client.listTools();
+    const readEventsTool = tools.tools.find(({ name }) => name === "read_events");
+    expect(readEventsTool?.inputSchema).toMatchObject({
+      required: expect.arrayContaining(["projectId"]),
+    });
+    const unscopedEventsResult = await client.callTool({
+      name: "read_events",
+      arguments: { afterCursor: 0, limit: 200 },
+    });
+    expect(unscopedEventsResult.isError).toBe(true);
+    expect(unscopedEventsResult.content).toEqual([
+      expect.objectContaining({
+        type: "text",
+        text: expect.stringContaining("projectId"),
+      }),
+    ]);
+    const firstEventsResult = await client.callTool({
+      name: "read_events",
+      arguments: { projectId, afterCursor: 0, limit: 200 },
+    });
+    const firstEvents = successfulActivityEventsSchema.parse(firstEventsResult.structuredContent)
+      .payload.events;
+    expect(firstEvents.length).toBeGreaterThan(0);
+    expect(firstEvents.every((event) => event.projectId === projectId)).toBe(true);
+    expect(firstEvents.some((event) => event.entity.id === firstTask.id)).toBe(true);
+    expect(firstEvents.some((event) => event.entity.id === secondTask.id)).toBe(false);
+  });
+});
 
 function persistedLeaseState(leaseId: string) {
   return projectStore.database

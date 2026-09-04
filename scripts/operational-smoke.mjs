@@ -375,7 +375,7 @@ async function verifyBrowserResponse(response) {
   return html;
 }
 
-async function initializeMcp(origin) {
+async function initializeMcp(origin, expectedCatalog) {
   const transport = new StreamableHTTPClientTransport(new URL(`${origin}/api/mcp`));
   const client = new Client({ name: "helm-operational-smoke", version: "1.0.0" });
 
@@ -397,6 +397,34 @@ async function initializeMcp(origin) {
       throw new Error("The MCP initialize response did not establish a server session.");
     }
     await client.ping({ timeout: requestTimeoutMilliseconds });
+    if (expectedCatalog) {
+      const expectedProject = expectedCatalog.activeProject;
+      const [catalogResult, activeResult] = await Promise.all([
+        client.callTool({ name: "list_projects" }),
+        client.callTool({ name: "get_active_project" }),
+      ]);
+      const catalog = catalogResult.structuredContent;
+      const activeState = activeResult.structuredContent;
+      if (
+        !catalog ||
+        catalog.activeProjectId !== expectedProject.id ||
+        !Array.isArray(catalog.projects) ||
+        catalog.projects.length !== expectedCatalog.projects.length ||
+        catalog.projects.some(
+          (project, index) => project.id !== expectedCatalog.projects[index]?.id,
+        )
+      ) {
+        throw new Error("MCP did not restore the persisted project catalog after restart.");
+      }
+      if (
+        !activeState ||
+        activeState.activeProject?.id !== expectedProject.id ||
+        activeState.activeProjectVersion !== expectedCatalog.activeProjectVersion ||
+        activeState.theme !== "dark"
+      ) {
+        throw new Error("MCP did not restore the persisted active project after restart.");
+      }
+    }
   } finally {
     try {
       if (transport.sessionId) {
@@ -413,13 +441,40 @@ async function initializeMcp(origin) {
   }
 }
 
-function persistDarkTheme(databasePath) {
+function persistProjectPreferences(databasePath, repositoryRoots) {
   const database = new Database(databasePath);
   try {
-    const result = database.prepare("update preferences set theme = 'dark' where id = 1").run();
+    const now = new Date().toISOString();
+    const projects = repositoryRoots.map((repositoryRoot, index) => ({
+      id: `operational-smoke-project-${index + 1}`,
+      sequence: index + 1,
+      name: `operational-smoke-repository-${index + 1}`,
+      repositoryRoot,
+      reviewMode: "required",
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    }));
+    const insertProject = database.prepare(
+      `insert into projects (
+          id, sequence, name, repository_root, review_mode, version, created_at, updated_at
+        ) values (
+          @id, @sequence, @name, @repositoryRoot, @reviewMode, @version, @createdAt, @updatedAt
+        )`,
+    );
+    for (const project of projects) insertProject.run(project);
+    const activeProject = projects[0];
+    const result = database
+      .prepare(
+        `update preferences
+         set active_project_id = ?, active_project_version = 3, theme = 'dark', updated_at = ?
+         where id = 1`,
+      )
+      .run(activeProject.id, now);
     if (result.changes !== 1) {
       throw new Error("The migrated database did not contain Helm's preference projection.");
     }
+    return { activeProject, activeProjectVersion: 3, projects };
   } finally {
     database.close();
   }
@@ -427,6 +482,13 @@ function persistDarkTheme(databasePath) {
 
 const temporaryRoot = mkdtempSync(join(tmpdir(), "helm-operational-smoke-"));
 const databasePath = join(temporaryRoot, "nested", "data", "helm.db");
+const repositoryRoots = [
+  join(temporaryRoot, "operational-smoke-repository-1"),
+  join(temporaryRoot, "operational-smoke-repository-2"),
+];
+for (const repositoryRoot of repositoryRoots) {
+  mkdirSync(join(repositoryRoot, ".git"), { recursive: true });
+}
 const environment = {
   ...process.env,
   DATABASE_URL: databasePath,
@@ -437,6 +499,7 @@ const environment = {
 let helmProcess;
 let port;
 let failure;
+let persistedProject;
 const signalHandlers = new Map(
   ["SIGINT", "SIGTERM"].map((signal) => [signal, () => interruptSmoke(signal)]),
 );
@@ -487,7 +550,7 @@ try {
     helmProcess = undefined;
   });
 
-  persistDarkTheme(databasePath);
+  persistedProject = persistProjectPreferences(databasePath, repositoryRoots);
 
   await runStep("direct launcher restart and persistence", async () => {
     helmProcess = startHelm(environment, {
@@ -502,6 +565,10 @@ try {
     if (productionBuildStatus() !== "current") {
       throw new Error("The production build manifest was not current after startup rebuilt it.");
     }
+  });
+
+  await runStep("MCP project persistence", async () => {
+    await initializeMcp(origin, persistedProject);
   });
 
   await runStep("direct production shutdown", async () => {

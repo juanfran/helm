@@ -272,10 +272,14 @@ const reportProgressInputSchema = createAgentActivityEntryInputSchema.options[0]
 const listTaskEntriesInputSchema = listActivityEntriesInputSchema
   .omit({ entryIds: true })
   .required({ taskId: true });
-const readForwardEventsInputSchema = readActivityEventsInputSchema.omit({
-  direction: true,
-  beforeCursor: true,
-});
+const readForwardEventsInputSchema = readActivityEventsInputSchema
+  .omit({
+    direction: true,
+    beforeCursor: true,
+  })
+  .extend({
+    projectId: z.string().trim().min(1),
+  });
 
 function activityToolOutputSchema<TPayload extends z.ZodType>(payload: TPayload) {
   return {

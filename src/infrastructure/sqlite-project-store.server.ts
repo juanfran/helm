@@ -9,9 +9,11 @@ import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { Effect } from "effect";
 
 import {
+  ActiveProjectVersionConflictError,
   DuplicateRepositoryRootError,
   IdempotencyConflictError,
   ProjectAuthorizationError,
+  ProjectNotFoundError,
   ProjectPersistenceError,
   ProjectVersionConflictError,
   type ProjectCommandError,
@@ -22,6 +24,7 @@ import type {
   AppState,
   CreateProjectInput,
   Project,
+  SelectActiveProjectInput,
   SetProjectReviewModeInput,
   SetThemeInput,
 } from "../domain/projects";
@@ -33,6 +36,8 @@ const PREFERENCES_ID = 1;
 const LOCAL_HUMAN_ID = "local-human";
 
 type DrizzleDatabase = ReturnType<typeof drizzle<typeof schema>>;
+type DrizzleTransaction = Parameters<Parameters<DrizzleDatabase["transaction"]>[0]>[0];
+type DatabaseSession = DrizzleDatabase | DrizzleTransaction;
 
 export type SqliteProjectStore = ProjectStore & {
   readonly database: Database.Database;
@@ -51,7 +56,7 @@ function persistenceError(error: unknown) {
   });
 }
 
-function readAppState(db: DrizzleDatabase): AppState {
+function readAppState(db: DatabaseSession): AppState {
   const [row] = db
     .select({ preference: preferences, project: projects })
     .from(preferences)
@@ -62,6 +67,7 @@ function readAppState(db: DrizzleDatabase): AppState {
 
   return {
     activeProject: row?.project ?? null,
+    activeProjectVersion: row?.preference.activeProjectVersion ?? 0,
     theme: row?.preference.theme ?? "system",
   };
 }
@@ -88,6 +94,7 @@ export function createSqliteProjectStore(
     .values({
       id: PREFERENCES_ID,
       activeProjectId: null,
+      activeProjectVersion: 0,
       theme: "system",
       updatedAt: new Date().toISOString(),
     })
@@ -111,98 +118,111 @@ export function createSqliteProjectStore(
     createAndSelect(input: CreateProjectInput, repository: RepositoryDetails) {
       return Effect.try({
         try: () =>
-          db.transaction((tx) => {
-            const hash = inputHash("project.create", {
-              repositoryRoot: repository.canonicalRoot,
-            });
-            const [existingRequest] = tx
-              .select()
-              .from(idempotencyRecords)
-              .where(eq(idempotencyRecords.key, input.idempotencyKey))
-              .limit(1)
-              .all();
+          db.transaction(
+            (tx) => {
+              const hash = inputHash("project.create", {
+                repositoryRoot: repository.canonicalRoot,
+              });
+              const [existingRequest] = tx
+                .select()
+                .from(idempotencyRecords)
+                .where(eq(idempotencyRecords.key, input.idempotencyKey))
+                .limit(1)
+                .all();
 
-            if (existingRequest) {
-              if (
-                existingRequest.command !== "project.create" ||
-                existingRequest.inputHash !== hash
-              ) {
-                throw new IdempotencyConflictError({
-                  key: input.idempotencyKey,
-                  message: "That idempotency key was already used for a different command.",
+              if (existingRequest) {
+                if (
+                  existingRequest.command !== "project.create" ||
+                  existingRequest.inputHash !== hash
+                ) {
+                  throw new IdempotencyConflictError({
+                    key: input.idempotencyKey,
+                    message: "That idempotency key was already used for a different command.",
+                  });
+                }
+                return projectSchema.parse(JSON.parse(existingRequest.resultJson));
+              }
+
+              const [duplicate] = tx
+                .select({ id: projects.id })
+                .from(projects)
+                .where(eq(projects.repositoryRoot, repository.canonicalRoot))
+                .limit(1)
+                .all();
+              if (duplicate) {
+                throw new DuplicateRepositoryRootError({
+                  path: repository.canonicalRoot,
+                  message: "That repository is already registered in Helm.",
                 });
               }
-              return projectSchema.parse(JSON.parse(existingRequest.resultJson));
-            }
 
-            const [duplicate] = tx
-              .select({ id: projects.id })
-              .from(projects)
-              .where(eq(projects.repositoryRoot, repository.canonicalRoot))
-              .limit(1)
-              .all();
-            if (duplicate) {
-              throw new DuplicateRepositoryRootError({
-                path: repository.canonicalRoot,
-                message: "That repository is already registered in Helm.",
-              });
-            }
-
-            const [sequenceResult] = tx
-              .select({ value: max(projects.sequence) })
-              .from(projects)
-              .all();
-            const now = new Date().toISOString();
-            const project: Project = {
-              id: randomUUID(),
-              sequence: (sequenceResult?.value ?? 0) + 1,
-              name: repository.name,
-              repositoryRoot: repository.canonicalRoot,
-              reviewMode: "required",
-              version: 1,
-              createdAt: now,
-              updatedAt: now,
-            };
-
-            tx.insert(projects).values(project).run();
-            tx.update(preferences)
-              .set({ activeProjectId: project.id, updatedAt: now })
-              .where(eq(preferences.id, PREFERENCES_ID))
-              .run();
-            tx.insert(events)
-              .values({
-                projectId: project.id,
-                kind: "project.created",
-                importance: importanceForEventKind("project.created"),
-                actorType: "human",
-                actorId: LOCAL_HUMAN_ID,
-                entityType: "project",
-                entityId: project.id,
-                payloadJson: JSON.stringify({
-                  name: project.name,
-                  repositoryRoot: project.repositoryRoot,
-                  selected: true,
-                }),
-                changesJson: JSON.stringify(
-                  normalizeEventChangeHints({
-                    projectIds: [project.id],
-                    scopes: ["projects", "preferences"],
-                  }),
-                ),
-                occurredAt: now,
-              })
-              .run();
-            tx.insert(idempotencyRecords)
-              .values({
-                key: input.idempotencyKey,
-                command: "project.create",
-                inputHash: hash,
-                resultJson: JSON.stringify(project),
+              const [sequenceResult] = tx
+                .select({ value: max(projects.sequence) })
+                .from(projects)
+                .all();
+              const now = new Date().toISOString();
+              const project: Project = {
+                id: randomUUID(),
+                sequence: (sequenceResult?.value ?? 0) + 1,
+                name: repository.name,
+                repositoryRoot: repository.canonicalRoot,
+                reviewMode: "required",
+                version: 1,
                 createdAt: now,
-              })
-              .run();
-            return project;
-          }),
+                updatedAt: now,
+              };
+
+              const preference = tx
+                .select()
+                .from(preferences)
+                .where(eq(preferences.id, PREFERENCES_ID))
+                .limit(1)
+                .get();
+              if (!preference) throw new Error("Helm preferences are unavailable.");
+              const activeProjectVersion = preference.activeProjectVersion + 1;
+
+              tx.insert(projects).values(project).run();
+              tx.update(preferences)
+                .set({ activeProjectId: project.id, activeProjectVersion, updatedAt: now })
+                .where(eq(preferences.id, PREFERENCES_ID))
+                .run();
+              tx.insert(events)
+                .values({
+                  projectId: project.id,
+                  kind: "project.created",
+                  importance: importanceForEventKind("project.created"),
+                  actorType: "human",
+                  actorId: LOCAL_HUMAN_ID,
+                  entityType: "project",
+                  entityId: project.id,
+                  payloadJson: JSON.stringify({
+                    name: project.name,
+                    repositoryRoot: project.repositoryRoot,
+                    selected: true,
+                    activeProjectVersion,
+                  }),
+                  changesJson: JSON.stringify(
+                    normalizeEventChangeHints({
+                      projectIds: [project.id],
+                      scopes: ["projects", "preferences"],
+                    }),
+                  ),
+                  occurredAt: now,
+                })
+                .run();
+              tx.insert(idempotencyRecords)
+                .values({
+                  key: input.idempotencyKey,
+                  command: "project.create",
+                  inputHash: hash,
+                  resultJson: JSON.stringify(project),
+                  createdAt: now,
+                })
+                .run();
+              return project;
+            },
+            { behavior: "immediate" },
+          ),
         catch: (error): ProjectCommandError => {
           if (
             error instanceof DuplicateRepositoryRootError ||
@@ -215,6 +235,153 @@ export function createSqliteProjectStore(
               path: repository.canonicalRoot,
               message: "That repository is already registered in Helm.",
             });
+          }
+          return persistenceError(error);
+        },
+      });
+    },
+    selectActiveProject(input: SelectActiveProjectInput, actor: ActivityActor) {
+      return Effect.try({
+        try: () =>
+          db.transaction(
+            (tx) => {
+              if (actor.type !== "human") {
+                throw new ProjectAuthorizationError({
+                  message: "Only the local human can select the active project.",
+                });
+              }
+              const command = "project.select";
+              const hash = inputHash(command, {
+                projectId: input.projectId,
+                expectedVersion: input.expectedVersion,
+              });
+              const existingRequest = tx
+                .select()
+                .from(idempotencyRecords)
+                .where(eq(idempotencyRecords.key, input.idempotencyKey))
+                .limit(1)
+                .get();
+              if (existingRequest) {
+                if (existingRequest.command !== command || existingRequest.inputHash !== hash) {
+                  throw new IdempotencyConflictError({
+                    key: input.idempotencyKey,
+                    message: "That idempotency key was already used for a different command.",
+                  });
+                }
+                return appStateSchema.parse(JSON.parse(existingRequest.resultJson));
+              }
+
+              const targetProject = tx
+                .select()
+                .from(projects)
+                .where(eq(projects.id, input.projectId))
+                .limit(1)
+                .get();
+              if (!targetProject) {
+                throw new ProjectNotFoundError({
+                  projectId: input.projectId,
+                  message: "That project does not exist.",
+                });
+              }
+              const preference = tx
+                .select()
+                .from(preferences)
+                .where(eq(preferences.id, PREFERENCES_ID))
+                .limit(1)
+                .get();
+              if (!preference) throw new Error("Helm preferences are unavailable.");
+              if (preference.activeProjectVersion !== input.expectedVersion) {
+                throw new ActiveProjectVersionConflictError({
+                  projectId: input.projectId,
+                  expectedVersion: input.expectedVersion,
+                  currentVersion: preference.activeProjectVersion,
+                  changeSummary: `The active project selection is now version ${preference.activeProjectVersion}, with project ${preference.activeProjectId ?? "none"} selected.`,
+                  message: `Active project version conflict: expected ${input.expectedVersion}, current ${preference.activeProjectVersion}.`,
+                });
+              }
+
+              const now = new Date().toISOString();
+              const activeProjectVersion = preference.activeProjectVersion + 1;
+              const update = tx
+                .update(preferences)
+                .set({
+                  activeProjectId: targetProject.id,
+                  activeProjectVersion,
+                  updatedAt: now,
+                })
+                .where(
+                  and(
+                    eq(preferences.id, PREFERENCES_ID),
+                    eq(preferences.activeProjectVersion, preference.activeProjectVersion),
+                  ),
+                )
+                .run();
+              if (update.changes !== 1) {
+                const currentVersion =
+                  tx
+                    .select({ version: preferences.activeProjectVersion })
+                    .from(preferences)
+                    .where(eq(preferences.id, PREFERENCES_ID))
+                    .limit(1)
+                    .get()?.version ?? preference.activeProjectVersion;
+                throw new ActiveProjectVersionConflictError({
+                  projectId: input.projectId,
+                  expectedVersion: input.expectedVersion,
+                  currentVersion,
+                  changeSummary: `The active project selection is now version ${currentVersion}.`,
+                  message: `Active project version conflict: expected ${input.expectedVersion}, current ${currentVersion}.`,
+                });
+              }
+
+              const state = readAppState(tx);
+              tx.insert(events)
+                .values({
+                  projectId: targetProject.id,
+                  kind: "project.selected",
+                  importance: importanceForEventKind("project.selected"),
+                  actorType: actor.type,
+                  actorId: actor.id,
+                  entityType: "preferences",
+                  entityId: String(PREFERENCES_ID),
+                  payloadJson: JSON.stringify({
+                    previousProjectId: preference.activeProjectId,
+                    projectId: targetProject.id,
+                    previousVersion: preference.activeProjectVersion,
+                    version: activeProjectVersion,
+                  }),
+                  changesJson: JSON.stringify(
+                    normalizeEventChangeHints({
+                      projectIds: [
+                        ...(preference.activeProjectId ? [preference.activeProjectId] : []),
+                        targetProject.id,
+                      ],
+                      scopes: ["projects", "preferences"],
+                    }),
+                  ),
+                  occurredAt: now,
+                })
+                .run();
+              tx.insert(idempotencyRecords)
+                .values({
+                  key: input.idempotencyKey,
+                  command,
+                  inputHash: hash,
+                  resultJson: JSON.stringify(state),
+                  createdAt: now,
+                })
+                .run();
+              return state;
+            },
+            { behavior: "immediate" },
+          ),
+        catch: (error): ProjectCommandError => {
+          if (
+            error instanceof ActiveProjectVersionConflictError ||
+            error instanceof IdempotencyConflictError ||
+            error instanceof ProjectAuthorizationError ||
+            error instanceof ProjectNotFoundError
+          ) {
+            return error;
           }
           return persistenceError(error);
         },
@@ -259,6 +426,7 @@ export function createSqliteProjectStore(
               .all();
             const state: AppState = {
               activeProject: stateRow?.project ?? null,
+              activeProjectVersion: stateRow?.preference.activeProjectVersion ?? 0,
               theme: stateRow?.preference.theme ?? "system",
             };
             tx.insert(events)
@@ -338,6 +506,7 @@ export function createSqliteProjectStore(
                   projectId: input.projectId,
                   expectedVersion: input.expectedVersion,
                   currentVersion: 0,
+                  changeSummary: "The project no longer exists.",
                   message: "That project does not exist.",
                 });
               }
@@ -346,6 +515,7 @@ export function createSqliteProjectStore(
                   projectId: project.id,
                   expectedVersion: input.expectedVersion,
                   currentVersion: project.version,
+                  changeSummary: `Project #${project.sequence} is now version ${project.version} with review mode ${project.reviewMode}.`,
                   message: `Project version conflict: expected ${input.expectedVersion}, current ${project.version}.`,
                 });
               }
@@ -372,6 +542,7 @@ export function createSqliteProjectStore(
                   projectId: project.id,
                   expectedVersion: input.expectedVersion,
                   currentVersion,
+                  changeSummary: `The project is now version ${currentVersion}.`,
                   message: `Project version conflict: expected ${input.expectedVersion}, current ${currentVersion}.`,
                 });
               }

@@ -7,7 +7,7 @@ export type EventSourceLike = {
 };
 
 export type ProjectEventSubscriptionOptions = {
-  projectId: string;
+  projectId: string | null;
   afterCursor: number;
   onEvent: (event: ProjectEvent) => void | Promise<void>;
   onCursor?: (cursor: number) => void;
@@ -32,8 +32,10 @@ function asError(error: unknown) {
   return error instanceof Error ? error : new Error("Project event projection failed.");
 }
 
-export function projectEventStreamUrl(projectId: string, afterCursor: number) {
-  const query = new URLSearchParams({ projectId, after: String(afterCursor) });
+export function projectEventStreamUrl(projectId: string | null, afterCursor: number) {
+  const query = new URLSearchParams();
+  if (projectId !== null) query.set("projectId", projectId);
+  query.set("after", String(afterCursor));
   return `/api/events?${query.toString()}`;
 }
 
@@ -98,7 +100,7 @@ export function subscribeToProjectEvents({
         return;
       }
       const event = parsed.data;
-      if (event.projectId !== projectId) {
+      if (projectId !== null && event.projectId !== projectId) {
         reportError(new Error("Helm received a project event for the wrong project."));
         return;
       }
