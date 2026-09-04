@@ -9,6 +9,7 @@ import { z } from "zod";
 import { Button } from "../components/ui/button";
 import { RouteErrorState, RoutePendingState } from "../components/route-state";
 import type { AppState, Theme } from "../domain/projects";
+import { searchTasksInputSchema } from "../domain/task-filters";
 import { subscribeToProjectEvents } from "../features/activity/project-event-subscription";
 import { projectImportantEvent } from "../features/activity/project-event-projector";
 import { getImportantProjectEventCollection } from "../features/activity/activity-collection";
@@ -24,6 +25,7 @@ import { BulkTaskControls } from "../features/tasks/bulk-task-controls";
 import {
   emptyTaskSearchParams,
   taskSearchCursorParamSchema,
+  taskSearchResultFields,
 } from "../features/tasks/task-search-params";
 import { TaskSearchResults } from "../features/tasks/task-search-results";
 import { taskTagsQueryOptions } from "../features/tasks/task-tags-query";
@@ -68,12 +70,13 @@ export const Route = createFileRoute("/views/$viewId")({
       },
     });
     const view = await readSavedView({ data: { projectId, savedViewId: params.viewId } });
-    const input = {
+    const input = searchTasksInputSchema.parse({
       filter: view.definition.filter,
       order: view.definition.order,
+      fields: [...taskSearchResultFields],
       limit: 100,
       cursor: deps.cursor,
-    };
+    });
     const collection = getTaskSearchCollection(context.queryClient, input);
     const importantEventCollection = getImportantProjectEventCollection(
       context.queryClient,

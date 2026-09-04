@@ -5,6 +5,7 @@ import {
   taskFilterFromSearchParams,
   taskSearchInputFromParams,
   taskSearchParamsSchema,
+  taskSearchResultFields,
 } from "./task-search-params";
 
 describe("task search route parameters", () => {
@@ -22,6 +23,7 @@ describe("task search route parameters", () => {
     });
     expect(taskSearchInputFromParams("project-1", emptyTaskSearchParams)).toMatchObject({
       filter: { schemaVersion: 1, projectId: "project-1", archiveState: "exclude" },
+      fields: taskSearchResultFields,
       limit: 100,
       cursor: null,
     });

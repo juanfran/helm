@@ -9,12 +9,14 @@ import {
 } from "./customization";
 import {
   capabilityNameSchema,
+  taskCandidateFieldSchema,
+  taskCandidateSchema,
   taskDateSchema,
   taskLifecycleSchema,
   taskPrioritySchema,
   taskRelationTypeSchema,
-  taskSchema,
   type Task,
+  type TaskCandidateField,
   type TaskRelation,
 } from "./tasks";
 
@@ -113,8 +115,14 @@ export const taskFilterDateClauseSchema = z.discriminatedUnion("operator", [
   dateBetweenClauseSchema,
   boundedDateComparisonClause("on_or_after"),
   boundedDateComparisonClause("on_or_before"),
-  z.strictObject({ field: taskFilterDateFieldSchema, operator: z.literal("present") }),
-  z.strictObject({ field: taskFilterDateFieldSchema, operator: z.literal("missing") }),
+  z.strictObject({
+    field: taskFilterDateFieldSchema,
+    operator: z.literal("present"),
+  }),
+  z.strictObject({
+    field: taskFilterDateFieldSchema,
+    operator: z.literal("missing"),
+  }),
 ]);
 export type TaskFilterDateClause = z.infer<typeof taskFilterDateClauseSchema>;
 
@@ -275,10 +283,36 @@ export type TaskSearchOrder = z.infer<typeof taskSearchOrderSchema>;
 
 export const taskSearchOrderListSchema = z.array(taskSearchOrderSchema).min(1).max(10);
 
+/**
+ * Optional task-candidate groups available to bounded search callers.
+ *
+ * - `descriptionText`, `expectedOutcome`, `acceptanceCriteria`, `agentContext`, and `checklist`
+ *   each add their same-named property.
+ * - `relations` adds `upstreamRelations` and `downstreamRelations`.
+ * - `customFields`, `reviewPolicy`, and `referencedPaths` each add their same-named property.
+ * - `timestamps` adds `archivedAt`, `createdAt`, and `updatedAt`.
+ *
+ * Core candidate identity, planning, assignment, and eligibility fields are always present.
+ */
+export const taskSearchFieldSchema = taskCandidateFieldSchema;
+export type TaskSearchField = TaskCandidateField;
+
+export const completeTaskSearchFields: TaskSearchField[] = [
+  ...taskSearchFieldSchema.options,
+].toSorted((left, right) => left.localeCompare(right));
+export const taskSearchFieldListSchema = z
+  .array(taskSearchFieldSchema)
+  .max(taskSearchFieldSchema.options.length)
+  .default([])
+  .describe(
+    "Optional candidate groups: descriptionText, expectedOutcome, acceptanceCriteria, agentContext, checklist, relations (upstreamRelations and downstreamRelations), customFields, reviewPolicy, referencedPaths, and timestamps (archivedAt, createdAt, and updatedAt).",
+  );
+
 export const searchTasksInputSchema = z
   .strictObject({
     filter: taskFilterV1Schema,
     order: taskSearchOrderListSchema.optional(),
+    fields: taskSearchFieldListSchema,
     limit: z.number().int().positive().max(100).default(50),
     cursor: z.string().trim().min(1).max(4_000).nullable().default(null),
   })
@@ -303,8 +337,15 @@ export const taskSearchMatchedSourceSchema = z.enum([
 ]);
 export type TaskSearchMatchedSource = z.infer<typeof taskSearchMatchedSourceSchema>;
 
+/** A compact search row; optional properties are present only when their field group is selected. */
+export const taskSearchCandidateSchema = taskCandidateSchema.extend({
+  notBefore: taskDateSchema.nullable(),
+  archivedAt: timestampSchema.nullable().optional(),
+});
+export type TaskSearchCandidate = z.infer<typeof taskSearchCandidateSchema>;
+
 export const taskSearchItemSchema = z.strictObject({
-  task: taskSchema,
+  task: taskSearchCandidateSchema,
   relevance: z.number().finite().nullable(),
   matchedSources: z.array(taskSearchMatchedSourceSchema).max(5),
 });
@@ -325,6 +366,12 @@ export const compiledTaskSearchPageSchema = z.compile(taskSearchPageSchema);
 
 function sortedUnique<T extends string>(values: readonly T[]): T[] {
   return [...new Set(values)].toSorted((left, right) => left.localeCompare(right));
+}
+
+export function canonicalizeTaskSearchFields(
+  input: readonly TaskSearchField[] | undefined,
+): TaskSearchField[] {
+  return sortedUnique(taskSearchFieldListSchema.parse(input));
 }
 
 function uniqueByCanonicalJson<T>(values: readonly T[]) {
@@ -377,7 +424,10 @@ function canonicalizeCustomFieldClause(
   }
   return {
     ...clause,
-    value: { type: "text", value: normalizeCustomFieldText(clause.value.value) },
+    value: {
+      type: "text",
+      value: normalizeCustomFieldText(clause.value.value),
+    },
   };
 }
 
@@ -409,7 +459,9 @@ export function canonicalizeTaskFilter(input: unknown): TaskFilterV1 {
         }
       : {}),
     ...(filter.dates
-      ? { dates: uniqueByCanonicalJson(filter.dates.map(canonicalizeDateClause)) }
+      ? {
+          dates: uniqueByCanonicalJson(filter.dates.map(canonicalizeDateClause)),
+        }
       : {}),
     ...(filter.relations
       ? {
@@ -531,7 +583,10 @@ function relationCandidates(
   return [
     ...(direction === "downstream"
       ? []
-      : task.upstreamRelations.map((relation) => ({ relation, direction: "upstream" as const }))),
+      : task.upstreamRelations.map((relation) => ({
+          relation,
+          direction: "upstream" as const,
+        }))),
     ...(direction === "upstream"
       ? []
       : task.downstreamRelations.map((relation) => ({

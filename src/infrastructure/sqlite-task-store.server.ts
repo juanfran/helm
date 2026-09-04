@@ -2402,7 +2402,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
               .from(tasks)
               .where(eq(tasks.projectId, input.projectId))
               .all();
-            const now = new Date().toISOString();
+            const now = context.now;
             const sequence = (sequenceResult?.value ?? 0) + 1;
             const planning = taskPlanningForCreate(input, sequence);
             const task: Task = {
@@ -2520,7 +2520,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
               input.referencedPaths,
             );
 
-            const now = new Date().toISOString();
+            const now = context.now;
             tx.update(tasks)
               .set({
                 title: input.title,
@@ -2600,7 +2600,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
               });
             }
 
-            const now = new Date().toISOString();
+            const now = context.now;
             tx.update(tasks)
               .set({
                 reviewModeOverride: input.reviewModeOverride,
@@ -2650,7 +2650,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
               });
             }
 
-            const now = new Date().toISOString();
+            const now = context.now;
             tx.update(tasks)
               .set({
                 priority: input.priority,
@@ -3464,7 +3464,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
         catch: commandError,
       });
     },
-    createRelation(input: CreateTaskRelationInput, actor: Actor) {
+    createRelation(input: CreateTaskRelationInput, actor: Actor, context: TaskEvaluationContext) {
       return Effect.try({
         try: () =>
           db.transaction((tx) => {
@@ -3540,7 +3540,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
               }
             }
 
-            const now = new Date().toISOString();
+            const now = context.now;
             const relationId = randomUUID();
             tx.insert(taskRelations)
               .values({
@@ -3591,7 +3591,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
               });
             }
 
-            const now = new Date().toISOString();
+            const now = context.now;
             const activeLease = tx
               .select()
               .from(leases)

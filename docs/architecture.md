@@ -176,6 +176,20 @@ Adapters run one Effect program and translate known error tags. Unknown defects 
 
 SQLite enables foreign keys, WAL mode, and a bounded busy timeout. Writes remain short. Search uses SQLite full-text indexes maintained in the same transaction as task content.
 
+Task search compiles structured filters, eligibility, and every selected order into a scalar-only SQL
+candidate set. A versioned keyset cursor then selects at most `limit + 1` rows before task content or
+related facts are loaded. Claims, dependencies, manual blockers, tags, capabilities, relations, custom
+fields, and referenced paths are hydrated in bounded page-wide queries using JSON array parameters, so
+query cost does not grow through per-task SQL fanout or SQLite bind limits. Cursor identity includes the
+canonical filter, order, selected field groups, project revision, evaluation date, and normalized agent
+capabilities. Text `title` and `id` ties use SQLite `BINARY` ordering for deterministic bytewise behavior
+across machines; nullable values keep an explicit direction-aware null rank.
+
+The representative query budget is a 5,000-task project with four priority lanes, 37 manual positions,
+and mixed present/missing due dates. A warm compact page of 100 candidates must stay at or below 20 SQL
+statements, 64 KiB of JSON, and 750 ms p95 in the integration regression. The same regression traverses
+through the final keyset page to prove that deep pagination neither skips nor duplicates tasks.
+
 ## Presentation system
 
 StyleX is the only styling authority for components and design tokens. Global CSS is limited to document normalization and generated StyleX output.

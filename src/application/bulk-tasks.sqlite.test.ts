@@ -432,6 +432,46 @@ describe("SQLite bulk task commands", () => {
     );
   });
 
+  it("rejects an over-limit filter from the scalar selection count before task hydration", async () => {
+    await Promise.all(
+      Array.from({ length: 201 }, (_, index) =>
+        Effect.runPromise(
+          createTask(taskInput({ title: `Bounded bulk target ${index + 1}` }), human, taskServices),
+        ),
+      ),
+    );
+    const intent = {
+      schemaVersion: 1 as const,
+      kind: "update" as const,
+      projectId,
+      reason: "Exercise the bounded filter guard",
+      selection: {
+        type: "filter" as const,
+        filter: { schemaVersion: 1 as const, projectId },
+      },
+      patch: { priority: "high" as const },
+    };
+
+    const prepare = vi.spyOn(projectStore.database, "prepare");
+    let preview;
+    let statementCount = 0;
+    try {
+      preview = await Effect.runPromise(previewBulkTasks(intent, human, bulkServices));
+    } finally {
+      statementCount = prepare.mock.calls.length;
+      prepare.mockRestore();
+    }
+
+    expect(statementCount).toBeLessThanOrEqual(30);
+    expect(preview).toMatchObject({
+      matchedCount: 201,
+      affectedCount: 0,
+      executable: false,
+      targets: [],
+      failures: [{ code: "selection_limit" }],
+    });
+  });
+
   it("rejects stale target versions and requires explicit exclusive-tag removal", async () => {
     const tagged = await Effect.runPromise(
       createTask(

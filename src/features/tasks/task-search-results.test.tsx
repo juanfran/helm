@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { taskSearchItemSchema, type TaskSearchItem } from "../../domain/task-filters";
-import { emptyRichTextDocument, type TaskLifecycle } from "../../domain/tasks";
+import type { TaskLifecycle } from "../../domain/tasks";
 import { TaskSearchResults } from "./task-search-results";
 
 afterEach(cleanup);
@@ -21,17 +21,31 @@ function item(
       id,
       projectId: "project-1",
       sequence,
+      parentTaskId: null,
       title,
       lifecycle,
       priority: sequence === 1 ? "urgent" : "normal",
-      description: emptyRichTextDocument,
+      position: sequence,
+      notBefore: null,
+      dueAt: null,
+      size: null,
+      tags: [],
+      requiredCapabilities: [],
+      claim: null,
+      eligibility: {
+        claimable: lifecycle === "ready",
+        status: lifecycle === "ready" ? "claimable" : "not_ready",
+        reasons: [],
+        orderingExplanation: `Manual position ${sequence}.`,
+        missingCapabilities: [],
+        blockingTaskIds: [],
+      },
       descriptionText: "",
       expectedOutcome: "The task is complete.",
       acceptanceCriteria: "The result is verified.",
       agentContext: "",
       checklist: [],
       version: 1,
-      archivedAt: null,
       createdAt: "2026-09-04T10:00:00.000Z",
       updatedAt: "2026-09-04T10:00:00.000Z",
     },

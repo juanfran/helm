@@ -141,6 +141,7 @@ export interface TaskStore {
   createRelation(
     input: CreateTaskRelationInput,
     actor: Actor,
+    context: TaskEvaluationContext,
   ): Effect.Effect<TaskRelation, TaskCommandError>;
   archive(
     input: ArchiveTaskInput,
@@ -467,7 +468,7 @@ export function reopenTask(
 export function createTaskRelation(input: unknown, actor: Actor, services: TaskServices) {
   return Effect.flatMap(
     parseInput(() => compiledCreateTaskRelationInputSchema.parse(input)),
-    (parsed) => services.store.createRelation(parsed, actor),
+    (parsed) => services.store.createRelation(parsed, actor, evaluationContext(services)),
   );
 }
 

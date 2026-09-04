@@ -323,6 +323,63 @@ function schemaRootPropertyNames(schema: unknown): string[] {
 }
 
 describe("MCP project contract", () => {
+  it("persists MCP task mutations at the injected service-clock time", async () => {
+    await client.callTool({
+      name: "register_agent_run",
+      arguments: {
+        profileKey: "clock-contract-agent",
+        displayName: "Clock Contract Agent",
+        capabilities: ["typescript"],
+        idempotencyKey: "register-clock-contract-agent",
+      },
+    });
+
+    const firstCreatedAt = "2026-09-03T09:00:00.000Z";
+    now = firstCreatedAt;
+    const firstResult = await client.callTool({
+      name: "create_task",
+      arguments: readyTaskArguments("First clocked task", "mcp-clock-create-first", ["typescript"]),
+    });
+    const first = successfulTaskSchema.parse(firstResult.structuredContent).task;
+    expect(first).toMatchObject({
+      createdAt: firstCreatedAt,
+      updatedAt: firstCreatedAt,
+    });
+
+    const secondCreatedAt = "2026-09-03T09:01:00.000Z";
+    now = secondCreatedAt;
+    const secondResult = await client.callTool({
+      name: "create_task",
+      arguments: readyTaskArguments("Second clocked task", "mcp-clock-create-second", [
+        "typescript",
+      ]),
+    });
+    const second = successfulTaskSchema.parse(secondResult.structuredContent).task;
+    expect(second).toMatchObject({
+      createdAt: secondCreatedAt,
+      updatedAt: secondCreatedAt,
+    });
+
+    const relatedAt = "2026-09-03T09:02:00.000Z";
+    now = relatedAt;
+    const relationResult = await client.callTool({
+      name: "create_task_relation",
+      arguments: {
+        projectId,
+        sourceTaskId: first.id,
+        targetTaskId: second.id,
+        type: "related_to",
+        expectedSourceVersion: first.version,
+        expectedTargetVersion: second.version,
+        idempotencyKey: "mcp-clock-relate",
+      },
+    });
+    expect(relationResult.structuredContent).toMatchObject({
+      ok: true,
+      relation: { createdAt: relatedAt },
+    });
+  });
+
   it("lists projects and resolves the current browser project from an existing HTTP session", async () => {
     const initialState = await Effect.runPromise(getAppState(projectServices));
     if (!initialState.activeProject) throw new Error("Expected the initial project fixture");
@@ -628,9 +685,14 @@ describe("MCP shared task-query contract", () => {
 
     expect(searchTool).toMatchObject({
       annotations: { readOnlyHint: true },
+      description: expect.stringContaining("compact candidates"),
       inputSchema: {
         type: "object",
-        properties: { filter: expect.any(Object), order: expect.any(Object) },
+        properties: {
+          filter: expect.any(Object),
+          order: expect.any(Object),
+          fields: expect.objectContaining({ maxItems: 10 }),
+        },
         required: expect.arrayContaining(["filter"]),
       },
     });
@@ -733,7 +795,11 @@ describe("MCP shared task-query contract", () => {
     expect(page).toMatchObject({
       items: [
         {
-          task: { id: compatibleTask.id, eligibility: { status: "claimable" } },
+          task: {
+            id: compatibleTask.id,
+            notBefore: null,
+            eligibility: { status: "claimable" },
+          },
           matchedSources: expect.arrayContaining(["acceptance_criteria"]),
         },
       ],
@@ -741,6 +807,58 @@ describe("MCP shared task-query contract", () => {
       total: 1,
     });
     expect(page.items.map(({ task }) => task.id)).not.toContain(incompatibleTask.id);
+    expect(page.items[0]?.task).not.toHaveProperty("expectedOutcome");
+    expect(page.items[0]?.task).not.toHaveProperty("checklist");
+    expect(page.items[0]?.task).not.toHaveProperty("referencedPaths");
+    expect(page.items[0]?.task).not.toHaveProperty("createdAt");
+
+    const selectedSearchResult = await client.callTool({
+      name: "search_tasks",
+      arguments: {
+        filter,
+        fields: ["timestamps", "referencedPaths", "checklist", "expectedOutcome"],
+        limit: 10,
+      },
+    });
+    const selectedTask = successfulTaskSearchSchema.parse(selectedSearchResult.structuredContent)
+      .page.items[0]?.task;
+    expect(selectedTask).toMatchObject({
+      id: compatibleTask.id,
+      expectedOutcome: "Compatible query task is available.",
+      checklist: [{ id: "verify", text: "Verify Compatible query task", checked: false }],
+      referencedPaths: ["src/domain/tasks.ts"],
+      archivedAt: null,
+      createdAt: compatibleTask.createdAt,
+      updatedAt: compatibleTask.updatedAt,
+    });
+    expect(selectedTask).not.toHaveProperty("acceptanceCriteria");
+
+    const unknownField = await client.callTool({
+      name: "search_tasks",
+      arguments: { filter, fields: ["description"] },
+    });
+    expect(unknownField.isError).toBe(true);
+    expect(unknownField.content).toEqual([
+      expect.objectContaining({
+        type: "text",
+        text: expect.stringContaining("fields"),
+      }),
+    ]);
+
+    const tooManyFields = await client.callTool({
+      name: "search_tasks",
+      arguments: {
+        filter,
+        fields: Array.from({ length: 11 }, () => "timestamps"),
+      },
+    });
+    expect(tooManyFields.isError).toBe(true);
+    expect(tooManyFields.content).toEqual([
+      expect.objectContaining({
+        type: "text",
+        text: expect.stringContaining("fields"),
+      }),
+    ]);
 
     const malformedCursor = await client.callTool({
       name: "search_tasks",

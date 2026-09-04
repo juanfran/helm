@@ -109,6 +109,7 @@ type UpdateSelection = {
   readonly selected: readonly Task[];
   readonly requestedRows: ReadonlyMap<string, TaskRow | Task>;
   readonly requestedIds: readonly string[];
+  readonly matchedCount: number;
 };
 
 function hash(value: string) {
@@ -468,15 +469,23 @@ function updateSelection(
   context: BulkTaskEvaluationContext,
 ): UpdateSelection {
   if (intent.selection.type === "filter") {
-    const selected = resolveSqliteTaskQueryItems(database, intent.selection.filter, undefined, {
-      today: context.today,
-      now: context.now,
-      agentCapabilities: context.agentCapabilities,
-    }).items.map(({ task }) => task);
+    const result = resolveSqliteTaskQueryItems(
+      database,
+      intent.selection.filter,
+      undefined,
+      {
+        today: context.today,
+        now: context.now,
+        agentCapabilities: context.agentCapabilities,
+      },
+      { maxHydratedItems: MAX_BULK_UPDATE_TARGETS },
+    );
+    const selected = result.items.map(({ task }) => task);
     return {
       selected,
       requestedRows: new Map(selected.map((task) => [task.id, task])),
       requestedIds: selected.map(({ id }) => id),
+      matchedCount: result.total,
     };
   }
 
@@ -497,6 +506,7 @@ function updateSelection(
     selected: projections,
     requestedRows: rowsById,
     requestedIds: intent.selection.taskIds,
+    matchedCount: intent.selection.taskIds.length,
   };
 }
 
@@ -518,18 +528,18 @@ function updatePreviewAnalysis(
   if (!project) {
     topFailures.push(validationFailure("wrong_project", "The requested project does not exist."));
   }
-  if (selection.selected.length > MAX_BULK_UPDATE_TARGETS) {
+  if (selection.matchedCount > MAX_BULK_UPDATE_TARGETS) {
     topFailures.push(
       validationFailure(
         "selection_limit",
-        `The filter matched ${selection.selected.length} tasks; narrow it to ${MAX_BULK_UPDATE_TARGETS} or fewer.`,
+        `The filter matched ${selection.matchedCount} tasks; narrow it to ${MAX_BULK_UPDATE_TARGETS} or fewer.`,
       ),
     );
   }
 
   const updatePlans: UpdatePlan[] = [];
   const targets: BulkTaskPreviewTarget[] = [];
-  if (selection.selected.length <= MAX_BULK_UPDATE_TARGETS) {
+  if (selection.matchedCount <= MAX_BULK_UPDATE_TARGETS) {
     for (const taskId of selection.requestedIds) {
       const task = selectedById.get(taskId);
       if (task) {
@@ -632,9 +642,7 @@ function updatePreviewAnalysis(
       kind: "update",
       projectId: intent.projectId,
       matchedCount:
-        intent.selection.type === "ids"
-          ? intent.selection.taskIds.length
-          : selection.selected.length,
+        intent.selection.type === "ids" ? intent.selection.taskIds.length : selection.matchedCount,
       affectedCount,
       executable: allFailures.length === 0,
       targets,

@@ -746,6 +746,21 @@ export type TaskEvaluationContext = {
 
 export type TaskOrderingKey = Pick<Task, "priority" | "position" | "dueAt" | "sequence">;
 
+export type TaskEligibilityInput = Pick<
+  Task,
+  | "archivedAt"
+  | "lifecycle"
+  | "claim"
+  | "notBefore"
+  | "requiredCapabilities"
+  | "priority"
+  | "position"
+  | "dueAt"
+  | "sequence"
+> & {
+  readonly manualBlockers?: readonly { readonly id: string; readonly reason: string }[];
+};
+
 export type BlockingEdge = {
   readonly sourceTaskId: string;
   readonly targetTaskId: string;
@@ -771,7 +786,7 @@ export function taskOrderingExplanation(task: TaskOrderingKey) {
 }
 
 export function evaluateTaskEligibility(
-  task: Task,
+  task: TaskEligibilityInput,
   context: TaskEvaluationContext,
   blockingTaskIds: readonly string[],
   manualBlockers: readonly { id: string; reason: string }[] = task.manualBlockers ?? [],

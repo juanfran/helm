@@ -3,8 +3,10 @@ import { z } from "zod";
 import {
   canonicalizeTaskFilter,
   canonicalizeTaskSearchOrder,
+  searchTasksInputSchema,
   type SearchTasksInput,
   type TaskFilterV1,
+  type TaskSearchField,
 } from "../../domain/task-filters";
 import { capabilityNameSchema, taskLifecycleSchema, taskPrioritySchema } from "../../domain/tasks";
 
@@ -64,6 +66,9 @@ export type TaskSearchQueryParams = Omit<TaskSearchParams, "presentation">;
 
 export const emptyTaskSearchParams: TaskSearchParams = taskSearchParamsSchema.parse({});
 
+/** Optional candidate data rendered by both human search-result routes. */
+export const taskSearchResultFields = ["timestamps"] as const satisfies readonly TaskSearchField[];
+
 export function taskFilterFromSearchParams(projectId: string, search: TaskSearchQueryParams) {
   const filter: TaskFilterV1 = {
     schemaVersion: 1,
@@ -86,10 +91,11 @@ export function taskSearchInputFromParams(
   search: TaskSearchQueryParams,
 ): SearchTasksInput {
   const filter = taskFilterFromSearchParams(projectId, search);
-  return {
+  return searchTasksInputSchema.parse({
     filter,
     order: canonicalizeTaskSearchOrder(undefined, filter),
+    fields: [...taskSearchResultFields],
     limit: 100,
     cursor: search.cursor,
-  };
+  });
 }

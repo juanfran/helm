@@ -4,12 +4,14 @@ import { queryOptions, type QueryClient } from "@tanstack/react-query";
 
 import {
   canonicalizeTaskFilter,
+  canonicalizeTaskSearchFields,
   canonicalizeTaskSearchOrder,
   searchTasksInputSchema,
   stableCanonicalJson,
   taskSearchItemSchema,
   type SearchTasksInput,
   type TaskFilterV1,
+  type TaskSearchField,
   type TaskSearchOrder,
 } from "../../domain/task-filters";
 import { readTaskSearchPage } from "../../server/task-query-functions";
@@ -24,6 +26,7 @@ export type TaskSearchCollectionRow = z.infer<typeof taskSearchCollectionRowSche
 export type CanonicalTaskSearchInput = {
   filter: TaskFilterV1;
   order: TaskSearchOrder[];
+  fields: TaskSearchField[];
   limit: number;
   cursor: string | null;
 };
@@ -34,6 +37,7 @@ export function canonicalizeTaskSearchInput(input: SearchTasksInput): CanonicalT
   return {
     filter,
     order: canonicalizeTaskSearchOrder(parsed.order, filter),
+    fields: canonicalizeTaskSearchFields(parsed.fields),
     limit: parsed.limit,
     cursor: parsed.cursor,
   };

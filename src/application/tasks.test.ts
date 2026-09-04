@@ -27,6 +27,7 @@ import {
   releaseTaskLease,
   reopenTask,
   renewTaskLease,
+  setTaskReviewModeOverride,
   updateTaskPlanning,
 } from "./tasks";
 import {
@@ -468,6 +469,183 @@ afterEach(async () => {
 });
 
 describe("task application commands", () => {
+  it("persists the injected service clock across task and relation mutations", async () => {
+    const createdAt = "2026-09-03T08:00:00.000Z";
+    now = createdAt;
+    const source = await Effect.runPromise(
+      createTask(
+        backlogInput({
+          title: "Clocked source",
+          idempotencyKey: "clock-create-source",
+        }),
+        human,
+        taskServices,
+      ),
+    );
+    const target = await Effect.runPromise(
+      createTask(
+        backlogInput({
+          title: "Clocked target",
+          idempotencyKey: "clock-create-target",
+        }),
+        human,
+        taskServices,
+      ),
+    );
+    expect(source).toMatchObject({ createdAt, updatedAt: createdAt });
+
+    const preparedAt = "2026-09-03T08:01:00.000Z";
+    now = preparedAt;
+    const prepared = await Effect.runPromise(
+      prepareTask(
+        {
+          taskId: source.id,
+          title: source.title,
+          description: source.description,
+          expectedOutcome: "The injected clock owns command timestamps.",
+          acceptanceCriteria: "Every persisted timestamp matches the fixed service clock.",
+          agentContext: "Keep timestamps deterministic.",
+          checklist: [{ id: "verify-clock", text: "Inspect persisted rows", checked: false }],
+          expectedVersion: source.version,
+          idempotencyKey: "clock-prepare-source",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    expect(prepared.updatedAt).toBe(preparedAt);
+
+    const reviewPolicyAt = "2026-09-03T08:02:00.000Z";
+    now = reviewPolicyAt;
+    const reviewed = await Effect.runPromise(
+      setTaskReviewModeOverride(
+        {
+          projectId,
+          taskId: source.id,
+          reviewModeOverride: "direct",
+          expectedTaskVersion: prepared.version,
+          reason: "Exercise the clocked review-policy command.",
+          idempotencyKey: "clock-review-source",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    expect(reviewed.updatedAt).toBe(reviewPolicyAt);
+
+    const plannedAt = "2026-09-03T08:03:00.000Z";
+    now = plannedAt;
+    const planned = await Effect.runPromise(
+      updateTaskPlanning(
+        {
+          taskId: source.id,
+          priority: "high",
+          position: 2,
+          notBefore: null,
+          dueAt: null,
+          size: "s",
+          tags: [],
+          requiredCapabilities: [],
+          expectedVersion: reviewed.version,
+          idempotencyKey: "clock-plan-source",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    expect(planned.updatedAt).toBe(plannedAt);
+
+    const relatedAt = "2026-09-03T08:04:00.000Z";
+    now = relatedAt;
+    const relation = await Effect.runPromise(
+      createTaskRelation(
+        {
+          projectId,
+          sourceTaskId: source.id,
+          targetTaskId: target.id,
+          type: "related_to",
+          expectedSourceVersion: planned.version,
+          expectedTargetVersion: target.version,
+          idempotencyKey: "clock-relate",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    expect(relation.createdAt).toBe(relatedAt);
+    const relatedTasks = projectStore.database
+      .prepare<[string, string], { id: string; updatedAt: string }>(
+        `select id, updated_at as updatedAt
+         from tasks
+         where id in (?, ?)
+         order by id`,
+      )
+      .all(source.id, target.id);
+    expect(relatedTasks).toEqual(
+      [source.id, target.id].toSorted().map((id) => ({ id, updatedAt: relatedAt })),
+    );
+
+    const archivedAt = "2026-09-03T08:05:00.000Z";
+    now = archivedAt;
+    const archived = await Effect.runPromise(
+      archiveTask(
+        {
+          taskId: source.id,
+          expectedVersion: planned.version + 1,
+          reason: "Finish the clock contract exercise.",
+          idempotencyKey: "clock-archive-source",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    expect(archived).toMatchObject({ archivedAt, updatedAt: archivedAt });
+
+    const persisted = projectStore.database
+      .prepare<[string], { createdAt: string; updatedAt: string; archivedAt: string | null }>(
+        `select created_at as createdAt, updated_at as updatedAt, archived_at as archivedAt
+         from tasks
+         where id = ?`,
+      )
+      .get(source.id);
+    expect(persisted).toEqual({ createdAt, updatedAt: archivedAt, archivedAt });
+
+    const eventTimes = projectStore.database
+      .prepare<[string, string], { kind: string; occurredAt: string }>(
+        `select kind, occurred_at as occurredAt
+         from events
+         where entity_id in (?, ?)
+         order by cursor`,
+      )
+      .all(source.id, relation.id);
+    expect(eventTimes).toEqual([
+      { kind: "task.created", occurredAt: createdAt },
+      { kind: "task.prepared", occurredAt: preparedAt },
+      { kind: "task.review_policy.override.changed", occurredAt: reviewPolicyAt },
+      { kind: "task.planning.updated", occurredAt: plannedAt },
+      { kind: "task.relation.created", occurredAt: relatedAt },
+      { kind: "task.archived", occurredAt: archivedAt },
+    ]);
+
+    const idempotencyTimes = projectStore.database
+      .prepare<[], { key: string; createdAt: string }>(
+        `select key, created_at as createdAt
+         from idempotency_records
+         where key like 'clock-%'
+         order by created_at, key`,
+      )
+      .all();
+    expect(idempotencyTimes).toEqual([
+      { key: "clock-create-source", createdAt },
+      { key: "clock-create-target", createdAt },
+      { key: "clock-prepare-source", createdAt: preparedAt },
+      { key: "clock-review-source", createdAt: reviewPolicyAt },
+      { key: "clock-plan-source", createdAt: plannedAt },
+      { key: "clock-relate", createdAt: relatedAt },
+      { key: "clock-archive-source", createdAt: archivedAt },
+    ]);
+  });
+
   it("captures one title-only backlog task with an attributed event and retry-safe result", async () => {
     const command = backlogInput();
     const first = await Effect.runPromise(createTask(command, human, taskServices));

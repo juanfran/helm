@@ -17,7 +17,11 @@ import {
   type TaskQueryServices,
 } from "./task-queries";
 import { createTask, createTaskRelation, listTasks, type TaskServices } from "./tasks";
-import { defaultTaskSearchOrder, type TaskFilterV1 } from "../domain/task-filters";
+import {
+  defaultTaskSearchOrder,
+  type TaskFilterV1,
+  type TaskSearchField,
+} from "../domain/task-filters";
 import { emptyRichTextDocument, type CreateTaskInput } from "../domain/tasks";
 import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
 import { createSqliteActivityStore } from "../infrastructure/sqlite-activity-store.server";
@@ -63,8 +67,15 @@ function filter(overrides: Partial<TaskFilterV1> = {}): TaskFilterV1 {
   };
 }
 
-function runSearch(taskFilter: TaskFilterV1, limit = 50, cursor: string | null = null) {
-  return Effect.runPromise(searchTasks({ filter: taskFilter, limit, cursor }, [], queryServices));
+function runSearch(
+  taskFilter: TaskFilterV1,
+  limit = 50,
+  cursor: string | null = null,
+  fields: TaskSearchField[] = [],
+) {
+  return Effect.runPromise(
+    searchTasks({ filter: taskFilter, fields, limit, cursor }, [], queryServices),
+  );
 }
 
 function insertCustomFieldDefinition(input: {
@@ -138,6 +149,34 @@ afterEach(async () => {
 });
 
 describe("task query application seam", () => {
+  it("canonicalizes selected candidate fields before calling persistence", async () => {
+    let receivedFields: readonly TaskSearchField[] | undefined;
+    const store = queryServices.store;
+    const services: TaskQueryServices = {
+      ...queryServices,
+      store: {
+        ...store,
+        search(input, context) {
+          receivedFields = input.fields;
+          return store.search(input, context);
+        },
+      },
+    };
+
+    await Effect.runPromise(
+      searchTasks(
+        {
+          filter: filter(),
+          fields: ["timestamps", "acceptanceCriteria", "timestamps"],
+        },
+        [],
+        services,
+      ),
+    );
+
+    expect(receivedFields).toEqual(["acceptanceCriteria", "timestamps"]);
+  });
+
   it("searches every source and removes withdrawn or rolled-back activity atomically", async () => {
     const task = await Effect.runPromise(
       createTask(
@@ -147,7 +186,12 @@ describe("task query application seam", () => {
             version: 1,
             doc: {
               type: "doc",
-              content: [{ type: "paragraph", content: [{ type: "text", text: "Nebula body" }] }],
+              content: [
+                {
+                  type: "paragraph",
+                  content: [{ type: "text", text: "Nebula body" }],
+                },
+              ],
             },
           },
           expectedOutcome: "Orbit is stable.",
@@ -208,7 +252,10 @@ describe("task query application seam", () => {
             doc: {
               type: "doc",
               content: [
-                { type: "paragraph", content: [{ type: "text", text: "Chromatic resonance" }] },
+                {
+                  type: "paragraph",
+                  content: [{ type: "text", text: "Chromatic resonance" }],
+                },
               ],
             },
           },
@@ -363,7 +410,12 @@ describe("task query application seam", () => {
             version: 1,
             doc: {
               type: "doc",
-              content: [{ type: "paragraph", content: [{ type: "text", text: "Reviewed" }] }],
+              content: [
+                {
+                  type: "paragraph",
+                  content: [{ type: "text", text: "Reviewed" }],
+                },
+              ],
             },
           },
           expectedTaskVersion: currentTarget.version,
@@ -386,7 +438,14 @@ describe("task query application seam", () => {
           actors: [{ type: "human", id: "local-human" }],
           sources: ["activity"],
         },
-        dates: [{ field: "due_at", operator: "between", from: "2026-09-09", to: "2026-09-11" }],
+        dates: [
+          {
+            field: "due_at",
+            operator: "between",
+            from: "2026-09-09",
+            to: "2026-09-11",
+          },
+        ],
         relations: [
           {
             direction: "upstream",
@@ -435,7 +494,10 @@ describe("task query application seam", () => {
       type: "text",
       value: "Urgent customer queue",
     });
-    setExplicitCustomFieldValue(explicit.id, "field-score", { type: "number", value: 7 });
+    setExplicitCustomFieldValue(explicit.id, "field-score", {
+      type: "number",
+      value: 7,
+    });
     setExplicitCustomFieldValue(explicit.id, "field-retired", {
       type: "text",
       value: "Legacy evidence",
@@ -451,6 +513,9 @@ describe("task query application seam", () => {
           },
         ],
       }),
+      50,
+      null,
+      ["customFields"],
     );
     expect(contains.items.map(({ task }) => task.id)).toEqual([explicit.id]);
 
@@ -464,9 +529,14 @@ describe("task query application seam", () => {
           },
         ],
       }),
+      50,
+      null,
+      ["customFields"],
     );
     expect(inheritedDefault.items.map(({ task }) => task.id)).toEqual([inherited.id]);
-    expect(inheritedDefault.items[0]?.task.customFields[0]).toMatchObject({ source: "default" });
+    expect(inheritedDefault.items[0]?.task.customFields?.[0]).toMatchObject({
+      source: "default",
+    });
 
     const numeric = await runSearch(
       filter({
@@ -482,7 +552,9 @@ describe("task query application seam", () => {
     expect(numeric.items.map(({ task }) => task.id)).toEqual([explicit.id]);
 
     const missing = await runSearch(
-      filter({ customFields: [{ fieldId: "field-score", operator: "missing" }] }),
+      filter({
+        customFields: [{ fieldId: "field-score", operator: "missing" }],
+      }),
     );
     expect(missing.items.map(({ task }) => task.id)).toEqual([inherited.id]);
 
@@ -496,6 +568,9 @@ describe("task query application seam", () => {
           },
         ],
       }),
+      50,
+      null,
+      ["customFields"],
     );
     expect(historical.items.map(({ task }) => task.id)).toEqual([explicit.id]);
     expect(historical.items[0]?.task.customFields).toEqual(
@@ -659,7 +734,7 @@ describe("task query application seam", () => {
     const pageOne = await runSearch(filter(), 1);
     expect(pageOne.items).toHaveLength(1);
     expect(pageOne.hasMore).toBe(true);
-    expect(pageOne.nextCursor).toMatch(/^tq1:/);
+    expect(pageOne.nextCursor).toMatch(/^tq2:/);
     const pageTwo = await runSearch(filter(), 1, pageOne.nextCursor);
     expect(pageTwo.items).toHaveLength(1);
     expect(pageTwo.items[0]?.task.id).not.toBe(pageOne.items[0]?.task.id);
@@ -702,7 +777,9 @@ describe("task query application seam", () => {
     const second = await Effect.runPromise(
       createTask(taskInput("yankee", { title: "Yankee signal" }), human, taskServices),
     );
-    const searchFilter = filter({ search: { text: "xray yankee", mode: "any" } });
+    const searchFilter = filter({
+      search: { text: "xray yankee", mode: "any" },
+    });
     const firstPage = await runSearch(searchFilter, 1);
     expect(firstPage.items.map(({ task }) => task.id)).toEqual([first.id]);
 
@@ -710,7 +787,10 @@ describe("task query application seam", () => {
     await mkdir(join(otherRepositoryRoot, ".git"), { recursive: true });
     const otherProject = await Effect.runPromise(
       createProject(
-        { repositoryRoot: otherRepositoryRoot, idempotencyKey: "create-project-two" },
+        {
+          repositoryRoot: otherRepositoryRoot,
+          idempotencyKey: "create-project-two",
+        },
         { store: projectStore, inspector: localRepositoryInspector },
       ),
     );
@@ -735,7 +815,10 @@ describe("task query application seam", () => {
   });
 
   it("persists versioned saved views with idempotency, conflicts, archive, restore, and events", async () => {
-    const savedFilter = filter({ lifecycles: ["ready"], priorities: ["urgent", "high"] });
+    const savedFilter = filter({
+      lifecycles: ["ready"],
+      priorities: ["urgent", "high"],
+    });
     const definition = {
       schemaVersion: 1 as const,
       filter: savedFilter,
@@ -846,8 +929,14 @@ describe("task query application seam", () => {
       "saved_view.archived",
       "saved_view.restored",
     ]);
-    expect(viewEvents[0]).toMatchObject({ actorType: "human", actorId: "local-human" });
-    expect(JSON.parse(viewEvents[0]!.payloadJson)).toEqual({ name: "Review radar", version: 1 });
+    expect(viewEvents[0]).toMatchObject({
+      actorType: "human",
+      actorId: "local-human",
+    });
+    expect(JSON.parse(viewEvents[0]!.payloadJson)).toEqual({
+      name: "Review radar",
+      version: 1,
+    });
     expect(JSON.parse(viewEvents[0]!.changesJson)).toMatchObject({
       projectIds: [projectId],
       savedViewIds: [created.id],

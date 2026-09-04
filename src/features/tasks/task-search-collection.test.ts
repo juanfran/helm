@@ -3,8 +3,8 @@
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { emptyRichTextDocument } from "../../domain/tasks";
 import {
+  completeTaskSearchFields,
   searchTasksInputSchema,
   taskSearchItemSchema,
   type SearchTasksInput,
@@ -25,16 +25,31 @@ const searchItem = taskSearchItemSchema.parse({
     id: "task-1",
     projectId: "project-1",
     sequence: 1,
+    parentTaskId: null,
     title: "Build exact search",
     lifecycle: "ready",
-    description: emptyRichTextDocument,
+    priority: "normal",
+    position: 0,
+    notBefore: null,
+    dueAt: null,
+    size: null,
+    tags: [],
+    requiredCapabilities: [],
+    claim: null,
+    eligibility: {
+      claimable: true,
+      status: "claimable",
+      reasons: [],
+      orderingExplanation: "Normal priority, manual position 0, sequence 1.",
+      missingCapabilities: [],
+      blockingTaskIds: [],
+    },
     descriptionText: "",
     expectedOutcome: "Search remains deterministic.",
     acceptanceCriteria: "Equivalent inputs share one collection.",
     agentContext: "",
     checklist: [{ id: "check-1", text: "Verify the query key", checked: false }],
     version: 1,
-    archivedAt: null,
     createdAt: "2026-09-04T10:00:00.000Z",
     updatedAt: "2026-09-04T10:00:00.000Z",
   },
@@ -115,6 +130,24 @@ describe("task search collection", () => {
 
     firstClient.clear();
     secondClient.clear();
+  });
+
+  it("keeps compact and complete projections isolated while canonicalizing field order", () => {
+    const queryClient = new QueryClient();
+    const compact = searchInput({ fields: [] });
+    const complete = searchInput({ fields: [...completeTaskSearchFields] });
+    const reordered = searchInput({ fields: completeTaskSearchFields.toReversed() });
+
+    expect(taskSearchQueryKey(compact)).not.toEqual(taskSearchQueryKey(complete));
+    expect(getTaskSearchCollection(queryClient, compact)).not.toBe(
+      getTaskSearchCollection(queryClient, complete),
+    );
+    expect(taskSearchQueryKey(reordered)).toEqual(taskSearchQueryKey(complete));
+    expect(getTaskSearchCollection(queryClient, reordered)).toBe(
+      getTaskSearchCollection(queryClient, complete),
+    );
+
+    queryClient.clear();
   });
 
   it("keeps otherwise identical searches isolated by project", async () => {

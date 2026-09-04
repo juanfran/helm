@@ -548,7 +548,7 @@ export function createHelmMcpServer(
     {
       title: "Search Helm tasks",
       description:
-        "Search and filter paginated project tasks using the registered agent profile's capabilities.",
+        "Search and filter paginated project tasks using the registered agent profile's capabilities. Results default to compact candidates. Select optional fields with descriptionText, expectedOutcome, acceptanceCriteria, agentContext, checklist, relations (upstreamRelations and downstreamRelations), customFields, reviewPolicy, referencedPaths, or timestamps (archivedAt, createdAt, and updatedAt). A cursor is valid only for the same canonical filter, order, and fields.",
       inputSchema: searchTasksInputSchema,
       outputSchema: {
         ok: z.boolean(),

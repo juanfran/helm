@@ -2,6 +2,7 @@ import { Effect } from "effect";
 
 import type { ActivityActor } from "../domain/activity";
 import {
+  canonicalizeTaskSearchFields,
   compiledSearchTasksInputSchema,
   type SearchTasksInput,
   type TaskFilterV1,
@@ -129,7 +130,11 @@ export function searchTasks(
 ) {
   return Effect.flatMap(
     parseInput(() => compiledSearchTasksInputSchema.parse(input)),
-    (parsed) => services.store.search(parsed, evaluationContext(services, agentCapabilities)),
+    (parsed) =>
+      services.store.search(
+        { ...parsed, fields: canonicalizeTaskSearchFields(parsed.fields) },
+        evaluationContext(services, agentCapabilities),
+      ),
   );
 }
 

@@ -5,12 +5,16 @@ import { emptyRichTextDocument, taskSchema, type Task } from "./tasks";
 import {
   canonicalTaskFilterJson,
   canonicalizeTaskFilter,
+  canonicalizeTaskSearchFields,
   canonicalizeTaskSearchOrder,
   compiledSearchTasksInputSchema,
   compiledTaskFilterV1Schema,
+  completeTaskSearchFields,
   defaultTaskSearchOrder,
   matchesStructuredTaskFilter,
   searchTasksInputSchema,
+  taskSearchCandidateSchema,
+  taskSearchFieldSchema,
   taskFilterCustomFieldClauseSchema,
   taskFilterV1Schema,
   type TaskFilterV1,
@@ -117,7 +121,12 @@ function completeFilter(): TaskFilterV1 {
       sources: ["attempt"],
     },
     dates: [
-      { field: "due_at", operator: "between", from: "2026-09-01", to: "2026-09-30" },
+      {
+        field: "due_at",
+        operator: "between",
+        from: "2026-09-01",
+        to: "2026-09-30",
+      },
       {
         field: "updated_at",
         operator: "on_or_after",
@@ -146,19 +155,85 @@ describe("versioned task filters", () => {
       searchTasksInputSchema.parse(input),
     );
     expect(
-      searchTasksInputSchema.parse({ filter: { schemaVersion: 1, projectId: "project-1" } }),
+      searchTasksInputSchema.parse({
+        filter: { schemaVersion: 1, projectId: "project-1" },
+      }),
     ).toMatchObject({
       filter: { archiveState: "exclude" },
+      fields: [],
       limit: 50,
       cursor: null,
     });
+  });
+
+  it("bounds and canonicalizes optional search-candidate field groups", () => {
+    const selectedInput = {
+      filter: { schemaVersion: 1 as const, projectId: "project-1" },
+      fields: ["timestamps", "acceptanceCriteria", "timestamps"] as const,
+    };
+    expect(compiledSearchTasksInputSchema.parse(selectedInput)).toEqual(
+      searchTasksInputSchema.parse(selectedInput),
+    );
+    expect(canonicalizeTaskSearchFields(selectedInput.fields)).toEqual([
+      "acceptanceCriteria",
+      "timestamps",
+    ]);
+    expect(completeTaskSearchFields).toEqual(
+      [...taskSearchFieldSchema.options].toSorted((left, right) => left.localeCompare(right)),
+    );
+    expect(
+      searchTasksInputSchema.safeParse({
+        filter: { schemaVersion: 1, projectId: "project-1" },
+        fields: Array.from({ length: 11 }, () => "timestamps"),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("uses a compact candidate schema with an always-present scheduling boundary", () => {
+    const completeTask = task();
+    const compactCandidate = {
+      id: completeTask.id,
+      projectId: completeTask.projectId,
+      sequence: completeTask.sequence,
+      parentTaskId: completeTask.parentTaskId,
+      title: completeTask.title,
+      lifecycle: completeTask.lifecycle,
+      priority: completeTask.priority,
+      position: completeTask.position,
+      notBefore: completeTask.notBefore,
+      dueAt: completeTask.dueAt,
+      size: completeTask.size,
+      tags: completeTask.tags,
+      requiredCapabilities: completeTask.requiredCapabilities,
+      claim: completeTask.claim,
+      eligibility: completeTask.eligibility,
+      version: completeTask.version,
+    };
+
+    expect(taskSearchCandidateSchema.parse(compactCandidate)).toEqual(compactCandidate);
+    expect(
+      taskSearchCandidateSchema.safeParse({
+        ...compactCandidate,
+        notBefore: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      taskSearchCandidateSchema.parse({
+        ...compactCandidate,
+        archivedAt: completeTask.archivedAt,
+        updatedAt: completeTask.updatedAt,
+      }),
+    ).toMatchObject({ archivedAt: null, updatedAt: completeTask.updatedAt });
   });
 
   it("canonicalizes semantically unordered values and clauses", () => {
     const left = completeFilter();
     const right: TaskFilterV1 = {
       ...left,
-      capabilities: { operator: "all_of", values: ["SQLITE", "typescript", "sqlite"] },
+      capabilities: {
+        operator: "all_of",
+        values: ["SQLITE", "typescript", "sqlite"],
+      },
       actor: {
         operator: "any_of",
         actors: [
@@ -217,7 +292,11 @@ describe("versioned task filters", () => {
         to: { type: "date" as const, value: "2026-09-30" },
       },
     ];
-    const filter = { schemaVersion: 1 as const, projectId: "project-1", customFields };
+    const filter = {
+      schemaVersion: 1 as const,
+      projectId: "project-1",
+      customFields,
+    };
 
     expect(compiledTaskFilterV1Schema.parse(filter)).toEqual(taskFilterV1Schema.parse(filter));
     expect(customFields.map((clause) => taskFilterCustomFieldClauseSchema.parse(clause))).toEqual(
@@ -280,7 +359,10 @@ describe("versioned task filters", () => {
     expect(
       matchesStructuredTaskFilter(
         task(),
-        { ...filter, relations: [{ direction: "upstream", operator: "not_exists" }] },
+        {
+          ...filter,
+          relations: [{ direction: "upstream", operator: "not_exists" }],
+        },
         facts,
       ),
     ).toBe(false);
@@ -346,7 +428,11 @@ describe("versioned task filters", () => {
         },
         { definition: score, value: score.defaultValue, source: "default" },
         { definition: visible, value: visible.defaultValue, source: "default" },
-        { definition: release, value: { type: "date", value: "2026-09-15" }, source: "explicit" },
+        {
+          definition: release,
+          value: { type: "date", value: "2026-09-15" },
+          source: "explicit",
+        },
         { definition: risk, value: risk.defaultValue, source: "default" },
         { definition: unset, value: null, source: "unset" },
         {
@@ -467,7 +553,11 @@ describe("versioned task filters", () => {
 
   it("rejects unknown keys, empty sets, invalid ranges, and relevance without search", () => {
     expect(() =>
-      taskFilterV1Schema.parse({ schemaVersion: 1, projectId: "project-1", unknown: true }),
+      taskFilterV1Schema.parse({
+        schemaVersion: 1,
+        projectId: "project-1",
+        unknown: true,
+      }),
     ).toThrow();
     expect(() =>
       compiledTaskFilterV1Schema.parse({
@@ -480,7 +570,14 @@ describe("versioned task filters", () => {
       taskFilterV1Schema.parse({
         schemaVersion: 1,
         projectId: "project-1",
-        dates: [{ field: "due_at", operator: "between", from: "2026-10-01", to: "2026-09-01" }],
+        dates: [
+          {
+            field: "due_at",
+            operator: "between",
+            from: "2026-10-01",
+            to: "2026-09-01",
+          },
+        ],
       }),
     ).toThrow();
     expect(() =>
@@ -526,7 +623,10 @@ describe("versioned task filters", () => {
   });
 
   it("provides deterministic defaults and appends stable custom-order tie breakers", () => {
-    const withoutSearch = canonicalizeTaskFilter({ schemaVersion: 1, projectId: "project-1" });
+    const withoutSearch = canonicalizeTaskFilter({
+      schemaVersion: 1,
+      projectId: "project-1",
+    });
     expect(defaultTaskSearchOrder(withoutSearch).map(({ field }) => field)).toEqual([
       "priority",
       "position",
