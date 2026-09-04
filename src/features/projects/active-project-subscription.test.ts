@@ -52,6 +52,9 @@ describe("active project subscription", () => {
       true,
     );
     expect(isActiveProjectChangeEvent(event("project.selected", ["preferences"]))).toBe(true);
+    expect(isActiveProjectChangeEvent(event("project.imported", ["preferences", "projects"]))).toBe(
+      true,
+    );
     expect(isActiveProjectChangeEvent(event("project.review_mode.changed", ["projects"]))).toBe(
       false,
     );
@@ -81,10 +84,15 @@ describe("active project subscription", () => {
       id: "event-14",
       cursor: 14,
     });
+    source.emit({
+      ...event("project.imported", ["preferences", "projects"]),
+      id: "event-15",
+      cursor: 15,
+    });
     await drainProjection();
 
     expect(createEventSource).toHaveBeenCalledWith("/api/events?after=11");
-    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenCalledTimes(3);
     stop();
   });
 

@@ -132,6 +132,21 @@ function useNarrowViewport() {
 }
 
 describe("task workspace", () => {
+  it("makes project data management available from Settings", async () => {
+    const user = userEvent.setup();
+    render(
+      <TaskWorkspace
+        {...props()}
+        portabilityControl={
+          <section aria-label="Project portability">Portability controls</section>
+        }
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("region", { name: "Project portability" })).toBeTruthy();
+  });
+
   it("drills from the live dashboard into narrow-screen review and comment actions", async () => {
     useNarrowViewport();
     const user = userEvent.setup();

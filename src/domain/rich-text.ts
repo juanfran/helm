@@ -23,31 +23,35 @@ type TipTapNode = {
   type: string;
   text?: string;
   attrs?: Record<string, JsonValue>;
-  marks?: Array<{ type: string; attrs?: Record<string, JsonValue> }>;
+  marks?: TipTapMark[];
   content?: TipTapNode[];
 };
 
+type TipTapMark = {
+  type: string;
+  attrs?: Record<string, JsonValue>;
+};
+
+const tipTapMarkSchema: z.ZodType<TipTapMark> = z.strictObject({
+  type: z.string(),
+  attrs: z.record(z.string(), jsonValueSchema).optional(),
+});
+
 const tipTapNodeSchema: z.ZodType<TipTapNode> = z.lazy(() =>
-  z.object({
+  z.strictObject({
     type: z.string(),
     text: z.string().optional(),
     attrs: z.record(z.string(), jsonValueSchema).optional(),
-    marks: z
-      .array(
-        z.object({
-          type: z.string(),
-          attrs: z.record(z.string(), jsonValueSchema).optional(),
-        }),
-      )
-      .optional(),
+    marks: z.array(tipTapMarkSchema).optional(),
     content: z.array(tipTapNodeSchema).optional(),
   }),
 );
 
-export const richTextDocumentSchema = z.object({
+export const richTextDocumentSchema = z.strictObject({
   version: z.literal(1),
-  doc: z.object({
+  doc: z.strictObject({
     type: z.literal("doc"),
+    attrs: z.record(z.string(), jsonValueSchema).optional(),
     content: z.array(tipTapNodeSchema).optional(),
   }),
 });

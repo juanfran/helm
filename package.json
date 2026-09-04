@@ -18,6 +18,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts --passWithNoTests",
     "smoke:operational": "node scripts/operational-smoke.mjs",
+    "backup:restore": "tsx scripts/restore-backup.ts",
     "db:generate": "node scripts/database-command.mjs generate",
     "db:migrate": "node scripts/database-command.mjs migrate",
     "db:push": "node scripts/database-command.mjs push",

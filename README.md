@@ -71,6 +71,59 @@ in one transaction, and records one attributed parent event linked to every affe
 Registered agents use the same command engine through `preview_bulk_tasks` and `execute_bulk_tasks`,
 targeting either explicit task IDs or the structured filter language shared with `search_tasks`.
 
+## Back up and move project data
+
+The Settings view provides three downloads: an exact SQLite backup of the whole Helm instance, a
+versioned semantic JSON export of the current project, and a readable Markdown snapshot. Markdown can
+also be scoped to a saved view. Downloads are prepared from one consistent database snapshot while Helm
+continues serving normal local work. SQLite backup bytes stream from the verified temporary image through
+the browser's native download pipeline instead of being copied into server memory or an in-memory browser
+Blob.
+
+Restore an exact backup only while Helm is stopped. The target path must not exist, including as an empty
+file; the command snapshots the source through SQLite (including committed WAL pages), verifies the
+resulting image, and atomically refuses to overwrite any filesystem entry:
+
+```sh
+pnpm backup:restore /absolute/path/to/helm-backup.sqlite
+```
+
+The default target is `DATABASE_URL`. To restore into a different clean path, pass it explicitly:
+
+```sh
+pnpm backup:restore /absolute/path/to/helm-backup.sqlite /absolute/path/to/new-helm.sqlite
+```
+
+JSON is the portable, project-scoped format. It includes project settings, task state, relations, views,
+tags, custom fields, agent attribution, attempts, comments, blockers, and source-event provenance. It
+does not transfer active leases, token hashes, retry records, UI preferences, or MCP session identifiers,
+and imported execution history cannot resume a run. CSV is a task-oriented migration format rather than
+a full-fidelity backup. Both formats require a dry-run preview; Helm reports creates, updates, no-ops,
+conflicts, and unsupported data before one atomic, human-attributed import is enabled.
+CSV preview and execution delegate to Helm's normal bulk-task command engine. JSON uses the normal
+project-import command because restoring stable identities, relations, and immutable history is a
+cross-aggregate operation the task-only bulk command cannot represent; it retains the same actor,
+version, idempotency, transaction, and audit contract.
+Imported source events are preserved field-for-field inside bounded provenance audit batches with fresh
+local cursors; their original cursors are never replayed. Import audit batches also identify every changed
+entity, its previous and new version, and the fields changed. Referenced repository paths are canonicalized
+and validated against the destination repository during both preview and execution.
+When JSON is merged into an existing project, mutable versioned records must still be at the archive's
+expected version; versionless history is never overwritten and records omitted from the archive remain
+untouched. Browser imports reject CSV files larger than 2 MiB and JSON files larger than 64 MiB before
+reading them into memory; the same format-specific bounds are enforced during server validation. JSON
+export checks the same 64 MiB and 100,000-record-per-collection envelope, so Helm never emits an archive
+that its matching importer rejects.
+
+CSV headers are normalized case-insensitively and may include `task_id`, `expected_version`, `title`,
+`lifecycle`, `priority`, `position`, `not_before`, `due_at`, `size`, `description`, `expected_outcome`,
+`acceptance_criteria`, `agent_context`, `checklist`, `tags`, `capabilities`, `parent_task_id`,
+`review_mode_override`, `archived`, and `custom.<field_key>`. A blank `task_id` creates a task; an update
+requires both `task_id` and `expected_version`. Preview explicitly reports fields that are recognized but
+unsafe for that operation. List cells accept a JSON string array or comma-, semicolon-, or pipe-separated
+values; blank update cells clear dates, tags, capabilities, and custom-field values when those columns are
+present.
+
 `list_projects` and `get_active_project` expose the same current selection as the browser. Agent reads and
 mutations still require an explicit project ID, so an active-project change never leaks records between
 projects or silently redirects an agent's in-flight work. Discovery cursors are bound to the queue

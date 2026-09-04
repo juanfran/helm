@@ -1121,14 +1121,45 @@ function executeAnalyzed(
   return result;
 }
 
+/**
+ * Recomputes a bulk preview on the caller's current SQLite snapshot.
+ *
+ * This seam exists for higher-level atomic workflows, such as portable imports,
+ * that need the normal bulk validation and projection rules without opening a
+ * separately committing transaction. The caller must already own the desired
+ * transaction on `database`.
+ */
+export function previewSqliteBulkTasksInCurrentTransaction(
+  database: Database.Database,
+  intent: BulkTaskIntent,
+  actor: Actor,
+  context: BulkTaskEvaluationContext,
+) {
+  return analyzePreview(database, drizzle(database, { schema }), intent, actor, context).preview;
+}
+
+/**
+ * Executes a previously previewed bulk command in the caller's current SQLite
+ * transaction. It never begins or commits a transaction itself.
+ */
+export function executeSqliteBulkTasksInCurrentTransaction(
+  database: Database.Database,
+  input: ExecuteBulkTasksInput,
+  actor: Actor,
+  context: BulkTaskEvaluationContext,
+) {
+  return executeAnalyzed(database, drizzle(database, { schema }), input, actor, context);
+}
+
 export function createSqliteBulkTaskStore(database: Database.Database): BulkTaskStore {
-  const db = drizzle(database, { schema });
   return {
     preview(intent, actor, context) {
       return Effect.try({
         try: () =>
           database
-            .transaction(() => analyzePreview(database, db, intent, actor, context).preview)
+            .transaction(() =>
+              previewSqliteBulkTasksInCurrentTransaction(database, intent, actor, context),
+            )
             .deferred(),
         catch: commandError,
       });
@@ -1137,7 +1168,9 @@ export function createSqliteBulkTaskStore(database: Database.Database): BulkTask
       return Effect.try({
         try: () =>
           database
-            .transaction(() => executeAnalyzed(database, db, input, actor, context))
+            .transaction(() =>
+              executeSqliteBulkTasksInCurrentTransaction(database, input, actor, context),
+            )
             .immediate(),
         catch: commandError,
       });

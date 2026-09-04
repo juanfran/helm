@@ -8,7 +8,9 @@ import {
 export function isActiveProjectChangeEvent(event: ProjectEvent) {
   return (
     event.changes.scopes.includes("preferences") &&
-    (event.kind === "project.created" || event.kind === "project.selected")
+    (event.kind === "project.created" ||
+      event.kind === "project.imported" ||
+      event.kind === "project.selected")
   );
 }
 

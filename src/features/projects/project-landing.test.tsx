@@ -20,6 +20,20 @@ afterEach(() => {
 });
 
 describe("project setup UI", () => {
+  it("keeps JSON restore reachable before a project exists", () => {
+    render(
+      <ProjectLanding
+        state={emptyState}
+        portabilityControl={<section aria-label="Restore project export">Restore controls</section>}
+        onCreateProject={vi.fn()}
+        onChangeTheme={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("form", { name: "Create local project" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Restore project export" })).toBeTruthy();
+  });
+
   it("submits the repository root and displays a typed validation error", async () => {
     const user = userEvent.setup();
     const onCreateProject = vi.fn().mockResolvedValue({

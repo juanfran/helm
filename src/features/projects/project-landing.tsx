@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import * as stylex from "@stylexjs/stylex";
 import { FolderGit2, MonitorCog, Moon, Sun } from "lucide-react";
 
@@ -15,9 +15,15 @@ type ProjectLandingProps = {
     idempotencyKey: string;
   }) => Promise<ProjectCommandResponse>;
   onChangeTheme: (input: { theme: Theme; idempotencyKey: string }) => Promise<ThemeCommandResponse>;
+  portabilityControl?: ReactNode;
 };
 
-export function ProjectLanding({ state, onCreateProject, onChangeTheme }: ProjectLandingProps) {
+export function ProjectLanding({
+  state,
+  onCreateProject,
+  onChangeTheme,
+  portabilityControl,
+}: ProjectLandingProps) {
   const [repositoryRoot, setRepositoryRoot] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -86,68 +92,71 @@ export function ProjectLanding({ state, onCreateProject, onChangeTheme }: Projec
           </p>
         </div>
 
-        <div {...stylex.props(styles.card)}>
-          {state.activeProject ? (
-            <div {...stylex.props(styles.projectSummary)}>
-              <div {...stylex.props(styles.iconTile)}>
-                <FolderGit2 size={22} aria-hidden="true" />
-              </div>
-              <div>
-                <p {...stylex.props(styles.label)}>Active project</p>
-                <h2 {...stylex.props(styles.projectName)}>{state.activeProject.name}</h2>
-                <p {...stylex.props(styles.path)}>{state.activeProject.repositoryRoot}</p>
-              </div>
-              <dl {...stylex.props(styles.metadata)}>
-                <div>
-                  <dt {...stylex.props(styles.metadataTerm)}>Project</dt>
-                  <dd {...stylex.props(styles.metadataValue)}>#{state.activeProject.sequence}</dd>
-                </div>
-                <div>
-                  <dt {...stylex.props(styles.metadataTerm)}>Version</dt>
-                  <dd {...stylex.props(styles.metadataValue)}>{state.activeProject.version}</dd>
-                </div>
-              </dl>
-            </div>
-          ) : (
-            <form onSubmit={handleSubmit} aria-label="Create local project">
-              <div {...stylex.props(styles.formHeader)}>
+        <div {...stylex.props(styles.cardStack)}>
+          <div {...stylex.props(styles.card)}>
+            {state.activeProject ? (
+              <div {...stylex.props(styles.projectSummary)}>
                 <div {...stylex.props(styles.iconTile)}>
                   <FolderGit2 size={22} aria-hidden="true" />
                 </div>
                 <div>
-                  <h2 {...stylex.props(styles.cardTitle)}>Select a repository</h2>
-                  <p {...stylex.props(styles.cardCopy)}>
-                    Enter the absolute path to its root folder.
-                  </p>
+                  <p {...stylex.props(styles.label)}>Active project</p>
+                  <h2 {...stylex.props(styles.projectName)}>{state.activeProject.name}</h2>
+                  <p {...stylex.props(styles.path)}>{state.activeProject.repositoryRoot}</p>
                 </div>
+                <dl {...stylex.props(styles.metadata)}>
+                  <div>
+                    <dt {...stylex.props(styles.metadataTerm)}>Project</dt>
+                    <dd {...stylex.props(styles.metadataValue)}>#{state.activeProject.sequence}</dd>
+                  </div>
+                  <div>
+                    <dt {...stylex.props(styles.metadataTerm)}>Version</dt>
+                    <dd {...stylex.props(styles.metadataValue)}>{state.activeProject.version}</dd>
+                  </div>
+                </dl>
               </div>
-              <label htmlFor="repository-root" {...stylex.props(styles.inputLabel)}>
-                Repository root
-              </label>
-              <input
-                id="repository-root"
-                name="repositoryRoot"
-                value={repositoryRoot}
-                onChange={(event) => setRepositoryRoot(event.target.value)}
-                placeholder="/Users/you/projects/example"
-                autoComplete="off"
-                spellCheck={false}
-                required
-                {...stylex.props(styles.input)}
-              />
-              <p {...stylex.props(styles.hint)}>
-                Helm verifies the folder and its .git entry before writing.
-              </p>
-              {error ? (
-                <p role="alert" {...stylex.props(styles.error)}>
-                  {error}
+            ) : (
+              <form onSubmit={handleSubmit} aria-label="Create local project">
+                <div {...stylex.props(styles.formHeader)}>
+                  <div {...stylex.props(styles.iconTile)}>
+                    <FolderGit2 size={22} aria-hidden="true" />
+                  </div>
+                  <div>
+                    <h2 {...stylex.props(styles.cardTitle)}>Select a repository</h2>
+                    <p {...stylex.props(styles.cardCopy)}>
+                      Enter the absolute path to its root folder.
+                    </p>
+                  </div>
+                </div>
+                <label htmlFor="repository-root" {...stylex.props(styles.inputLabel)}>
+                  Repository root
+                </label>
+                <input
+                  id="repository-root"
+                  name="repositoryRoot"
+                  value={repositoryRoot}
+                  onChange={(event) => setRepositoryRoot(event.target.value)}
+                  placeholder="/Users/you/projects/example"
+                  autoComplete="off"
+                  spellCheck={false}
+                  required
+                  {...stylex.props(styles.input)}
+                />
+                <p {...stylex.props(styles.hint)}>
+                  Helm verifies the folder and its .git entry before writing.
                 </p>
-              ) : null}
-              <Button type="submit" disabled={pending || repositoryRoot.trim().length === 0}>
-                {pending ? "Creating…" : "Create project"}
-              </Button>
-            </form>
-          )}
+                {error ? (
+                  <p role="alert" {...stylex.props(styles.error)}>
+                    {error}
+                  </p>
+                ) : null}
+                <Button type="submit" disabled={pending || repositoryRoot.trim().length === 0}>
+                  {pending ? "Creating…" : "Create project"}
+                </Button>
+              </form>
+            )}
+          </div>
+          {portabilityControl}
         </div>
       </section>
 
@@ -280,6 +289,7 @@ const styles = stylex.create({
     padding: tokens.space7,
     "@media (max-width: 520px)": { padding: tokens.space5 },
   },
+  cardStack: { display: "grid", gap: tokens.space4, minWidth: 0 },
   formHeader: {
     alignItems: "center",
     display: "flex",

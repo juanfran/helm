@@ -18,6 +18,7 @@ import {
 } from "../features/activity/project-sync-coordinator";
 import { reconcileOptimisticCommand } from "../features/activity/optimistic-reconciliation";
 import { ProjectLanding } from "../features/projects/project-landing";
+import { ProjectDataManagementControl } from "../features/projects/project-data-management-control";
 import { ProjectCustomizationControl } from "../features/projects/project-customization-control";
 import {
   projectCustomizationQueryOptions,
@@ -55,6 +56,10 @@ import {
 } from "../server/project-functions";
 import { readAppState } from "../server/project-functions";
 import {
+  executeHumanProjectImport,
+  previewHumanProjectImport,
+} from "../server/portability-functions";
+import {
   archiveHumanTask,
   approveHumanTaskReview,
   cancelHumanTask,
@@ -72,6 +77,7 @@ import {
   setHumanTaskReviewModeOverride,
   updateHumanTaskPlanning,
 } from "../server/task-functions";
+import { readSavedViews } from "../server/task-query-functions";
 import { applyThemeOptimistically } from "../styles/theme";
 import { richTextToPlainText } from "../domain/rich-text";
 import {
@@ -91,17 +97,22 @@ export const Route = createFileRoute("/")({
   loader: async ({ context }) => {
     const [state, projects] = await Promise.all([readAppState(), readProjects()]);
     let eventCursor = 0;
+    let savedViews: readonly { readonly id: string; readonly name: string }[] = [];
     if (state.activeProject) {
       const projectId = state.activeProject.id;
-      const eventPage = await readProjectEvents({
-        data: {
-          projectId,
-          direction: "backward",
-          afterCursor: 0,
-          beforeCursor: null,
-          limit: 1,
-        },
-      });
+      const [eventPage, projectSavedViews] = await Promise.all([
+        readProjectEvents({
+          data: {
+            projectId,
+            direction: "backward",
+            afterCursor: 0,
+            beforeCursor: null,
+            limit: 1,
+          },
+        }),
+        readSavedViews({ data: { projectId, includeArchived: false } }),
+      ]);
+      savedViews = projectSavedViews.map(({ id, name }) => ({ id, name }));
       eventCursor = eventPage.latestCursor;
       const syncCoordinator = getProjectSyncCoordinator(context.queryClient, projectId);
       const taskCollection = getTaskCollection(context.queryClient, projectId);
@@ -138,7 +149,7 @@ export const Route = createFileRoute("/")({
         ]),
       );
     }
-    return { ...state, projects: [...projects], eventCursor };
+    return { ...state, projects: [...projects], eventCursor, savedViews };
   },
   pendingComponent: RoutePendingState,
   errorComponent: HomeRouteError,
@@ -175,6 +186,14 @@ function Home() {
   return (
     <ProjectLanding
       state={state}
+      portabilityControl={
+        <ProjectDataManagementControl
+          project={null}
+          onPreview={(input) => previewHumanProjectImport({ data: input })}
+          onExecute={(input) => executeHumanProjectImport({ data: input })}
+          onComplete={() => router.invalidate({ sync: true })}
+        />
+      }
       onCreateProject={async (input) => {
         const response = await createInitialProject({ data: input });
         if (response.ok) await router.invalidate({ sync: true });
@@ -200,7 +219,7 @@ function ActiveProjectHome({
   activeProjectVersion: number;
   theme: Theme;
 }) {
-  const { eventCursor } = Route.useLoaderData();
+  const { eventCursor, savedViews } = Route.useLoaderData();
   const router = useRouter();
   const queryClient = useQueryClient();
   const taskCollection = getTaskCollection(queryClient, project.id);
@@ -588,6 +607,15 @@ function ActiveProjectHome({
           onChangeTagReviewModeOverride={(input) =>
             changeHumanTagReviewModeOverride({ data: input }).then(applyCustomizationResponse)
           }
+        />
+      }
+      portabilityControl={
+        <ProjectDataManagementControl
+          project={project}
+          savedViews={savedViews}
+          onPreview={(input) => previewHumanProjectImport({ data: input })}
+          onExecute={(input) => executeHumanProjectImport({ data: input })}
+          onComplete={() => router.invalidate({ sync: true })}
         />
       }
       renderSearchLink={(props) => (

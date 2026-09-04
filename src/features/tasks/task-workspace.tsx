@@ -97,6 +97,7 @@ type TaskWorkspaceProps = {
   liveStatus: "connecting" | "live" | "retrying";
   projectSwitcher?: ReactNode;
   customizationControl?: ReactNode;
+  portabilityControl?: ReactNode;
   renderSearchLink?: (props: { className?: string; style?: CSSProperties }) => ReactNode;
   onCreateTask: (input: CreateTaskInput) => Promise<TaskCommandResponse>;
   onPrepareTask: (input: PrepareTaskInput) => Promise<TaskCommandResponse>;
@@ -147,6 +148,7 @@ export function TaskWorkspace({
   liveStatus,
   projectSwitcher,
   customizationControl,
+  portabilityControl,
   renderSearchLink,
   onCreateTask,
   onPrepareTask,
@@ -283,7 +285,7 @@ export function TaskWorkspace({
           >
             Activity
           </button>
-          {customizationControl ? (
+          {customizationControl || portabilityControl ? (
             <button
               type="button"
               aria-pressed={workspaceView === "settings"}
@@ -455,6 +457,7 @@ export function TaskWorkspace({
                 onChange={onChangeProjectReviewMode}
               />
               {customizationControl}
+              {portabilityControl}
             </div>
           ) : workspaceView === "dashboard" ? (
             <OperationalDashboard

@@ -193,6 +193,48 @@ Light and dark values live in exported StyleX variables. Desktop list workflows 
 - Use consistent SQLite backups and versioned JSON exports.
 - Make schema migrations forward-only and verify migration from supported fixture versions.
 
+Portability has two deliberately different trust and fidelity boundaries:
+
+- A SQLite backup is an exact whole-instance recovery artifact. SQLite's online backup API produces a
+  consistent image while the live process continues serving reads and short writes. It preserves every
+  table, event cursor, sequence, preference, idempotency record, lease, and historical row exactly. A
+  restore is an offline operation into an absent database path. It opens the source with SQLite and
+  creates another online snapshot so committed WAL pages cannot be omitted, verifies that staged image,
+  and atomically refuses to replace any filesystem entry, including an empty file. The browser leaves
+  this unbounded response on its native download path rather than buffering it into a Blob.
+- A JSON export is a versioned semantic archive for one project. It contains project configuration,
+  tags, custom-field definitions and explicit values, tasks, relations, saved views, relevant agent
+  identities, attempts, activity, blockers, and source-event provenance. It intentionally excludes
+  preferences, idempotency records, lease rows, token hashes, and MCP session identifiers. Active source
+  runs are represented as closed history, active attempts as abandoned history, and in-progress work is
+  made ready on import so an archive can never resume execution authority.
+
+JSON and task-oriented CSV imports are local-human commands. Preview parses and validates the complete
+source, reports creates, updates, no-ops, conflicts, and unsupported data, then binds that result to the
+source bytes and current target state. Execution accepts only the matching preview token, applies the
+semantic changes in one immediate transaction through normal command invariants, attributes them to the
+local human, and appends fresh event cursors. Source event rows are preserved field-for-field inside
+bounded provenance audit batches; importing never inserts their original cursors into the live event
+sequence. Separate bounded entity batches record every create or update identity, previous and new
+versions, and exact changed fields. Referenced repository paths are canonicalized and checked against the
+destination repository during preview, then checked again inside execution so a path or symlink swap
+cannot escape the repository or leave a partial import.
+
+CSV imports compile to and execute through the ordinary bulk-task command engine. JSON import is a
+dedicated application command because exact cross-aggregate identity, relation, attribution, and immutable
+history restoration cannot be expressed by a task-only bulk operation. It still follows the normal command
+contract: compiled input, local-human actor, semantic reason, state-bound preview, expected versions,
+idempotency, one atomic projection-and-event transaction, and typed failures. JSON export and import share
+the same 64 MiB serialized envelope and 100,000-record per top-level collection limits, including the
+download newline, so a successful export remains within the matching importer's structural limits.
+
+Merging JSON into an existing project treats each archived project, task, or saved-view version as the
+expected local version. Identical records are no-ops; a supported mutable difference is applied only
+when that expected version still matches, then the local aggregate advances once. Versionless identity
+and execution-history records are immutable after creation, and omitted local records are not deleted.
+This prevents a numerically newer archive from acting as an unverified last-write-wins clock across
+divergent Helm instances.
+
 ## Primary test seam
 
 The highest-value seam is an application command or query executed against a temporary SQLite database. It exercises domain rules, Effect services, Drizzle mappings, transactions, current projections, audit events, idempotency, and concurrency together.

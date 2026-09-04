@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as SearchRouteImport } from './routes/search'
 import { Route as ApiEventsRouteImport } from './routes/api/events'
 import { Route as ApiMcpRouteImport } from './routes/api/mcp'
+import { Route as ApiPortabilityRouteImport } from './routes/api/portability'
 import { Route as ViewsViewIdRouteImport } from './routes/views.$viewId'
 
 const IndexRoute = IndexRouteImport.update({
@@ -35,6 +36,11 @@ const ApiMcpRoute = ApiMcpRouteImport.update({
   path: '/api/mcp',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPortabilityRoute = ApiPortabilityRouteImport.update({
+  id: '/api/portability',
+  path: '/api/portability',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ViewsViewIdRoute = ViewsViewIdRouteImport.update({
   id: '/views/$viewId',
   path: '/views/$viewId',
@@ -46,6 +52,7 @@ export interface FileRoutesByFullPath {
   '/search': typeof SearchRoute
   '/api/events': typeof ApiEventsRoute
   '/api/mcp': typeof ApiMcpRoute
+  '/api/portability': typeof ApiPortabilityRoute
   '/views/$viewId': typeof ViewsViewIdRoute
 }
 export interface FileRoutesByTo {
@@ -53,6 +60,7 @@ export interface FileRoutesByTo {
   '/search': typeof SearchRoute
   '/api/events': typeof ApiEventsRoute
   '/api/mcp': typeof ApiMcpRoute
+  '/api/portability': typeof ApiPortabilityRoute
   '/views/$viewId': typeof ViewsViewIdRoute
 }
 export interface FileRoutesById {
@@ -61,15 +69,34 @@ export interface FileRoutesById {
   '/search': typeof SearchRoute
   '/api/events': typeof ApiEventsRoute
   '/api/mcp': typeof ApiMcpRoute
+  '/api/portability': typeof ApiPortabilityRoute
   '/views/$viewId': typeof ViewsViewIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/search' | '/api/events' | '/api/mcp' | '/views/$viewId'
+  fullPaths:
+    | '/'
+    | '/search'
+    | '/api/events'
+    | '/api/mcp'
+    | '/api/portability'
+    | '/views/$viewId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/search' | '/api/events' | '/api/mcp' | '/views/$viewId'
+  to:
+    | '/'
+    | '/search'
+    | '/api/events'
+    | '/api/mcp'
+    | '/api/portability'
+    | '/views/$viewId'
   id:
-    '__root__' | '/' | '/search' | '/api/events' | '/api/mcp' | '/views/$viewId'
+    | '__root__'
+    | '/'
+    | '/search'
+    | '/api/events'
+    | '/api/mcp'
+    | '/api/portability'
+    | '/views/$viewId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -77,6 +104,7 @@ export interface RootRouteChildren {
   SearchRoute: typeof SearchRoute
   ApiEventsRoute: typeof ApiEventsRoute
   ApiMcpRoute: typeof ApiMcpRoute
+  ApiPortabilityRoute: typeof ApiPortabilityRoute
   ViewsViewIdRoute: typeof ViewsViewIdRoute
 }
 
@@ -110,6 +138,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiMcpRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/portability': {
+      id: '/api/portability'
+      path: '/api/portability'
+      fullPath: '/api/portability'
+      preLoaderRoute: typeof ApiPortabilityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/views/$viewId': {
       id: '/views/$viewId'
       path: '/views/$viewId'
@@ -125,6 +160,7 @@ const rootRouteChildren: RootRouteChildren = {
   SearchRoute: SearchRoute,
   ApiEventsRoute: ApiEventsRoute,
   ApiMcpRoute: ApiMcpRoute,
+  ApiPortabilityRoute: ApiPortabilityRoute,
   ViewsViewIdRoute: ViewsViewIdRoute,
 }
 export const routeTree = rootRouteImport

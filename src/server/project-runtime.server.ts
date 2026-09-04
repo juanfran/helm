@@ -4,6 +4,7 @@ import { systemActivityClock } from "../application/activity";
 import { reconcileActiveAgentRuns } from "../application/agents";
 import { systemBulkTaskClock } from "../application/bulk-tasks";
 import { systemCustomizationClock } from "../application/customizations";
+import { systemPortabilityClock } from "../application/portability";
 import { reconcileTaskLeases, systemTaskClock } from "../application/tasks";
 import { systemTaskQueryClock } from "../application/task-queries";
 import { createSqliteAgentStore } from "../infrastructure/sqlite-agent-store.server";
@@ -11,6 +12,7 @@ import { createSqliteActivityStore } from "../infrastructure/sqlite-activity-sto
 import { createSqliteBulkTaskStore } from "../infrastructure/sqlite-bulk-task-store.server";
 import { createSqliteCustomizationStore } from "../infrastructure/sqlite-customization-store.server";
 import { createSqliteProjectStore } from "../infrastructure/sqlite-project-store.server";
+import { createSqlitePortabilityStore } from "../infrastructure/sqlite-portability-store.server";
 import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
 import { createSqliteTaskStore } from "../infrastructure/sqlite-task-store.server";
 import { createSqliteTaskQueryStore } from "../infrastructure/sqlite-task-query-store.server";
@@ -42,6 +44,11 @@ function createProjectRuntime() {
     store: createSqliteActivityStore(projectStore.database),
     clock: systemActivityClock,
   };
+  const portabilityServices = {
+    store: createSqlitePortabilityStore(projectStore.database),
+    clock: systemPortabilityClock,
+    repositoryInspector: localRepositoryInspector,
+  };
 
   Effect.runSync(reconcileActiveAgentRuns(agentServices));
   Effect.runSync(reconcileTaskLeases(taskServices));
@@ -60,6 +67,7 @@ function createProjectRuntime() {
     bulkTaskServices,
     customizationServices,
     leaseReconciliationTimer,
+    portabilityServices,
     projectServices,
     projectStore,
     taskServices,
@@ -87,6 +95,7 @@ export const {
   agentServices,
   bulkTaskServices,
   customizationServices,
+  portabilityServices,
   projectServices,
   taskQueryServices,
   taskServices,
