@@ -373,7 +373,6 @@ function taskCommandWorkerSource() {
 // Each contention case starts fresh transpiling workers. Two-core hosted runners can spend much
 // longer loading those modules than local machines, so these correctness tests need scheduling
 // headroom without turning their assertions into timing tests.
-const workerContentionTestTimeoutMilliseconds = 60_000;
 
 function waitForBarrierCount(
   barrier: Int32Array<SharedArrayBuffer>,
@@ -2229,189 +2228,185 @@ describe("task application commands", () => {
     expect(selections).toEqual(["next", "next"]);
   });
 
-  it(
-    "serializes genuinely contending claims across worker-thread SQLite connections",
-    async () => {
-      const firstAgent = await registerAgent("race-first", "Race First");
-      const secondAgent = await registerAgent("race-second", "Race Second");
-      const contested = await Effect.runPromise(
-        createTask(
-          readyInput({
-            title: "Contested task",
-            requiredCapabilities: ["typescript"],
-            idempotencyKey: "create-contested-task",
-          }),
-          human,
-          taskServices,
-        ),
-      );
-      const competingResults = await runContendingTaskOperations([
-        {
-          command: "claimTask",
-          input: {
-            projectId,
-            taskId: contested.id,
-            expectedVersion: contested.version,
-            idempotencyKey: "competing-claim-first",
-          },
-          registration: firstAgent,
-          now,
+  it("serializes genuinely contending claims across worker-thread SQLite connections", async () => {
+    const firstAgent = await registerAgent("race-first", "Race First");
+    const secondAgent = await registerAgent("race-second", "Race Second");
+    const contested = await Effect.runPromise(
+      createTask(
+        readyInput({
+          title: "Contested task",
+          requiredCapabilities: ["typescript"],
+          idempotencyKey: "create-contested-task",
+        }),
+        human,
+        taskServices,
+      ),
+    );
+    const competingResults = await runContendingTaskOperations([
+      {
+        command: "claimTask",
+        input: {
+          projectId,
+          taskId: contested.id,
+          expectedVersion: contested.version,
+          idempotencyKey: "competing-claim-first",
         },
-        {
-          command: "claimTask",
-          input: {
-            projectId,
-            taskId: contested.id,
-            expectedVersion: contested.version,
-            idempotencyKey: "competing-claim-second",
-          },
-          registration: secondAgent,
-          now,
+        registration: firstAgent,
+        now,
+      },
+      {
+        command: "claimTask",
+        input: {
+          projectId,
+          taskId: contested.id,
+          expectedVersion: contested.version,
+          idempotencyKey: "competing-claim-second",
         },
-      ]);
+        registration: secondAgent,
+        now,
+      },
+    ]);
 
-      expect(competingResults.filter((result) => result.ok)).toHaveLength(1);
-      expect(competingResults.filter((result) => !result.ok)).toHaveLength(1);
-      const rejected = competingResults.find((result) => !result.ok);
-      if (rejected && !rejected.ok) {
-        expect(["TaskClaimUnavailableError", "TaskVersionConflictError"]).toContain(
-          rejected.error["_tag"],
-        );
-      }
-      expect(
-        projectStore.database
-          .prepare("select count(*) from leases where task_id = ? and status = 'active'")
-          .pluck()
-          .get(contested.id),
-      ).toBe(1);
-      expect(
-        projectStore.database
-          .prepare("select count(*) from attempts where task_id = ? and status = 'active'")
-          .pluck()
-          .get(contested.id),
-      ).toBe(1);
-      expect(
-        projectStore.database
-          .prepare("select count(*) from events where entity_id = ? and kind = 'task.claimed'")
-          .pluck()
-          .get(contested.id),
-      ).toBe(1);
-
-      const nextContested = await Effect.runPromise(
-        createTask(
-          readyInput({
-            title: "Contested claim-next task",
-            requiredCapabilities: ["typescript"],
-            idempotencyKey: "create-contested-claim-next",
-          }),
-          human,
-          taskServices,
-        ),
+    expect(competingResults.filter((result) => result.ok)).toHaveLength(1);
+    expect(competingResults.filter((result) => !result.ok)).toHaveLength(1);
+    const rejected = competingResults.find((result) => !result.ok);
+    if (rejected && !rejected.ok) {
+      expect(["TaskClaimUnavailableError", "TaskVersionConflictError"]).toContain(
+        rejected.error["_tag"],
       );
-      const nextResults = await runContendingTaskOperations([
-        {
-          command: "claimNextTask",
-          input: { projectId, idempotencyKey: "competing-claim-next-first" },
-          registration: firstAgent,
-          now,
-        },
-        {
-          command: "claimNextTask",
-          input: { projectId, idempotencyKey: "competing-claim-next-second" },
-          registration: secondAgent,
-          now,
-        },
-      ]);
-      const nextClaimEvent = projectStore.database
-        .prepare<[string], string>(
-          "select payload_json from events where entity_id = ? and kind = 'task.claimed'",
-        )
+    }
+    expect(
+      projectStore.database
+        .prepare("select count(*) from leases where task_id = ? and status = 'active'")
         .pluck()
-        .get(nextContested.id);
+        .get(contested.id),
+    ).toBe(1);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from attempts where task_id = ? and status = 'active'")
+        .pluck()
+        .get(contested.id),
+    ).toBe(1);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where entity_id = ? and kind = 'task.claimed'")
+        .pluck()
+        .get(contested.id),
+    ).toBe(1);
 
-      expect(nextResults.filter((result) => result.ok)).toHaveLength(1);
-      expect(nextResults.find((result) => !result.ok)).toMatchObject({
-        error: { _tag: "TaskClaimUnavailableError" },
-      });
-      expect(
-        projectStore.database
-          .prepare("select count(*) from leases where task_id = ? and status = 'active'")
-          .pluck()
-          .get(nextContested.id),
-      ).toBe(1);
-      expect(nextClaimEvent).toBeDefined();
-      expect(JSON.parse(nextClaimEvent ?? "{}")).toMatchObject({
-        selection: "next",
-      });
+    const nextContested = await Effect.runPromise(
+      createTask(
+        readyInput({
+          title: "Contested claim-next task",
+          requiredCapabilities: ["typescript"],
+          idempotencyKey: "create-contested-claim-next",
+        }),
+        human,
+        taskServices,
+      ),
+    );
+    const nextResults = await runContendingTaskOperations([
+      {
+        command: "claimNextTask",
+        input: { projectId, idempotencyKey: "competing-claim-next-first" },
+        registration: firstAgent,
+        now,
+      },
+      {
+        command: "claimNextTask",
+        input: { projectId, idempotencyKey: "competing-claim-next-second" },
+        registration: secondAgent,
+        now,
+      },
+    ]);
+    const nextClaimEvent = projectStore.database
+      .prepare<[string], string>(
+        "select payload_json from events where entity_id = ? and kind = 'task.claimed'",
+      )
+      .pluck()
+      .get(nextContested.id);
 
-      const retryTask = await Effect.runPromise(
-        createTask(
-          readyInput({
-            title: "Concurrent retry task",
-            requiredCapabilities: ["typescript"],
-            idempotencyKey: "create-concurrent-retry-task",
+    expect(nextResults.filter((result) => result.ok)).toHaveLength(1);
+    expect(nextResults.find((result) => !result.ok)).toMatchObject({
+      error: { _tag: "TaskClaimUnavailableError" },
+    });
+    expect(
+      projectStore.database
+        .prepare("select count(*) from leases where task_id = ? and status = 'active'")
+        .pluck()
+        .get(nextContested.id),
+    ).toBe(1);
+    expect(nextClaimEvent).toBeDefined();
+    expect(JSON.parse(nextClaimEvent ?? "{}")).toMatchObject({
+      selection: "next",
+    });
+
+    const retryTask = await Effect.runPromise(
+      createTask(
+        readyInput({
+          title: "Concurrent retry task",
+          requiredCapabilities: ["typescript"],
+          idempotencyKey: "create-concurrent-retry-task",
+        }),
+        human,
+        taskServices,
+      ),
+    );
+    const retryCommand = {
+      projectId,
+      taskId: retryTask.id,
+      expectedVersion: retryTask.version,
+      idempotencyKey: "concurrent-idempotent-claim",
+    };
+    const retryResults = await runContendingTaskOperations([
+      {
+        command: "claimTask",
+        input: retryCommand,
+        registration: firstAgent,
+        now,
+      },
+      {
+        command: "claimTask",
+        input: retryCommand,
+        registration: firstAgent,
+        now,
+      },
+    ]);
+
+    const successfulRetries = retryResults.filter((result) => result.ok);
+    const failedRetries = retryResults.filter((result) => !result.ok);
+    expect(successfulRetries.length).toBeGreaterThanOrEqual(1);
+    if (successfulRetries.length === 2) {
+      expect(successfulRetries[1]).toEqual(successfulRetries[0]);
+    } else {
+      expect(failedRetries).toEqual([
+        expect.objectContaining({
+          error: expect.objectContaining({
+            _tag: "TaskLeaseError",
+            reason: "inactive",
           }),
-          human,
-          taskServices,
-        ),
-      );
-      const retryCommand = {
-        projectId,
-        taskId: retryTask.id,
-        expectedVersion: retryTask.version,
-        idempotencyKey: "concurrent-idempotent-claim",
-      };
-      const retryResults = await runContendingTaskOperations([
-        {
-          command: "claimTask",
-          input: retryCommand,
-          registration: firstAgent,
-          now,
-        },
-        {
-          command: "claimTask",
-          input: retryCommand,
-          registration: firstAgent,
-          now,
-        },
+        }),
       ]);
-
-      const successfulRetries = retryResults.filter((result) => result.ok);
-      const failedRetries = retryResults.filter((result) => !result.ok);
-      expect(successfulRetries.length).toBeGreaterThanOrEqual(1);
-      if (successfulRetries.length === 2) {
-        expect(successfulRetries[1]).toEqual(successfulRetries[0]);
-      } else {
-        expect(failedRetries).toEqual([
-          expect.objectContaining({
-            error: expect.objectContaining({
-              _tag: "TaskLeaseError",
-              reason: "inactive",
-            }),
-          }),
-        ]);
-      }
-      expect(
-        projectStore.database
-          .prepare("select count(*) from leases where task_id = ?")
-          .pluck()
-          .get(retryTask.id),
-      ).toBe(1);
-      expect(
-        projectStore.database
-          .prepare("select count(*) from idempotency_records where key = ?")
-          .pluck()
-          .get(retryCommand.idempotencyKey),
-      ).toBe(1);
-      expect(
-        projectStore.database
-          .prepare("select count(*) from events where entity_id = ? and kind = 'task.claimed'")
-          .pluck()
-          .get(retryTask.id),
-      ).toBe(1);
-    },
-    workerContentionTestTimeoutMilliseconds,
-  );
+    }
+    expect(
+      projectStore.database
+        .prepare("select count(*) from leases where task_id = ?")
+        .pluck()
+        .get(retryTask.id),
+    ).toBe(1);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from idempotency_records where key = ?")
+        .pluck()
+        .get(retryCommand.idempotencyKey),
+    ).toBe(1);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where entity_id = ? and kind = 'task.claimed'")
+        .pluck()
+        .get(retryTask.id),
+    ).toBe(1);
+  }, 60_000);
 
   it("renews only for the current owner, task version, and active registered run", async () => {
     const registration = await registerAgent("renew-owner", "Renew Owner");
@@ -2502,303 +2497,287 @@ describe("task application commands", () => {
     ).toBe(1);
   });
 
-  it(
-    "serializes competing renewals and deduplicates identical renewal retries across workers",
-    async () => {
-      const registration = await registerAgent("renew-race-owner", "Renew Race Owner");
-      const { grant } = await claimedTaskFixture(registration, "renew-race");
-      now = "2026-09-03T12:01:00.000Z";
-      const competingRenewals = await runContendingTaskOperations([
-        {
-          command: "renewTaskLease",
-          input: {
-            leaseToken: grant.leaseToken,
-            expectedVersion: grant.task.version,
-            leaseDurationSeconds: 600,
-            idempotencyKey: "renew-race-first",
-          },
-          registration,
-          now,
-        },
-        {
-          command: "renewTaskLease",
-          input: {
-            leaseToken: grant.leaseToken,
-            expectedVersion: grant.task.version,
-            leaseDurationSeconds: 600,
-            idempotencyKey: "renew-race-second",
-          },
-          registration,
-          now,
-        },
-      ]);
-      const competingState = projectStore.database
-        .prepare<
-          [string],
-          {
-            lifecycle: string;
-            version: number;
-            leaseStatus: string;
-            expiresAt: string;
-          }
-        >(
-          `select tasks.lifecycle, tasks.version, leases.status as leaseStatus, leases.expires_at as expiresAt
-         from tasks join leases on leases.task_id = tasks.id where tasks.id = ?`,
-        )
-        .get(grant.task.id);
-
-      expect(competingRenewals.filter((result) => result.ok)).toHaveLength(1);
-      expect(competingRenewals.find((result) => !result.ok)).toMatchObject({
-        error: {
-          _tag: "TaskVersionConflictError",
+  it("serializes competing renewals and deduplicates identical renewal retries across workers", async () => {
+    const registration = await registerAgent("renew-race-owner", "Renew Race Owner");
+    const { grant } = await claimedTaskFixture(registration, "renew-race");
+    now = "2026-09-03T12:01:00.000Z";
+    const competingRenewals = await runContendingTaskOperations([
+      {
+        command: "renewTaskLease",
+        input: {
+          leaseToken: grant.leaseToken,
           expectedVersion: grant.task.version,
-          currentVersion: grant.task.version + 1,
+          leaseDurationSeconds: 600,
+          idempotencyKey: "renew-race-first",
         },
-      });
-      expect(competingState).toEqual({
-        lifecycle: "in_progress",
-        version: 3,
-        leaseStatus: "active",
-        expiresAt: "2026-09-03T12:11:00.000Z",
-      });
-      expect(
-        projectStore.database
-          .prepare(
-            "select count(*) from events where entity_id = ? and kind = 'task.lease.renewed'",
-          )
-          .pluck()
-          .get(grant.task.id),
-      ).toBe(1);
-      expect(
-        projectStore.database
-          .prepare(
-            "select count(*) from idempotency_records where key in ('renew-race-first', 'renew-race-second')",
-          )
-          .pluck()
-          .get(),
-      ).toBe(1);
-
-      const { grant: retryGrant } = await claimedTaskFixture(registration, "renew-retry-race");
-      now = "2026-09-03T12:02:00.000Z";
-      const retryInput = {
-        leaseToken: retryGrant.leaseToken,
-        expectedVersion: retryGrant.task.version,
-        leaseDurationSeconds: 300,
-        idempotencyKey: "renew-identical-race",
-      };
-      const retryResults = await runContendingTaskOperations([
-        { command: "renewTaskLease", input: retryInput, registration, now },
-        { command: "renewTaskLease", input: retryInput, registration, now },
-      ]);
-
-      expect(retryResults.every((result) => result.ok)).toBe(true);
-      expect(retryResults[1]).toEqual(retryResults[0]);
-      expect(
-        projectStore.database
-          .prepare("select version from tasks where id = ?")
-          .pluck()
-          .get(retryGrant.task.id),
-      ).toBe(3);
-      expect(
-        projectStore.database
-          .prepare(
-            "select count(*) from events where entity_id = ? and kind = 'task.lease.renewed'",
-          )
-          .pluck()
-          .get(retryGrant.task.id),
-      ).toBe(1);
-      expect(
-        projectStore.database
-          .prepare("select count(*) from idempotency_records where key = ?")
-          .pluck()
-          .get(retryInput.idempotencyKey),
-      ).toBe(1);
-    },
-    workerContentionTestTimeoutMilliseconds,
-  );
-
-  it(
-    "keeps renewal and human cancellation coherent under genuine contention",
-    async () => {
-      const registration = await registerAgent("cancel-race-owner", "Cancel Race Owner");
-      const { grant } = await claimedTaskFixture(registration, "cancel-race");
-      now = "2026-09-03T12:01:00.000Z";
-      const [renewal, cancellation] = await runContendingTaskOperations([
+        registration,
+        now,
+      },
+      {
+        command: "renewTaskLease",
+        input: {
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          leaseDurationSeconds: 600,
+          idempotencyKey: "renew-race-second",
+        },
+        registration,
+        now,
+      },
+    ]);
+    const competingState = projectStore.database
+      .prepare<
+        [string],
         {
-          command: "renewTaskLease",
-          input: {
-            leaseToken: grant.leaseToken,
-            expectedVersion: grant.task.version,
-            leaseDurationSeconds: 600,
-            idempotencyKey: "renew-against-cancellation",
-          },
-          registration,
-          now,
+          lifecycle: string;
+          version: number;
+          leaseStatus: string;
+          expiresAt: string;
+        }
+      >(
+        `select tasks.lifecycle, tasks.version, leases.status as leaseStatus, leases.expires_at as expiresAt
+         from tasks join leases on leases.task_id = tasks.id where tasks.id = ?`,
+      )
+      .get(grant.task.id);
+
+    expect(competingRenewals.filter((result) => result.ok)).toHaveLength(1);
+    expect(competingRenewals.find((result) => !result.ok)).toMatchObject({
+      error: {
+        _tag: "TaskVersionConflictError",
+        expectedVersion: grant.task.version,
+        currentVersion: grant.task.version + 1,
+      },
+    });
+    expect(competingState).toEqual({
+      lifecycle: "in_progress",
+      version: 3,
+      leaseStatus: "active",
+      expiresAt: "2026-09-03T12:11:00.000Z",
+    });
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where entity_id = ? and kind = 'task.lease.renewed'")
+        .pluck()
+        .get(grant.task.id),
+    ).toBe(1);
+    expect(
+      projectStore.database
+        .prepare(
+          "select count(*) from idempotency_records where key in ('renew-race-first', 'renew-race-second')",
+        )
+        .pluck()
+        .get(),
+    ).toBe(1);
+
+    const { grant: retryGrant } = await claimedTaskFixture(registration, "renew-retry-race");
+    now = "2026-09-03T12:02:00.000Z";
+    const retryInput = {
+      leaseToken: retryGrant.leaseToken,
+      expectedVersion: retryGrant.task.version,
+      leaseDurationSeconds: 300,
+      idempotencyKey: "renew-identical-race",
+    };
+    const retryResults = await runContendingTaskOperations([
+      { command: "renewTaskLease", input: retryInput, registration, now },
+      { command: "renewTaskLease", input: retryInput, registration, now },
+    ]);
+
+    expect(retryResults.every((result) => result.ok)).toBe(true);
+    expect(retryResults[1]).toEqual(retryResults[0]);
+    expect(
+      projectStore.database
+        .prepare("select version from tasks where id = ?")
+        .pluck()
+        .get(retryGrant.task.id),
+    ).toBe(3);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where entity_id = ? and kind = 'task.lease.renewed'")
+        .pluck()
+        .get(retryGrant.task.id),
+    ).toBe(1);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from idempotency_records where key = ?")
+        .pluck()
+        .get(retryInput.idempotencyKey),
+    ).toBe(1);
+  }, 60_000);
+
+  it("keeps renewal and human cancellation coherent under genuine contention", async () => {
+    const registration = await registerAgent("cancel-race-owner", "Cancel Race Owner");
+    const { grant } = await claimedTaskFixture(registration, "cancel-race");
+    now = "2026-09-03T12:01:00.000Z";
+    const [renewal, cancellation] = await runContendingTaskOperations([
+      {
+        command: "renewTaskLease",
+        input: {
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          leaseDurationSeconds: 600,
+          idempotencyKey: "renew-against-cancellation",
         },
+        registration,
+        now,
+      },
+      {
+        command: "invalidateTaskClaim",
+        input: {
+          taskId: grant.task.id,
+          expectedVersion: grant.task.version,
+          disposition: "cancelled",
+          reason: "Human cancellation won or lost a real race.",
+          idempotencyKey: "cancel-against-renewal",
+        },
+        actor: human,
+        now,
+      },
+    ]);
+    const state = projectStore.database
+      .prepare<
+        [string],
         {
-          command: "invalidateTaskClaim",
-          input: {
-            taskId: grant.task.id,
-            expectedVersion: grant.task.version,
-            disposition: "cancelled",
-            reason: "Human cancellation won or lost a real race.",
-            idempotencyKey: "cancel-against-renewal",
-          },
-          actor: human,
-          now,
-        },
-      ]);
-      const state = projectStore.database
-        .prepare<
-          [string],
-          {
-            lifecycle: string;
-            version: number;
-            leaseStatus: string;
-            attemptStatus: string;
-          }
-        >(
-          `select tasks.lifecycle, tasks.version, leases.status as leaseStatus,
+          lifecycle: string;
+          version: number;
+          leaseStatus: string;
+          attemptStatus: string;
+        }
+      >(
+        `select tasks.lifecycle, tasks.version, leases.status as leaseStatus,
                 attempts.status as attemptStatus
          from tasks
          join leases on leases.task_id = tasks.id
          join attempts on attempts.id = leases.attempt_id
          where tasks.id = ?`,
-        )
-        .get(grant.task.id);
-      const mutationEvents = projectStore.database
-        .prepare<[string], string>(
-          "select kind from events where entity_id = ? and kind in ('task.lease.renewed', 'task.lease.cancelled') order by cursor",
+      )
+      .get(grant.task.id);
+    const mutationEvents = projectStore.database
+      .prepare<[string], string>(
+        "select kind from events where entity_id = ? and kind in ('task.lease.renewed', 'task.lease.cancelled') order by cursor",
+      )
+      .pluck()
+      .all(grant.task.id);
+    expect([renewal, cancellation].filter((result) => result?.ok)).toHaveLength(1);
+    expect(state?.version).toBe(3);
+    expect(mutationEvents).toHaveLength(1);
+    if (renewal?.ok) {
+      expect(cancellation).toMatchObject({
+        ok: false,
+        error: {
+          _tag: "TaskVersionConflictError",
+          expectedVersion: 2,
+          currentVersion: 3,
+        },
+      });
+      expect(state).toEqual({
+        lifecycle: "in_progress",
+        version: 3,
+        leaseStatus: "active",
+        attemptStatus: "active",
+      });
+      expect(mutationEvents).toEqual(["task.lease.renewed"]);
+    } else {
+      expect(cancellation?.ok).toBe(true);
+      expect(renewal).toMatchObject({
+        ok: false,
+        error: { _tag: "TaskLeaseError", reason: "inactive" },
+      });
+      expect(state).toEqual({
+        lifecycle: "ready",
+        version: 3,
+        leaseStatus: "cancelled",
+        attemptStatus: "abandoned",
+      });
+      expect(mutationEvents).toEqual(["task.lease.cancelled"]);
+    }
+    expect(
+      projectStore.database
+        .prepare(
+          "select count(*) from idempotency_records where key in ('renew-against-cancellation', 'cancel-against-renewal')",
         )
         .pluck()
-        .all(grant.task.id);
-      expect([renewal, cancellation].filter((result) => result?.ok)).toHaveLength(1);
-      expect(state?.version).toBe(3);
-      expect(mutationEvents).toHaveLength(1);
-      if (renewal?.ok) {
-        expect(cancellation).toMatchObject({
-          ok: false,
-          error: {
-            _tag: "TaskVersionConflictError",
-            expectedVersion: 2,
-            currentVersion: 3,
-          },
-        });
-        expect(state).toEqual({
-          lifecycle: "in_progress",
-          version: 3,
-          leaseStatus: "active",
-          attemptStatus: "active",
-        });
-        expect(mutationEvents).toEqual(["task.lease.renewed"]);
-      } else {
-        expect(cancellation?.ok).toBe(true);
-        expect(renewal).toMatchObject({
-          ok: false,
-          error: { _tag: "TaskLeaseError", reason: "inactive" },
-        });
-        expect(state).toEqual({
-          lifecycle: "ready",
-          version: 3,
-          leaseStatus: "cancelled",
-          attemptStatus: "abandoned",
-        });
-        expect(mutationEvents).toEqual(["task.lease.cancelled"]);
-      }
-      expect(
-        projectStore.database
-          .prepare(
-            "select count(*) from idempotency_records where key in ('renew-against-cancellation', 'cancel-against-renewal')",
-          )
-          .pluck()
-          .get(),
-      ).toBe(1);
-    },
-    workerContentionTestTimeoutMilliseconds,
-  );
+        .get(),
+    ).toBe(1);
+  }, 60_000);
 
-  it(
-    "keeps renewal and expiration coherent when their clocks straddle the deadline",
-    async () => {
-      const registration = await registerAgent("expiry-race-owner", "Expiry Race Owner");
-      const { grant } = await claimedTaskFixture(registration, "expiry-race");
-      const [renewal, reconciliation] = await runContendingTaskOperations([
-        {
-          command: "renewTaskLease",
-          input: {
-            leaseToken: grant.leaseToken,
-            expectedVersion: grant.task.version,
-            leaseDurationSeconds: 300,
-            idempotencyKey: "renew-against-expiration",
-          },
-          registration,
-          now: "2026-09-03T12:04:59.000Z",
+  it("keeps renewal and expiration coherent when their clocks straddle the deadline", async () => {
+    const registration = await registerAgent("expiry-race-owner", "Expiry Race Owner");
+    const { grant } = await claimedTaskFixture(registration, "expiry-race");
+    const [renewal, reconciliation] = await runContendingTaskOperations([
+      {
+        command: "renewTaskLease",
+        input: {
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          leaseDurationSeconds: 300,
+          idempotencyKey: "renew-against-expiration",
         },
-        { command: "reconcileTaskLeases", now: grant.claim.expiresAt },
-      ]);
-      const state = projectStore.database
-        .prepare<
-          [string],
-          {
-            lifecycle: string;
-            version: number;
-            leaseStatus: string;
-            expiresAt: string;
-            attemptStatus: string;
-          }
-        >(
-          `select tasks.lifecycle, tasks.version, leases.status as leaseStatus,
+        registration,
+        now: "2026-09-03T12:04:59.000Z",
+      },
+      { command: "reconcileTaskLeases", now: grant.claim.expiresAt },
+    ]);
+    const state = projectStore.database
+      .prepare<
+        [string],
+        {
+          lifecycle: string;
+          version: number;
+          leaseStatus: string;
+          expiresAt: string;
+          attemptStatus: string;
+        }
+      >(
+        `select tasks.lifecycle, tasks.version, leases.status as leaseStatus,
                 leases.expires_at as expiresAt, attempts.status as attemptStatus
          from tasks
          join leases on leases.task_id = tasks.id
          join attempts on attempts.id = leases.attempt_id
          where tasks.id = ?`,
-        )
-        .get(grant.task.id);
-      const mutationEvents = projectStore.database
-        .prepare<[string], string>(
-          "select kind from events where entity_id = ? and kind in ('task.lease.renewed', 'task.lease.expired') order by cursor",
-        )
-        .pluck()
-        .all(grant.task.id);
-      const renewalRecordCount = projectStore.database
-        .prepare("select count(*) from idempotency_records where key = 'renew-against-expiration'")
-        .pluck()
-        .get();
+      )
+      .get(grant.task.id);
+    const mutationEvents = projectStore.database
+      .prepare<[string], string>(
+        "select kind from events where entity_id = ? and kind in ('task.lease.renewed', 'task.lease.expired') order by cursor",
+      )
+      .pluck()
+      .all(grant.task.id);
+    const renewalRecordCount = projectStore.database
+      .prepare("select count(*) from idempotency_records where key = 'renew-against-expiration'")
+      .pluck()
+      .get();
 
-      expect(reconciliation?.ok).toBe(true);
-      expect(state?.version).toBe(3);
-      expect(mutationEvents).toHaveLength(1);
-      if (renewal?.ok) {
-        expect(reconciliation).toEqual({ ok: true, value: 0 });
-        expect(renewalRecordCount).toBe(1);
-        expect(state).toEqual({
-          lifecycle: "in_progress",
-          version: 3,
-          leaseStatus: "active",
-          expiresAt: "2026-09-03T12:09:59.000Z",
-          attemptStatus: "active",
-        });
-        expect(mutationEvents).toEqual(["task.lease.renewed"]);
-      } else {
-        expect(renewal).toMatchObject({
-          ok: false,
-          error: { _tag: "TaskLeaseError", reason: "expired" },
-        });
-        expect(reconciliation).toEqual({ ok: true, value: 1 });
-        expect(renewalRecordCount).toBe(0);
-        expect(state).toEqual({
-          lifecycle: "ready",
-          version: 3,
-          leaseStatus: "expired",
-          expiresAt: grant.claim.expiresAt,
-          attemptStatus: "abandoned",
-        });
-        expect(mutationEvents).toEqual(["task.lease.expired"]);
-      }
-    },
-    workerContentionTestTimeoutMilliseconds,
-  );
+    expect(reconciliation?.ok).toBe(true);
+    expect(state?.version).toBe(3);
+    expect(mutationEvents).toHaveLength(1);
+    if (renewal?.ok) {
+      expect(reconciliation).toEqual({ ok: true, value: 0 });
+      expect(renewalRecordCount).toBe(1);
+      expect(state).toEqual({
+        lifecycle: "in_progress",
+        version: 3,
+        leaseStatus: "active",
+        expiresAt: "2026-09-03T12:09:59.000Z",
+        attemptStatus: "active",
+      });
+      expect(mutationEvents).toEqual(["task.lease.renewed"]);
+    } else {
+      expect(renewal).toMatchObject({
+        ok: false,
+        error: { _tag: "TaskLeaseError", reason: "expired" },
+      });
+      expect(reconciliation).toEqual({ ok: true, value: 1 });
+      expect(renewalRecordCount).toBe(0);
+      expect(state).toEqual({
+        lifecycle: "ready",
+        version: 3,
+        leaseStatus: "expired",
+        expiresAt: grant.claim.expiresAt,
+        attemptStatus: "abandoned",
+      });
+      expect(mutationEvents).toEqual(["task.lease.expired"]);
+    }
+  }, 60_000);
 
   it("releases a lease idempotently and rejects stale renewal and late agent completion", async () => {
     const registration = await registerAgent("release-owner", "Release Owner");
@@ -3137,128 +3116,124 @@ describe("task application commands", () => {
     ).toBe(0);
   });
 
-  it(
-    "serializes completion, failure, and human cancellation races",
-    async () => {
-      const registration = await registerAgent("result-race", "Result Racer");
-      const scenarios = [
-        ["completeTask", "failTask"],
-        ["completeTask", "cancelTask"],
-        ["failTask", "cancelTask"],
-      ] as const;
+  it("serializes completion, failure, and human cancellation races", async () => {
+    const registration = await registerAgent("result-race", "Result Racer");
+    const scenarios = [
+      ["completeTask", "failTask"],
+      ["completeTask", "cancelTask"],
+      ["failTask", "cancelTask"],
+    ] as const;
 
-      for (const [scenarioIndex, commands] of scenarios.entries()) {
-        const key = `result-race-${scenarioIndex}`;
-        // Each scenario owns the database exclusively so only its two commands contend.
-        // oxlint-disable-next-line no-await-in-loop
-        const { grant } = await claimedTaskFixture(registration, key);
-        const inputs = {
-          completeTask: {
-            projectId,
-            taskId: grant.task.id,
-            leaseToken: grant.leaseToken,
-            expectedVersion: grant.task.version,
-            report: completionReport(key),
-            idempotencyKey: `complete-${key}`,
+    for (const [scenarioIndex, commands] of scenarios.entries()) {
+      const key = `result-race-${scenarioIndex}`;
+      // Each scenario owns the database exclusively so only its two commands contend.
+      // oxlint-disable-next-line no-await-in-loop
+      const { grant } = await claimedTaskFixture(registration, key);
+      const inputs = {
+        completeTask: {
+          projectId,
+          taskId: grant.task.id,
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          report: completionReport(key),
+          idempotencyKey: `complete-${key}`,
+        },
+        failTask: {
+          projectId,
+          taskId: grant.task.id,
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          report: {
+            classification: "verification" as const,
+            reason: "The race fixture failed verification.",
+            changedAreas: ["src/race.ts"],
+            verificationResults: [
+              {
+                name: "Race verification",
+                status: "failed" as const,
+                details: "The competing result won.",
+              },
+            ],
+            references: [],
+            risks: [],
+            followUpWork: [],
           },
-          failTask: {
-            projectId,
-            taskId: grant.task.id,
-            leaseToken: grant.leaseToken,
-            expectedVersion: grant.task.version,
-            report: {
-              classification: "verification" as const,
-              reason: "The race fixture failed verification.",
-              changedAreas: ["src/race.ts"],
-              verificationResults: [
-                {
-                  name: "Race verification",
-                  status: "failed" as const,
-                  details: "The competing result won.",
-                },
-              ],
-              references: [],
-              risks: [],
-              followUpWork: [],
-            },
-            idempotencyKey: `fail-${key}`,
-          },
-          cancelTask: {
-            taskId: grant.task.id,
-            expectedVersion: grant.task.version,
-            reason: "The human stopped this contending execution.",
-            idempotencyKey: `cancel-${key}`,
-          },
-        };
-        // oxlint-disable-next-line no-await-in-loop
-        const outcomes = await runContendingTaskOperations(
-          commands.map((command) => ({
-            command,
-            input: inputs[command],
-            registration: command === "cancelTask" ? undefined : registration,
-            actor: command === "cancelTask" ? human : undefined,
-            now,
-          })),
-        );
-        const winnerIndex = outcomes.findIndex((outcome) => outcome.ok);
-        const winner = commands[winnerIndex];
-        if (!winner) throw new Error("Expected one result command to win");
-        const expected = {
-          completeTask: {
-            lifecycle: "review",
-            attemptStatus: "completed",
-            eventKind: "task.review.requested",
-          },
-          failTask: {
-            lifecycle: "ready",
-            attemptStatus: "failed",
-            eventKind: "task.attempt.failed",
-          },
-          cancelTask: {
-            lifecycle: "cancelled",
-            attemptStatus: "cancelled",
-            eventKind: "task.cancelled",
-          },
-        }[winner];
-        const state = projectStore.database
-          .prepare<[string], { lifecycle: string; attemptStatus: string; leaseStatus: string }>(
-            `select tasks.lifecycle,
+          idempotencyKey: `fail-${key}`,
+        },
+        cancelTask: {
+          taskId: grant.task.id,
+          expectedVersion: grant.task.version,
+          reason: "The human stopped this contending execution.",
+          idempotencyKey: `cancel-${key}`,
+        },
+      };
+      // oxlint-disable-next-line no-await-in-loop
+      const outcomes = await runContendingTaskOperations(
+        commands.map((command) => ({
+          command,
+          input: inputs[command],
+          registration: command === "cancelTask" ? undefined : registration,
+          actor: command === "cancelTask" ? human : undefined,
+          now,
+        })),
+      );
+      const winnerIndex = outcomes.findIndex((outcome) => outcome.ok);
+      const winner = commands[winnerIndex];
+      if (!winner) throw new Error("Expected one result command to win");
+      const expected = {
+        completeTask: {
+          lifecycle: "review",
+          attemptStatus: "completed",
+          eventKind: "task.review.requested",
+        },
+        failTask: {
+          lifecycle: "ready",
+          attemptStatus: "failed",
+          eventKind: "task.attempt.failed",
+        },
+        cancelTask: {
+          lifecycle: "cancelled",
+          attemptStatus: "cancelled",
+          eventKind: "task.cancelled",
+        },
+      }[winner];
+      const state = projectStore.database
+        .prepare<[string], { lifecycle: string; attemptStatus: string; leaseStatus: string }>(
+          `select tasks.lifecycle,
                   attempts.status as attemptStatus,
                   leases.status as leaseStatus
            from tasks
            join attempts on attempts.task_id = tasks.id
            join leases on leases.attempt_id = attempts.id
            where tasks.id = ?`,
-          )
-          .get(grant.task.id);
-        const resultEvents = projectStore.database
-          .prepare<[string], string>(
-            `select kind from events
+        )
+        .get(grant.task.id);
+      const resultEvents = projectStore.database
+        .prepare<[string], string>(
+          `select kind from events
            where entity_id = ?
              and kind in ('task.review.requested', 'task.attempt.failed', 'task.cancelled')`,
-          )
-          .pluck()
-          .all(grant.task.id);
-        const resultRecords = projectStore.database
-          .prepare<[string, string, string], number>(
-            "select count(*) from idempotency_records where key in (?, ?, ?)",
-          )
-          .pluck()
-          .get(`complete-${key}`, `fail-${key}`, `cancel-${key}`);
+        )
+        .pluck()
+        .all(grant.task.id);
+      const resultRecords = projectStore.database
+        .prepare<[string, string, string], number>(
+          "select count(*) from idempotency_records where key in (?, ?, ?)",
+        )
+        .pluck()
+        .get(`complete-${key}`, `fail-${key}`, `cancel-${key}`);
 
-        expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
-        expect(outcomes.filter((outcome) => !outcome.ok)).toHaveLength(1);
-        expect(state).toEqual({
-          lifecycle: expected.lifecycle,
-          attemptStatus: expected.attemptStatus,
-          leaseStatus: expected.attemptStatus === "cancelled" ? "cancelled" : "released",
-        });
-        expect(resultEvents).toEqual([expected.eventKind]);
-        expect(resultRecords).toBe(1);
-      }
-    },
-    workerContentionTestTimeoutMilliseconds,
-  );
+      expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
+      expect(outcomes.filter((outcome) => !outcome.ok)).toHaveLength(1);
+      expect(state).toEqual({
+        lifecycle: expected.lifecycle,
+        attemptStatus: expected.attemptStatus,
+        leaseStatus: expected.attemptStatus === "cancelled" ? "cancelled" : "released",
+      });
+      expect(resultEvents).toEqual([expected.eventKind]);
+      expect(resultRecords).toBe(1);
+    }
+  }, 60_000);
 
   it("accepts representative input through normal and compiled task schemas", () => {
     const valid = backlogInput();
