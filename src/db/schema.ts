@@ -7,6 +7,7 @@ import {
   uniqueIndex,
   type AnySQLiteColumn,
 } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
 
 export const projects = sqliteTable(
   "projects",
@@ -35,7 +36,9 @@ export const tasks = sqliteTable(
     sequence: integer("sequence").notNull(),
     parentTaskId: text("parent_task_id").references((): AnySQLiteColumn => tasks.id),
     title: text("title").notNull(),
-    lifecycle: text("lifecycle", { enum: ["backlog", "ready", "done", "cancelled"] }).notNull(),
+    lifecycle: text("lifecycle", {
+      enum: ["backlog", "ready", "in_progress", "review", "done", "cancelled"],
+    }).notNull(),
     priority: text("priority", { enum: ["urgent", "high", "normal", "low"] })
       .notNull()
       .default("normal"),
@@ -207,7 +210,44 @@ export const attempts = sqliteTable(
     createdAt: text("created_at").notNull(),
     completedAt: text("completed_at"),
   },
-  (table) => [index("attempts_task_index").on(table.taskId, table.createdAt)],
+  (table) => [
+    index("attempts_task_index").on(table.taskId, table.createdAt),
+    uniqueIndex("attempts_one_active_per_task")
+      .on(table.taskId)
+      .where(sql`${table.status} = 'active'`),
+  ],
+);
+
+export const leases = sqliteTable(
+  "leases",
+  {
+    id: text("id").primaryKey(),
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id),
+    attemptId: text("attempt_id")
+      .notNull()
+      .references(() => attempts.id),
+    agentRunId: text("agent_run_id")
+      .notNull()
+      .references(() => agentRuns.id),
+    tokenHash: text("token_hash").notNull(),
+    status: text("status", {
+      enum: ["active", "released", "expired", "cancelled", "reassigned"],
+    }).notNull(),
+    acquiredAt: text("acquired_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    invalidatedAt: text("invalidated_at"),
+    invalidationReason: text("invalidation_reason"),
+  },
+  (table) => [
+    uniqueIndex("leases_token_hash_unique").on(table.tokenHash),
+    uniqueIndex("leases_one_active_per_task")
+      .on(table.taskId)
+      .where(sql`${table.status} = 'active'`),
+    index("leases_agent_run_status_index").on(table.agentRunId, table.status),
+    index("leases_status_expiry_index").on(table.status, table.expiresAt),
+  ],
 );
 
 export const preferences = sqliteTable("preferences", {
@@ -253,6 +293,7 @@ export const schema = {
   agentProfiles,
   agentRuns,
   attempts,
+  leases,
   taskRelations,
   preferences,
   events,

@@ -1,8 +1,11 @@
 import { useMemo, useState, type FormEvent } from "react";
 import * as stylex from "@stylexjs/stylex";
 import {
+  Activity,
   Archive,
+  Bot,
   CheckCircle2,
+  Clock3,
   GitBranch,
   Inbox,
   Link2,
@@ -26,15 +29,22 @@ import {
   type CompleteTaskInput,
   type CreateTaskInput,
   type CreateTaskRelationInput,
+  type InvalidateTaskClaimInput,
   type PrepareTaskInput,
   type ReopenTaskInput,
   type RichTextDocument,
   type Task,
+  type TaskClaim,
+  type TaskLifecycle,
   type TagInput,
   type TaskTag,
   type UpdateTaskPlanningInput,
 } from "../../domain/tasks";
-import type { TaskCommandResponse, TaskRelationCommandResponse } from "../../server/task-adapter";
+import type {
+  TaskCommandResponse,
+  TaskLeaseCommandResponse,
+  TaskRelationCommandResponse,
+} from "../../server/task-adapter";
 import { tokens } from "../../styles/tokens.stylex";
 import { RichTextEditor } from "./rich-text-editor";
 
@@ -50,6 +60,7 @@ type TaskWorkspaceProps = {
   onReopenTask: (input: ReopenTaskInput) => Promise<TaskCommandResponse>;
   onCreateTaskRelation: (input: CreateTaskRelationInput) => Promise<TaskRelationCommandResponse>;
   onArchiveTask: (input: ArchiveTaskInput) => Promise<TaskCommandResponse>;
+  onInvalidateClaim: (input: InvalidateTaskClaimInput) => Promise<TaskLeaseCommandResponse>;
   onChangeTheme: (theme: Theme) => Promise<void>;
 };
 
@@ -67,6 +78,7 @@ export function TaskWorkspace({
   onReopenTask,
   onCreateTaskRelation,
   onArchiveTask,
+  onInvalidateClaim,
   onChangeTheme,
 }: TaskWorkspaceProps) {
   const orderedTasks = useMemo(() => tasks.toSorted(compareTaskOrder), [tasks]);
@@ -80,6 +92,7 @@ export function TaskWorkspace({
     () => ({
       backlog: tasks.filter((task) => task.lifecycle === "backlog").length,
       ready: tasks.filter((task) => task.lifecycle === "ready").length,
+      active: tasks.filter((task) => task.lifecycle === "in_progress").length,
       done: tasks.filter((task) => task.lifecycle === "done").length,
       claimable: tasks.filter((task) => task.eligibility?.claimable).length,
     }),
@@ -154,7 +167,7 @@ export function TaskWorkspace({
             </div>
             <span {...stylex.props(styles.total)}>{orderedTasks.length}</span>
           </div>
-          <div {...stylex.props(styles.counts)}>
+          <section aria-label="Task counts" {...stylex.props(styles.counts)}>
             <span>
               <Inbox size={14} aria-hidden="true" /> {counts.backlog} backlog
             </span>
@@ -162,12 +175,15 @@ export function TaskWorkspace({
               <CheckCircle2 size={14} aria-hidden="true" /> {counts.ready} ready
             </span>
             <span>
+              <Activity size={14} aria-hidden="true" /> {counts.active} active
+            </span>
+            <span>
               <CheckCircle2 size={14} aria-hidden="true" /> {counts.done} done
             </span>
             <span>
               <SlidersHorizontal size={14} aria-hidden="true" /> {counts.claimable} claimable
             </span>
-          </div>
+          </section>
           <form onSubmit={capture} {...stylex.props(styles.capture)} aria-label="Quick capture">
             <label htmlFor="capture-title" {...stylex.props(styles.srOnly)}>
               Task title
@@ -218,8 +234,11 @@ export function TaskWorkspace({
                       .filter(Boolean)
                       .join(" · ")}
                   </span>
+                  {task.claim ? <ClaimLeaseSummary claim={task.claim} compact /> : null}
                 </span>
-                <span {...stylex.props(styles[task.lifecycle])}>{task.lifecycle}</span>
+                <span {...stylex.props(styles[task.lifecycle])}>
+                  {taskLifecycleLabel(task.lifecycle)}
+                </span>
                 {task.eligibility ? (
                   <span {...stylex.props(styles.eligibility)}>{task.eligibility.status}</span>
                 ) : null}
@@ -242,6 +261,7 @@ export function TaskWorkspace({
               onReopen={onReopenTask}
               onCreateRelation={onCreateTaskRelation}
               onArchive={onArchiveTask}
+              onInvalidateClaim={onInvalidateClaim}
             />
           ) : (
             <div {...stylex.props(styles.empty)}>
@@ -267,6 +287,7 @@ function PreparationPanel({
   onReopen,
   onCreateRelation,
   onArchive,
+  onInvalidateClaim,
 }: {
   task: Task;
   tasks: readonly Task[];
@@ -278,6 +299,7 @@ function PreparationPanel({
   onReopen: TaskWorkspaceProps["onReopenTask"];
   onCreateRelation: TaskWorkspaceProps["onCreateTaskRelation"];
   onArchive: TaskWorkspaceProps["onArchiveTask"];
+  onInvalidateClaim: TaskWorkspaceProps["onInvalidateClaim"];
 }) {
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState<RichTextDocument>(task.description);
@@ -312,6 +334,10 @@ function PreparationPanel({
     tasks.find((candidate) => candidate.id !== task.id)?.id ?? "",
   );
   const [relationType, setRelationType] = useState("blocks");
+  const [claimReason, setClaimReason] = useState("");
+  const [claimPendingDisposition, setClaimPendingDisposition] = useState<
+    InvalidateTaskClaimInput["disposition"] | null
+  >(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const parentTask = task.parentTaskId
@@ -322,6 +348,7 @@ function PreparationPanel({
     .filter((child) => child !== undefined);
   const relationTarget = tasks.find((candidate) => candidate.id === relationTargetId);
   const editable = task.lifecycle === "backlog" || task.lifecycle === "ready";
+  const executionReadOnly = task.lifecycle === "in_progress" || task.lifecycle === "review";
 
   function currentPlanningFields() {
     return {
@@ -339,6 +366,7 @@ function PreparationPanel({
 
   async function prepare(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!editable) return;
     setPending(true);
     setError(null);
     try {
@@ -368,6 +396,7 @@ function PreparationPanel({
   }
 
   async function updatePlanning() {
+    if (!editable) return;
     setPending(true);
     setError(null);
     try {
@@ -386,6 +415,7 @@ function PreparationPanel({
   }
 
   async function archive() {
+    if (executionReadOnly) return;
     setPending(true);
     setError(null);
     try {
@@ -439,6 +469,7 @@ function PreparationPanel({
   }
 
   async function createChild() {
+    if (executionReadOnly) return;
     setPending(true);
     setError(null);
     try {
@@ -466,7 +497,7 @@ function PreparationPanel({
   }
 
   async function createRelation() {
-    if (!relationTarget) return;
+    if (executionReadOnly || !relationTarget) return;
     setPending(true);
     setError(null);
     try {
@@ -484,6 +515,35 @@ function PreparationPanel({
       setError("Helm could not create the task relation.");
     } finally {
       setPending(false);
+    }
+  }
+
+  async function invalidateClaim(disposition: InvalidateTaskClaimInput["disposition"]) {
+    if (!task.claim || claimReason.trim().length === 0) return;
+    const confirmed = window.confirm(
+      disposition === "cancelled"
+        ? `Cancel ${task.claim.agentDisplayName}'s claim? Their lease will stop immediately and the current attempt will be marked abandoned.`
+        : `Make this task available for reassignment? ${task.claim.agentDisplayName}'s lease will stop immediately and the current attempt will be marked abandoned.`,
+    );
+    if (!confirmed) return;
+
+    setPending(true);
+    setClaimPendingDisposition(disposition);
+    setError(null);
+    try {
+      const response = await onInvalidateClaim({
+        taskId: task.id,
+        expectedVersion: task.version,
+        disposition,
+        reason: claimReason.trim(),
+        idempotencyKey: crypto.randomUUID(),
+      });
+      if (!response.ok) setError(response.error.message);
+    } catch {
+      setError("Helm could not change the current claim.");
+    } finally {
+      setPending(false);
+      setClaimPendingDisposition(null);
     }
   }
 
@@ -547,11 +607,65 @@ function PreparationPanel({
               <CheckCircle2 size={15} aria-hidden="true" /> Done
             </Button>
           ) : null}
-          <Button type="button" variant="quiet" disabled={pending} onClick={() => void archive()}>
+          <Button
+            type="button"
+            variant="quiet"
+            disabled={pending || executionReadOnly}
+            onClick={() => void archive()}
+          >
             <Archive size={15} aria-hidden="true" /> Archive
           </Button>
         </span>
       </div>
+      {task.claim ? (
+        <section
+          aria-label="Current claim"
+          aria-live="polite"
+          aria-busy={claimPendingDisposition !== null}
+          {...stylex.props(styles.claimCard)}
+        >
+          <ClaimLeaseSummary claim={task.claim} />
+          <fieldset disabled={pending} {...stylex.props(styles.claimActions)}>
+            <legend {...stylex.props(styles.fieldLabel)}>Change current claim</legend>
+            <label htmlFor={`claim-reason-${task.id}`} {...stylex.props(styles.claimReasonLabel)}>
+              Reason
+            </label>
+            <textarea
+              id={`claim-reason-${task.id}`}
+              value={claimReason}
+              onChange={(event) => setClaimReason(event.target.value)}
+              aria-describedby={`claim-warning-${task.id}`}
+              rows={2}
+              maxLength={1_000}
+              required
+              {...stylex.props(styles.textarea)}
+            />
+            <p id={`claim-warning-${task.id}`} {...stylex.props(styles.hint)}>
+              Both actions immediately invalidate the agent lease and mark its current attempt
+              abandoned. The task returns to Ready.
+            </p>
+            <div {...stylex.props(styles.claimActionButtons)}>
+              <Button
+                type="button"
+                variant="quiet"
+                disabled={pending || claimReason.trim().length === 0}
+                onClick={() => void invalidateClaim("cancelled")}
+              >
+                {claimPendingDisposition === "cancelled" ? "Cancelling claim…" : "Cancel claim"}
+              </Button>
+              <Button
+                type="button"
+                disabled={pending || claimReason.trim().length === 0}
+                onClick={() => void invalidateClaim("reassigned")}
+              >
+                {claimPendingDisposition === "reassigned"
+                  ? "Making available…"
+                  : "Make available for reassignment"}
+              </Button>
+            </div>
+          </fieldset>
+        </section>
+      ) : null}
       <section {...stylex.props(styles.relations)} aria-label="Task relations">
         <div>
           <p {...stylex.props(styles.fieldLabel)}>Hierarchy</p>
@@ -586,61 +700,70 @@ function PreparationPanel({
           />
         </div>
       </section>
-      <div {...stylex.props(styles.inlineForm)} aria-label="Create child task">
-        <input
-          aria-label="Child task title"
-          value={childTitle}
-          onChange={(event) => setChildTitle(event.target.value)}
-          placeholder="Child task title"
-          maxLength={300}
-          {...stylex.props(styles.input)}
-        />
-        <Button
-          type="button"
-          disabled={pending || childTitle.trim().length === 0}
-          onClick={() => void createChild()}
-        >
-          <GitBranch size={16} aria-hidden="true" />
-          Add child
-        </Button>
-      </div>
-      <div {...stylex.props(styles.inlineForm)}>
-        <select
-          aria-label="Relation type"
-          value={relationType}
-          onChange={(event) => setRelationType(event.target.value)}
-          {...stylex.props(styles.select, styles.fullWidth)}
-        >
-          <option value="blocks">Blocks</option>
-          <option value="related_to">Related to</option>
-          <option value="duplicates">Duplicates</option>
-          <option value="discovered_from">Discovered from</option>
-        </select>
-        <select
-          aria-label="Relation target"
-          value={relationTargetId}
-          onChange={(event) => setRelationTargetId(event.target.value)}
-          {...stylex.props(styles.select, styles.fullWidth)}
-        >
-          <option value="">Select target</option>
-          {tasks
-            .filter((candidate) => candidate.id !== task.id)
-            .map((candidate) => (
-              <option key={candidate.id} value={candidate.id}>
-                #{candidate.sequence} {candidate.title}
-              </option>
-            ))}
-        </select>
-        <Button
-          type="button"
-          disabled={pending || !relationTargetId}
-          onClick={() => void createRelation()}
-        >
-          <Link2 size={16} aria-hidden="true" />
-          Add relation
-        </Button>
-      </div>
-      <fieldset disabled={!editable} {...stylex.props(styles.editableFields)}>
+      <fieldset
+        disabled={executionReadOnly}
+        {...stylex.props(styles.taskActions, executionReadOnly && styles.readOnlyGroup)}
+      >
+        <legend {...stylex.props(styles.srOnly)}>Task structure actions</legend>
+        <div {...stylex.props(styles.inlineForm)}>
+          <input
+            aria-label="Child task title"
+            value={childTitle}
+            onChange={(event) => setChildTitle(event.target.value)}
+            placeholder="Child task title"
+            maxLength={300}
+            {...stylex.props(styles.input)}
+          />
+          <Button
+            type="button"
+            disabled={pending || childTitle.trim().length === 0}
+            onClick={() => void createChild()}
+          >
+            <GitBranch size={16} aria-hidden="true" />
+            Add child
+          </Button>
+        </div>
+        <div {...stylex.props(styles.inlineForm)}>
+          <select
+            aria-label="Relation type"
+            value={relationType}
+            onChange={(event) => setRelationType(event.target.value)}
+            {...stylex.props(styles.select, styles.fullWidth)}
+          >
+            <option value="blocks">Blocks</option>
+            <option value="related_to">Related to</option>
+            <option value="duplicates">Duplicates</option>
+            <option value="discovered_from">Discovered from</option>
+          </select>
+          <select
+            aria-label="Relation target"
+            value={relationTargetId}
+            onChange={(event) => setRelationTargetId(event.target.value)}
+            {...stylex.props(styles.select, styles.fullWidth)}
+          >
+            <option value="">Select target</option>
+            {tasks
+              .filter((candidate) => candidate.id !== task.id)
+              .map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>
+                  #{candidate.sequence} {candidate.title}
+                </option>
+              ))}
+          </select>
+          <Button
+            type="button"
+            disabled={pending || !relationTargetId}
+            onClick={() => void createRelation()}
+          >
+            <Link2 size={16} aria-hidden="true" />
+            Add relation
+          </Button>
+        </div>
+      </fieldset>
+      <fieldset
+        disabled={!editable}
+        {...stylex.props(styles.editableFields, !editable && styles.readOnlyGroup)}
+      >
         <legend {...stylex.props(styles.srOnly)}>Editable task details</legend>
         <Field label="Title" required>
           <input
@@ -875,11 +998,7 @@ function PreparationPanel({
               </Button>
             </>
           ) : (
-            <span {...stylex.props(styles.hint)}>
-              {task.lifecycle === "done"
-                ? "Reopen this task before editing it."
-                : "Cancelled tasks are read-only."}
-            </span>
+            <span {...stylex.props(styles.hint)}>{readOnlyExplanation(task.lifecycle)}</span>
           )}
         </span>
       </div>
@@ -892,6 +1011,54 @@ function parseLines(value: string) {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function taskLifecycleLabel(lifecycle: TaskLifecycle) {
+  return lifecycle === "in_progress" ? "in progress" : lifecycle;
+}
+
+function readOnlyExplanation(lifecycle: TaskLifecycle) {
+  switch (lifecycle) {
+    case "in_progress":
+      return "Agent execution is active. Task changes are locked while the claim is held.";
+    case "review":
+      return "This task is awaiting review. Task changes are locked until a review action is taken.";
+    case "done":
+      return "Reopen this task before editing it.";
+    case "cancelled":
+      return "Cancelled tasks are read-only.";
+    case "backlog":
+    case "ready":
+      return "";
+  }
+  return "";
+}
+
+function formatClaimExpiry(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function ClaimLeaseSummary({ claim, compact = false }: { claim: TaskClaim; compact?: boolean }) {
+  return (
+    <span {...stylex.props(styles.claimSummary, compact && styles.claimSummaryCompact)}>
+      {compact ? <Bot size={12} aria-hidden="true" /> : <Bot size={18} aria-hidden="true" />}
+      <span>
+        Claimed by <strong>{claim.agentDisplayName}</strong>
+        <span aria-hidden="true"> · </span>
+        <span {...stylex.props(styles.claimExpiry)}>
+          <Clock3 size={compact ? 11 : 14} aria-hidden="true" /> Lease expires{" "}
+          <time dateTime={claim.expiresAt} title={claim.expiresAt}>
+            {formatClaimExpiry(claim.expiresAt)}
+          </time>
+        </span>
+      </span>
+    </span>
+  );
 }
 
 function Field({
@@ -993,6 +1160,7 @@ const styles = stylex.create({
   counts: {
     color: tokens.foregroundMuted,
     display: "flex",
+    flexWrap: "wrap",
     fontSize: 12,
     gap: tokens.space4,
     marginBlock: tokens.space4,
@@ -1045,8 +1213,39 @@ const styles = stylex.create({
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
+  claimSummary: {
+    alignItems: "center",
+    color: tokens.foreground,
+    display: "flex",
+    fontSize: 13,
+    gap: tokens.space2,
+    lineHeight: 1.5,
+  },
+  claimSummaryCompact: {
+    color: tokens.foregroundMuted,
+    fontSize: 11,
+    gap: tokens.space1,
+  },
+  claimExpiry: {
+    alignItems: "center",
+    color: tokens.foregroundMuted,
+    display: "inline-flex",
+    gap: tokens.space1,
+  },
   backlog: { color: tokens.foregroundMuted, fontSize: 10, textTransform: "uppercase" },
   ready: { color: tokens.accent, fontSize: 10, fontWeight: 750, textTransform: "uppercase" },
+  in_progress: {
+    color: tokens.accent,
+    fontSize: 10,
+    fontWeight: 750,
+    textTransform: "uppercase",
+  },
+  review: {
+    color: tokens.foreground,
+    fontSize: 10,
+    fontWeight: 750,
+    textTransform: "uppercase",
+  },
   done: { color: tokens.accent, fontSize: 10, fontWeight: 750, textTransform: "uppercase" },
   cancelled: { color: tokens.danger, fontSize: 10, fontWeight: 750, textTransform: "uppercase" },
   eligibility: {
@@ -1066,6 +1265,43 @@ const styles = stylex.create({
     textAlign: "center",
   },
   form: { display: "grid", gap: tokens.space5, margin: "0 auto", maxWidth: 760 },
+  claimCard: {
+    backgroundColor: tokens.surfaceMuted,
+    borderColor: tokens.border,
+    borderRadius: tokens.radius2,
+    borderStyle: "solid",
+    borderWidth: 1,
+    display: "grid",
+    gap: tokens.space4,
+    padding: tokens.space4,
+  },
+  claimActions: {
+    borderBlockStartColor: tokens.border,
+    borderBlockStartStyle: "solid",
+    borderBlockStartWidth: 1,
+    borderWidth: 0,
+    display: "grid",
+    gap: tokens.space2,
+    margin: 0,
+    minWidth: 0,
+    padding: 0,
+    paddingBlockStart: tokens.space3,
+  },
+  claimReasonLabel: { fontSize: 12, fontWeight: 650 },
+  claimActionButtons: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: tokens.space2,
+  },
+  taskActions: {
+    borderWidth: 0,
+    display: "grid",
+    gap: tokens.space3,
+    margin: 0,
+    minWidth: 0,
+    padding: 0,
+  },
+  readOnlyGroup: { opacity: 0.68 },
   editableFields: {
     borderWidth: 0,
     display: "grid",

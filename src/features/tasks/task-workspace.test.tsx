@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -34,6 +34,7 @@ const backlog: Task = {
   tags: [],
   requiredCapabilities: [],
   referencedPaths: [],
+  claim: null,
   upstreamRelations: [],
   downstreamRelations: [],
   description: emptyRichTextDocument,
@@ -48,7 +49,40 @@ const backlog: Task = {
   updatedAt: "2026-09-03T10:10:00.000Z",
 };
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+function claimedTask(): Task {
+  return {
+    ...backlog,
+    title: "Claimed task",
+    lifecycle: "in_progress",
+    version: 7,
+    claim: {
+      id: "internal-lease-id",
+      taskId: backlog.id,
+      attemptId: "internal-attempt-id",
+      agentRunId: "internal-run-id",
+      agentProfileId: "internal-profile-id",
+      agentDisplayName: "Build Agent",
+      status: "active",
+      acquiredAt: "2026-09-03T10:15:00.000Z",
+      expiresAt: "2026-09-03T10:30:00.000Z",
+      invalidatedAt: null,
+      invalidationReason: null,
+    },
+    eligibility: {
+      claimable: false,
+      status: "claimed",
+      reasons: ["Claimed by Build Agent."],
+      orderingExplanation: "normal lane, position 1",
+      missingCapabilities: [],
+      blockingTaskIds: [],
+    },
+  };
+}
 
 function props(tasks: readonly Task[] = [backlog]) {
   return {
@@ -63,6 +97,7 @@ function props(tasks: readonly Task[] = [backlog]) {
     onReopenTask: vi.fn(),
     onCreateTaskRelation: vi.fn(),
     onArchiveTask: vi.fn(),
+    onInvalidateClaim: vi.fn(),
     onChangeTheme: vi.fn(),
   };
 }
@@ -374,5 +409,141 @@ describe("task workspace", () => {
       reason: "Reopened from the task workspace",
       idempotencyKey: expect.any(String),
     });
+  });
+
+  it("shows active work and exposes only safe claim ownership and expiry details", () => {
+    const activeTask = claimedTask();
+
+    render(<TaskWorkspace {...props([activeTask])} />);
+
+    expect(screen.getByRole("region", { name: "Task counts" }).textContent).toContain("1 active");
+    const taskButton = within(screen.getByRole("navigation", { name: "Tasks" })).getByRole(
+      "button",
+      { name: /Claimed task/ },
+    );
+    expect(taskButton.textContent).toContain("Claimed by Build Agent");
+    expect(taskButton.textContent).toContain("Lease expires");
+
+    const claimRegion = screen.getByRole("region", { name: "Current claim" });
+    expect(claimRegion.textContent).toContain("Claimed by Build Agent");
+    expect(claimRegion.querySelector("time")?.getAttribute("datetime")).toBe(
+      "2026-09-03T10:30:00.000Z",
+    );
+    expect(document.body.textContent).not.toContain("internal-lease-id");
+    expect(document.body.textContent).not.toContain("internal-attempt-id");
+    expect(document.body.textContent).not.toContain("internal-run-id");
+    expect(document.body.textContent).not.toContain("internal-profile-id");
+  });
+
+  it.each([
+    {
+      disposition: "cancelled",
+      buttonName: "Cancel claim",
+      pendingName: "Cancelling claim…",
+      reason: "The execution is no longer needed.",
+      confirmation: "Their lease will stop immediately",
+    },
+    {
+      disposition: "reassigned",
+      buttonName: "Make available for reassignment",
+      pendingName: "Making available…",
+      reason: "A different capability is required.",
+      confirmation: "Build Agent's lease will stop immediately",
+    },
+  ] as const)(
+    "confirms and submits a $disposition claim disposition with an explicit reason",
+    async ({ disposition, buttonName, pendingName, reason, confirmation }) => {
+      const user = userEvent.setup();
+      const task = claimedTask();
+      const workspace = props([task]);
+      let resolveResponse: ((response: unknown) => void) | undefined;
+      workspace.onInvalidateClaim.mockReturnValue(
+        new Promise((resolve) => {
+          resolveResponse = resolve;
+        }),
+      );
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      render(<TaskWorkspace {...workspace} />);
+
+      const claimRegion = screen.getByRole("region", { name: "Current claim" });
+      const action = within(claimRegion).getByRole("button", { name: buttonName });
+      expect(action).toHaveProperty("disabled", true);
+
+      await user.type(within(claimRegion).getByRole("textbox", { name: "Reason" }), reason);
+      await user.click(action);
+
+      expect(confirm).toHaveBeenCalledWith(expect.stringContaining(confirmation));
+      expect(workspace.onInvalidateClaim).toHaveBeenCalledWith({
+        taskId: task.id,
+        expectedVersion: task.version,
+        disposition,
+        reason,
+        idempotencyKey: expect.any(String),
+      });
+      expect(claimRegion.getAttribute("aria-busy")).toBe("true");
+      expect(within(claimRegion).getByRole("button", { name: pendingName })).toHaveProperty(
+        "disabled",
+        true,
+      );
+
+      resolveResponse?.({
+        ok: true,
+        result: {
+          task: { ...task, lifecycle: "ready", version: task.version + 1, claim: null },
+          claim: {
+            ...task.claim,
+            status: disposition,
+            invalidatedAt: "2026-09-03T10:20:00.000Z",
+            invalidationReason: reason,
+          },
+        },
+      });
+      await waitFor(() => expect(claimRegion.getAttribute("aria-busy")).toBe("false"));
+    },
+  );
+
+  it("surfaces a claim invalidation error in the task form", async () => {
+    const user = userEvent.setup();
+    const workspace = props([claimedTask()]);
+    workspace.onInvalidateClaim.mockResolvedValue({
+      ok: false,
+      error: {
+        type: "TaskVersionConflictError",
+        message: "The claim changed before confirmation.",
+      },
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<TaskWorkspace {...workspace} />);
+
+    await user.type(screen.getByRole("textbox", { name: "Reason" }), "The owner changed.");
+    await user.click(screen.getByRole("button", { name: "Cancel claim" }));
+
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      "The claim changed before confirmation.",
+    );
+  });
+
+  it.each([
+    ["in_progress", "Agent execution is active"],
+    ["review", "This task is awaiting review"],
+  ] as const)("keeps %s task mutations read-only", (lifecycle, explanation) => {
+    const task: Task = { ...backlog, lifecycle };
+
+    render(<TaskWorkspace {...props([task])} />);
+
+    expect(screen.getByText(new RegExp(explanation))).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Editable task details" })).toHaveProperty(
+      "disabled",
+      true,
+    );
+    expect(screen.getByRole("group", { name: "Task structure actions" })).toHaveProperty(
+      "disabled",
+      true,
+    );
+    expect(screen.getByRole("button", { name: /Archive/ })).toHaveProperty("disabled", true);
+    expect(screen.queryByRole("button", { name: "Save planning" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Move to ready" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
   });
 });

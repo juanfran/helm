@@ -12,6 +12,7 @@ import {
   completeHumanTask,
   createHumanTask,
   createHumanTaskRelation,
+  invalidateHumanTaskClaim,
   prepareHumanTask,
   readTaskTags,
   reopenHumanTask,
@@ -104,6 +105,12 @@ function ActiveProjectHome({ project, theme }: { project: Project; theme: Theme 
         })
       }
       onArchiveTask={(input) => archiveHumanTask({ data: input }).then(refresh)}
+      onInvalidateClaim={(input) =>
+        invalidateHumanTaskClaim({ data: input }).then(async (response) => {
+          if (response.ok) await collection.utils.refetch({ throwOnError: true });
+          return response;
+        })
+      }
       onChangeTheme={async (nextTheme) => {
         const previous = theme;
         applyThemeToDocument(nextTheme);

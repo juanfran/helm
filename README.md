@@ -23,11 +23,15 @@ Coding-agent clients can connect to the local streamable HTTP MCP endpoint at
 `http://127.0.0.1:3000/api/mcp`. Register the connection with `register_agent_run` before using
 agent-attributed tools, using a fresh `idempotencyKey` for each logical registration. A reconnect can
 resume its run by ID; after an ungraceful client exit, set `takeoverActiveRun` explicitly to transfer
-that run from the stale session. Registered agents can discover paginated work with `find_work` and load a
-complete package with `get_task_context`; `list_projects` and `get_active_project` remain available
-as read-only project queries. Discovery cursors are bound to the queue revision, evaluation date, project,
-and normalized agent capabilities. If any of that context changes between pages, restart discovery without
-the stale cursor.
+that run from the stale session. Registered agents can discover paginated work with `find_work`, load a
+complete package with `get_task_context`, and atomically reserve work with `claim_task` or `claim_next`.
+Every claim returns a lease token that is never persisted in plaintext. Keep it private and use it with
+`renew_lease` or `release_lease`; release, expiry, human cancellation or reassignment, session closure,
+and a server restart make the token unusable. Human task views refresh claim ownership every five seconds.
+
+`list_projects` and `get_active_project` remain available as read-only project queries. Discovery cursors
+are bound to the queue revision, evaluation date, project, and normalized agent capabilities. If any of
+that context changes between pages, restart discovery without the stale cursor.
 
 ## Production build
 

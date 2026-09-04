@@ -15,12 +15,16 @@ import { createSqliteProjectStore } from "./sqlite-project-store.server";
 import { createSqliteTaskStore } from "./sqlite-task-store.server";
 
 const temporaryPaths: string[] = [];
-const migrationNames = [
+const migrationNamesThrough0004 = [
   "0000_modern_nick_fury.sql",
   "0001_ambitious_maggott.sql",
   "0002_oval_namor.sql",
   "0003_free_firelord.sql",
   "0004_flaky_shaman.sql",
+] as const;
+const migrationNamesThrough0005 = [
+  ...migrationNamesThrough0004,
+  "0005_majestic_patriot.sql",
 ] as const;
 
 function temporaryDirectory(prefix: string) {
@@ -29,7 +33,9 @@ function temporaryDirectory(prefix: string) {
   return path;
 }
 
-function createPreviousMigrationFolder() {
+function createPreviousMigrationFolder(
+  migrationNames: readonly string[] = migrationNamesThrough0004,
+) {
   const source = resolve("drizzle");
   const destination = temporaryDirectory("helm-previous-migrations-");
   mkdirSync(join(destination, "meta"));
@@ -206,6 +212,176 @@ describe("SQLite forward migrations", () => {
         exclusiveGroup: "area",
         retainedTag: "alpha",
       });
+    } finally {
+      projectStore.close();
+    }
+  });
+
+  it("reconciles pre-lease active attempts and installs one-active-owner constraints from 0005", () => {
+    const root = temporaryDirectory("helm-lease-migration-fixture-");
+    const databasePath = join(root, "helm.db");
+    const previousMigrations = createPreviousMigrationFolder(migrationNamesThrough0005);
+    const legacyDatabase = new Database(databasePath);
+    legacyDatabase.pragma("foreign_keys = ON");
+    migrate(drizzle(legacyDatabase), { migrationsFolder: previousMigrations });
+    const createdAt = "2026-08-01T10:00:00.000Z";
+    const legacyResult = legacyTaskResult();
+
+    legacyDatabase
+      .prepare(
+        "insert into projects (id, sequence, name, repository_root, version, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("legacy-project", 1, "legacy", root, 1, createdAt, createdAt);
+    legacyDatabase
+      .prepare(
+        `insert into tasks (
+          id, project_id, sequence, parent_task_id, title, lifecycle, priority, position,
+          not_before, due_at, size, description_json, description_text, expected_outcome,
+          acceptance_criteria, agent_context, checklist_json, version, archived_at, created_at, updated_at
+        ) values (
+          @id, @projectId, @sequence, @parentTaskId, @title, @lifecycle, @priority, @position,
+          @notBefore, @dueAt, @size, @descriptionJson, @descriptionText, @expectedOutcome,
+          @acceptanceCriteria, @agentContext, @checklistJson, @version, @archivedAt, @createdAt, @updatedAt
+        )`,
+      )
+      .run({
+        ...legacyResult,
+        notBefore: null,
+        dueAt: null,
+        descriptionJson: JSON.stringify(legacyResult.description),
+        checklistJson: JSON.stringify(legacyResult.checklist),
+      });
+    legacyDatabase
+      .prepare(
+        "insert into agent_profiles (id, profile_key, display_name, capabilities_json, created_at, updated_at) values (?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "legacy-profile",
+        "legacy-profile",
+        "Legacy Agent",
+        '["typescript"]',
+        createdAt,
+        createdAt,
+      );
+    legacyDatabase
+      .prepare(
+        "insert into agent_runs (id, profile_id, mcp_session_id, status, client_name, client_version, created_at, last_seen_at, ended_at) values (?, ?, ?, 'active', ?, ?, ?, ?, null)",
+      )
+      .run(
+        "legacy-run",
+        "legacy-profile",
+        "legacy-session",
+        "migration-test",
+        "1.0.0",
+        createdAt,
+        createdAt,
+      );
+    legacyDatabase
+      .prepare(
+        "insert into attempts (id, task_id, agent_run_id, status, summary, verification_json, created_at, completed_at) values (?, ?, ?, 'active', ?, '[]', ?, null)",
+      )
+      .run("legacy-attempt-empty", "legacy-task", "legacy-run", "", createdAt);
+    legacyDatabase
+      .prepare(
+        "insert into attempts (id, task_id, agent_run_id, status, summary, verification_json, created_at, completed_at) values (?, ?, ?, 'active', ?, '[]', ?, null)",
+      )
+      .run(
+        "legacy-attempt-context",
+        "legacy-task",
+        "legacy-run",
+        "Keep existing context.",
+        createdAt,
+      );
+    legacyDatabase.close();
+
+    const projectStore = createSqliteProjectStore(databasePath);
+    try {
+      const reconciledAttempts = projectStore.database
+        .prepare<[], { id: string; status: string; summary: string; completedAt: string | null }>(
+          "select id, status, summary, completed_at as completedAt from attempts order by id",
+        )
+        .all();
+      const reconciliationEvents = projectStore.database
+        .prepare<
+          [],
+          { kind: string; actorType: string; actorId: string; entityId: string; payload: string }
+        >(
+          "select kind, actor_type as actorType, actor_id as actorId, entity_id as entityId, payload_json as payload from events where kind = 'task.attempts.reconciled'",
+        )
+        .all();
+      const leaseTable = projectStore.database
+        .prepare("select count(*) from sqlite_master where type = 'table' and name = 'leases'")
+        .pluck()
+        .get();
+
+      expect(reconciledAttempts).toEqual([
+        {
+          id: "legacy-attempt-context",
+          status: "abandoned",
+          summary: "Keep existing context.",
+          completedAt: expect.any(String),
+        },
+        {
+          id: "legacy-attempt-empty",
+          status: "abandoned",
+          summary: "Reconciled during lease migration.",
+          completedAt: expect.any(String),
+        },
+      ]);
+      expect(reconciliationEvents).toHaveLength(1);
+      expect(reconciliationEvents[0]).toMatchObject({
+        kind: "task.attempts.reconciled",
+        actorType: "system",
+        actorId: "helm-migration-0006",
+        entityId: "legacy-task",
+      });
+      expect(JSON.parse(reconciliationEvents[0]!.payload)).toEqual({
+        abandonedAttempts: 2,
+        reason: "pre-lease active attempts cannot own work",
+      });
+      expect(leaseTable).toBe(1);
+
+      projectStore.database
+        .prepare(
+          "insert into attempts (id, task_id, agent_run_id, status, summary, verification_json, created_at, completed_at) values (?, ?, ?, 'active', '', '[]', ?, null)",
+        )
+        .run("post-migration-active", "legacy-task", "legacy-run", createdAt);
+      expect(() =>
+        projectStore.database
+          .prepare(
+            "insert into attempts (id, task_id, agent_run_id, status, summary, verification_json, created_at, completed_at) values (?, ?, ?, 'active', '', '[]', ?, null)",
+          )
+          .run("post-migration-duplicate", "legacy-task", "legacy-run", createdAt),
+      ).toThrow(/UNIQUE constraint failed/);
+
+      projectStore.database
+        .prepare(
+          "insert into leases (id, task_id, attempt_id, agent_run_id, token_hash, status, acquired_at, expires_at, invalidated_at, invalidation_reason) values (?, ?, ?, ?, ?, 'active', ?, ?, null, null)",
+        )
+        .run(
+          "post-migration-lease",
+          "legacy-task",
+          "post-migration-active",
+          "legacy-run",
+          "post-migration-token",
+          createdAt,
+          "2026-08-01T10:15:00.000Z",
+        );
+      expect(() =>
+        projectStore.database
+          .prepare(
+            "insert into leases (id, task_id, attempt_id, agent_run_id, token_hash, status, acquired_at, expires_at, invalidated_at, invalidation_reason) values (?, ?, ?, ?, ?, 'active', ?, ?, null, null)",
+          )
+          .run(
+            "post-migration-duplicate-lease",
+            "legacy-task",
+            "post-migration-active",
+            "legacy-run",
+            "post-migration-second-token",
+            createdAt,
+            "2026-08-01T10:15:00.000Z",
+          ),
+      ).toThrow(/UNIQUE constraint failed/);
     } finally {
       projectStore.close();
     }

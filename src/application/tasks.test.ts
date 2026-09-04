@@ -1,37 +1,58 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 
 import { Effect, Either } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { registerAgentRun } from "./agents";
 import { createProject } from "./projects";
 import {
   archiveTask,
+  claimNextTask,
+  claimTask,
   completeTask,
   createTask,
   createTaskRelation,
   findWork,
   getTaskContext,
+  invalidateTaskClaim,
   listTaskTags,
   listTasks,
   prepareTask,
+  reconcileTaskLeases,
+  releaseTaskLease,
   reopenTask,
+  renewTaskLease,
   updateTaskPlanning,
 } from "./tasks";
 import {
+  claimNextTaskInputSchema,
+  claimTaskInputSchema,
+  compiledClaimNextTaskInputSchema,
+  compiledClaimTaskInputSchema,
   compiledCreateTaskRelationInputSchema,
   compiledCreateTaskInputSchema,
+  compiledInvalidateTaskClaimInputSchema,
+  compiledReleaseTaskLeaseInputSchema,
+  compiledRenewTaskLeaseInputSchema,
   compiledUpdateTaskPlanningInputSchema,
   createTaskRelationInputSchema,
   createTaskInputSchema,
   emptyRichTextDocument,
+  invalidateTaskClaimInputSchema,
+  releaseTaskLeaseInputSchema,
+  renewTaskLeaseInputSchema,
   updateTaskPlanningInputSchema,
   type Actor,
   type CreateTaskInput,
 } from "../domain/tasks";
+import type { RegisteredAgentRun } from "../domain/agents";
 import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
+import { createSqliteAgentStore } from "../infrastructure/sqlite-agent-store.server";
 import {
   createSqliteProjectStore,
   type SqliteProjectStore,
@@ -44,12 +65,64 @@ let temporaryRoot: string;
 let projectStore: SqliteProjectStore;
 let projectId: string;
 let taskServices: ReturnType<typeof taskFixtureServices>;
+let databasePath: string;
+let now: string;
+
+type ConcurrentTaskOperation = {
+  readonly command:
+    | "claimTask"
+    | "claimNextTask"
+    | "renewTaskLease"
+    | "releaseTaskLease"
+    | "invalidateTaskClaim"
+    | "reconcileTaskLeases";
+  readonly input?: unknown;
+  readonly registration?: RegisteredAgentRun;
+  readonly actor?: Actor;
+  readonly now: string;
+};
+
+type ConcurrentTaskOutcome =
+  | { readonly ok: true; readonly value: unknown }
+  | {
+      readonly ok: false;
+      readonly error: {
+        readonly _tag: string;
+        readonly message: string;
+        readonly reason?: string;
+        readonly expectedVersion?: number;
+        readonly currentVersion?: number;
+      };
+    };
 
 function taskFixtureServices(store: SqliteProjectStore) {
   return {
     store: createSqliteTaskStore(store.database),
-    clock: { today: () => "2026-09-03" },
+    clock: { today: () => "2026-09-03", now: () => now },
   };
+}
+
+async function registerAgent(
+  profileKey: string,
+  displayName: string,
+  capabilities: readonly string[] = ["typescript"],
+) {
+  return Effect.runPromise(
+    registerAgentRun(
+      {
+        profileKey,
+        displayName,
+        capabilities,
+        idempotencyKey: `register-${profileKey}`,
+      },
+      {
+        sessionId: `session-${profileKey}`,
+        clientName: "application-test",
+        clientVersion: "1.0.0",
+      },
+      { store: createSqliteAgentStore(projectStore.database) },
+    ),
+  );
 }
 
 function backlogInput(overrides: Partial<CreateTaskInput> = {}): CreateTaskInput {
@@ -80,11 +153,211 @@ function readyInput(overrides: Partial<CreateTaskInput> = {}): CreateTaskInput {
   });
 }
 
+async function claimedTaskFixture(
+  registration: RegisteredAgentRun,
+  key: string,
+  overrides: Partial<CreateTaskInput> = {},
+) {
+  const task = await Effect.runPromise(
+    createTask(
+      readyInput({
+        title: `Claim fixture ${key}`,
+        requiredCapabilities: ["typescript"],
+        idempotencyKey: `create-${key}`,
+        ...overrides,
+      }),
+      human,
+      taskServices,
+    ),
+  );
+  const command = {
+    projectId,
+    taskId: task.id,
+    expectedVersion: task.version,
+    leaseDurationSeconds: 300,
+    idempotencyKey: `claim-${key}`,
+  };
+  const grant = await Effect.runPromise(claimTask(command, registration, taskServices));
+  return { command, grant, task };
+}
+
+function taskCommandWorkerSource() {
+  const effectUrl = pathToFileURL(resolve("node_modules/effect/dist/esm/index.js")).href;
+  const sqliteUrl = pathToFileURL(resolve("node_modules/better-sqlite3/lib/index.js")).href;
+  const applicationUrl = pathToFileURL(resolve("src/application/tasks.ts")).href;
+  const storeUrl = pathToFileURL(resolve("src/infrastructure/sqlite-task-store.server.ts")).href;
+
+  return `
+    import { parentPort, workerData } from "node:worker_threads";
+    import Database from ${JSON.stringify(sqliteUrl)};
+    import { Effect } from ${JSON.stringify(effectUrl)};
+    import {
+      claimNextTask,
+      claimTask,
+      invalidateTaskClaim,
+      reconcileTaskLeases,
+      releaseTaskLease,
+      renewTaskLease,
+    } from ${JSON.stringify(applicationUrl)};
+    import { createSqliteTaskStore } from ${JSON.stringify(storeUrl)};
+
+    const barrier = new Int32Array(workerData.barrier);
+    const database = new Database(workerData.databasePath);
+    database.pragma("foreign_keys = ON");
+    database.pragma("journal_mode = WAL");
+    database.pragma("busy_timeout = 5000");
+    const operation = workerData.operation;
+    const services = {
+      store: createSqliteTaskStore(database),
+      clock: {
+        today: () => operation.now.slice(0, 10),
+        now: () => operation.now,
+      },
+    };
+    const postOutcome = (outcome) => {
+      Atomics.add(barrier, 3, 1);
+      Atomics.notify(barrier, 3);
+      parentPort.postMessage(outcome);
+    };
+
+    Atomics.add(barrier, 0, 1);
+    Atomics.notify(barrier, 0);
+    Atomics.wait(barrier, 1, 0);
+    Atomics.add(barrier, 2, 1);
+    Atomics.notify(barrier, 2);
+
+    try {
+      let effect;
+      switch (operation.command) {
+        case "claimTask":
+          effect = claimTask(operation.input, operation.registration, services);
+          break;
+        case "claimNextTask":
+          effect = claimNextTask(operation.input, operation.registration, services);
+          break;
+        case "renewTaskLease":
+          effect = renewTaskLease(operation.input, operation.registration, services);
+          break;
+        case "releaseTaskLease":
+          effect = releaseTaskLease(operation.input, operation.registration, services);
+          break;
+        case "invalidateTaskClaim":
+          effect = invalidateTaskClaim(operation.input, operation.actor, services);
+          break;
+        case "reconcileTaskLeases":
+          effect = reconcileTaskLeases(services);
+          break;
+        default:
+          throw new Error(\`Unsupported worker command: \${operation.command}\`);
+      }
+      const result = await Effect.runPromise(Effect.either(effect));
+      if (result._tag === "Right") {
+        postOutcome({ ok: true, value: result.right });
+      } else {
+        const error = result.left;
+        postOutcome({
+          ok: false,
+          error: {
+            _tag: error?._tag ?? error?.name ?? "Error",
+            message: error?.message ?? String(error),
+            reason: error?.reason,
+            expectedVersion: error?.expectedVersion,
+            currentVersion: error?.currentVersion,
+          },
+        });
+      }
+    } catch (error) {
+      postOutcome({
+        ok: false,
+        error: {
+          _tag: error?._tag ?? error?.name ?? "Error",
+          message: error?.message ?? String(error),
+          reason: error?.reason,
+          expectedVersion: error?.expectedVersion,
+          currentVersion: error?.currentVersion,
+        },
+      });
+    } finally {
+      database.close();
+      parentPort.close();
+    }
+  `;
+}
+
+function waitForBarrierCount(
+  barrier: Int32Array<SharedArrayBuffer>,
+  index: number,
+  expected: number,
+) {
+  return new Promise<void>((settle, reject) => {
+    const deadline = Date.now() + 10_000;
+    const poll = () => {
+      if (Atomics.load(barrier, index) >= expected) {
+        settle();
+      } else if (Date.now() >= deadline) {
+        reject(new Error("Timed out waiting for task-command workers."));
+      } else {
+        setTimeout(poll, 1);
+      }
+    };
+    poll();
+  });
+}
+
+async function runContendingTaskOperations(
+  operations: readonly ConcurrentTaskOperation[],
+): Promise<readonly ConcurrentTaskOutcome[]> {
+  const barrierBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 4);
+  const barrier = new Int32Array(barrierBuffer);
+  const source = taskCommandWorkerSource();
+  const workers = operations.map(
+    (operation) =>
+      new Worker(new URL(`data:text/javascript,${encodeURIComponent(source)}`), {
+        execArgv: ["--import", "tsx"],
+        workerData: { barrier: barrierBuffer, databasePath, operation },
+      }),
+  );
+  const outcomes = workers.map(
+    (worker) =>
+      new Promise<ConcurrentTaskOutcome>((settle, reject) => {
+        worker.once("message", settle);
+        worker.once("error", reject);
+        worker.once("exit", (code) => {
+          if (code !== 0) reject(new Error(`Task-command worker exited with code ${code}.`));
+        });
+      }),
+  );
+  let blockingTransaction = false;
+
+  try {
+    await waitForBarrierCount(barrier, 0, workers.length);
+    projectStore.database.exec("begin immediate");
+    blockingTransaction = true;
+    Atomics.store(barrier, 1, 1);
+    Atomics.notify(barrier, 1, workers.length);
+    await waitForBarrierCount(barrier, 2, workers.length);
+    await new Promise((settle) => setTimeout(settle, 25));
+    if (Atomics.load(barrier, 3) !== 0) {
+      throw new Error("A contending task command escaped the held SQLite write transaction.");
+    }
+    projectStore.database.exec("commit");
+    blockingTransaction = false;
+    return await Promise.all(outcomes);
+  } finally {
+    if (blockingTransaction) projectStore.database.exec("rollback");
+    Atomics.store(barrier, 1, 1);
+    Atomics.notify(barrier, 1, workers.length);
+    await Promise.allSettled(workers.map((worker) => worker.terminate()));
+  }
+}
+
 beforeEach(async () => {
   temporaryRoot = await mkdtemp(join(tmpdir(), "helm-task-test-"));
   const repositoryRoot = join(temporaryRoot, "repository");
   await mkdir(join(repositoryRoot, ".git"), { recursive: true });
-  projectStore = createSqliteProjectStore(":memory:");
+  databasePath = join(temporaryRoot, "helm.db");
+  now = "2026-09-03T12:00:00.000Z";
+  projectStore = createSqliteProjectStore(databasePath);
   const project = await Effect.runPromise(
     createProject(
       { repositoryRoot, idempotencyKey: "project" },
@@ -136,7 +409,7 @@ describe("task application commands", () => {
     let today = "2026-09-03";
     taskServices = {
       store: taskServices.store,
-      clock: { today: () => today },
+      clock: { today: () => today, now: () => now },
     };
     const command = readyInput({
       title: "Scheduled TypeScript work",
@@ -701,7 +974,7 @@ describe("task application commands", () => {
     let today = "2026-09-03";
     taskServices = {
       store: taskServices.store,
-      clock: { today: () => today },
+      clock: { today: () => today, now: () => now },
     };
     const first = await Effect.runPromise(
       createTask(
@@ -1126,6 +1399,72 @@ describe("task application commands", () => {
     );
   });
 
+  it("rejects adding a child to a claimed parent without changing its derived children", async () => {
+    const registration = await registerAgent("claimed-parent-owner", "Claimed Parent Owner");
+    const parent = await Effect.runPromise(
+      createTask(
+        readyInput({
+          title: "Claimed parent",
+          requiredCapabilities: ["typescript"],
+          idempotencyKey: "create-claimed-parent",
+        }),
+        human,
+        taskServices,
+      ),
+    );
+    const grant = await Effect.runPromise(
+      claimTask(
+        {
+          projectId,
+          taskId: parent.id,
+          expectedVersion: parent.version,
+          idempotencyKey: "claim-parent-before-child",
+        },
+        registration,
+        taskServices,
+      ),
+    );
+    const eventCount = projectStore.database.prepare("select count(*) from events").pluck().get();
+    const result = await Effect.runPromise(
+      Effect.either(
+        createTask(
+          backlogInput({
+            parentTaskId: parent.id,
+            title: "Rejected child of claimed parent",
+            idempotencyKey: "child-of-claimed-parent",
+          }),
+          human,
+          taskServices,
+        ),
+      ),
+    );
+    const [storedParent] = await Effect.runPromise(
+      listTasks({ projectId }, taskServices, registration.profile.capabilities),
+    );
+
+    expect(Either.isLeft(result) && result.left).toMatchObject({
+      _tag: "TaskLifecycleError",
+      taskId: parent.id,
+      lifecycle: "in_progress",
+    });
+    expect(storedParent).toMatchObject({
+      id: parent.id,
+      lifecycle: "in_progress",
+      version: grant.task.version,
+      childTaskIds: [],
+    });
+    expect(projectStore.database.prepare("select count(*) from tasks").pluck().get()).toBe(1);
+    expect(projectStore.database.prepare("select count(*) from events").pluck().get()).toBe(
+      eventCount,
+    );
+    expect(
+      projectStore.database
+        .prepare("select count(*) from idempotency_records where key = ?")
+        .pluck()
+        .get("child-of-claimed-parent"),
+    ).toBe(0);
+  });
+
   it("creates typed relations and only incomplete blocking dependencies affect eligibility", async () => {
     const blocker = await Effect.runPromise(
       createTask(readyInput({ title: "Blocker", idempotencyKey: "blocker" }), human, taskServices),
@@ -1531,6 +1870,1048 @@ describe("task application commands", () => {
     );
   });
 
+  it("claims chosen work atomically, returns an idempotent grant, and enforces active uniqueness", async () => {
+    const registration = await registerAgent("chosen-agent", "Chosen Agent");
+    const { command, grant, task } = await claimedTaskFixture(registration, "chosen");
+    const retry = await Effect.runPromise(claimTask(command, registration, taskServices));
+    const storedTask = projectStore.database
+      .prepare<[string], { lifecycle: string; version: number }>(
+        "select lifecycle, version from tasks where id = ?",
+      )
+      .get(task.id);
+    const storedAttempt = projectStore.database
+      .prepare<
+        [string],
+        { id: string; agentRunId: string; status: string; completedAt: string | null }
+      >(
+        "select id, agent_run_id as agentRunId, status, completed_at as completedAt from attempts where task_id = ?",
+      )
+      .get(task.id);
+    const storedLease = projectStore.database
+      .prepare<
+        [string],
+        {
+          id: string;
+          attemptId: string;
+          agentRunId: string;
+          tokenHash: string;
+          status: string;
+          expiresAt: string;
+        }
+      >(
+        "select id, attempt_id as attemptId, agent_run_id as agentRunId, token_hash as tokenHash, status, expires_at as expiresAt from leases where task_id = ?",
+      )
+      .get(task.id);
+    const claimEvents = projectStore.database
+      .prepare<[string], { actorType: string; actorId: string; payload: string }>(
+        "select actor_type as actorType, actor_id as actorId, payload_json as payload from events where entity_id = ? and kind = 'task.claimed'",
+      )
+      .all(task.id);
+
+    expect(retry).toEqual(grant);
+    expect(grant).toMatchObject({
+      task: {
+        id: task.id,
+        lifecycle: "in_progress",
+        version: 2,
+        claim: { id: grant.claim.id, status: "active" },
+        eligibility: { status: "claimed", claimable: false },
+      },
+      attempt: {
+        id: grant.claim.attemptId,
+        taskId: task.id,
+        agentRunId: registration.run.id,
+        status: "active",
+      },
+      claim: {
+        taskId: task.id,
+        agentRunId: registration.run.id,
+        agentProfileId: registration.profile.id,
+        agentDisplayName: "Chosen Agent",
+        status: "active",
+        acquiredAt: now,
+        expiresAt: "2026-09-03T12:05:00.000Z",
+      },
+      leaseToken: expect.any(String),
+    });
+    expect(storedTask).toEqual({ lifecycle: "in_progress", version: 2 });
+    expect(storedAttempt).toEqual({
+      id: grant.attempt.id,
+      agentRunId: registration.run.id,
+      status: "active",
+      completedAt: null,
+    });
+    expect(storedLease).toMatchObject({
+      id: grant.claim.id,
+      attemptId: grant.attempt.id,
+      agentRunId: registration.run.id,
+      tokenHash: createHash("sha256").update(grant.leaseToken).digest("hex"),
+      status: "active",
+      expiresAt: "2026-09-03T12:05:00.000Z",
+    });
+    expect(claimEvents).toHaveLength(1);
+    expect(claimEvents[0]).toMatchObject({
+      actorType: "agent",
+      actorId: registration.run.id,
+    });
+    expect(JSON.parse(claimEvents[0]!.payload)).toMatchObject({
+      leaseId: grant.claim.id,
+      attemptId: grant.attempt.id,
+      previousVersion: 1,
+      version: 2,
+      selection: "chosen",
+    });
+    expect(
+      projectStore.database
+        .prepare("select count(*) from idempotency_records where command = 'task.claim'")
+        .pluck()
+        .get(),
+    ).toBe(1);
+
+    expect(() =>
+      projectStore.database
+        .prepare(
+          "insert into attempts (id, task_id, agent_run_id, status, summary, verification_json, created_at, completed_at) values (?, ?, ?, 'active', '', '[]', ?, null)",
+        )
+        .run("duplicate-active-attempt", task.id, registration.run.id, now),
+    ).toThrow(/UNIQUE constraint failed/);
+    expect(() =>
+      projectStore.database
+        .prepare(
+          "insert into leases (id, task_id, attempt_id, agent_run_id, token_hash, status, acquired_at, expires_at, invalidated_at, invalidation_reason) values (?, ?, ?, ?, ?, 'active', ?, ?, null, null)",
+        )
+        .run(
+          "duplicate-active-lease",
+          task.id,
+          grant.attempt.id,
+          registration.run.id,
+          "different-token-hash",
+          now,
+          "2026-09-03T12:10:00.000Z",
+        ),
+    ).toThrow(/UNIQUE constraint failed/);
+  });
+
+  it("claims the next task by Helm ranking and replays the same selection safely", async () => {
+    const registration = await registerAgent("ranking-agent", "Ranking Agent");
+    const low = await Effect.runPromise(
+      createTask(
+        readyInput({
+          title: "Low ranked task",
+          priority: "low",
+          position: 1,
+          requiredCapabilities: ["typescript"],
+          idempotencyKey: "create-low-ranked-claim",
+        }),
+        human,
+        taskServices,
+      ),
+    );
+    const urgent = await Effect.runPromise(
+      createTask(
+        readyInput({
+          title: "Urgent ranked task",
+          priority: "urgent",
+          position: 9,
+          requiredCapabilities: ["typescript"],
+          idempotencyKey: "create-urgent-ranked-claim",
+        }),
+        human,
+        taskServices,
+      ),
+    );
+    const command = {
+      projectId,
+      leaseDurationSeconds: 300,
+      idempotencyKey: "claim-ranked-next",
+    };
+
+    const first = await Effect.runPromise(claimNextTask(command, registration, taskServices));
+    const retry = await Effect.runPromise(claimNextTask(command, registration, taskServices));
+    const second = await Effect.runPromise(
+      claimNextTask(
+        { ...command, idempotencyKey: "claim-second-ranked-next" },
+        registration,
+        taskServices,
+      ),
+    );
+
+    expect(first.task.id).toBe(urgent.id);
+    expect(retry).toEqual(first);
+    expect(second.task.id).toBe(low.id);
+    const selections = projectStore.database
+      .prepare<[string], string>(
+        "select payload_json from events where project_id = ? and kind = 'task.claimed' order by cursor",
+      )
+      .pluck()
+      .all(projectId)
+      .map((payload) => JSON.parse(payload).selection);
+    expect(selections).toEqual(["next", "next"]);
+  });
+
+  it("serializes genuinely contending claims across worker-thread SQLite connections", async () => {
+    const firstAgent = await registerAgent("race-first", "Race First");
+    const secondAgent = await registerAgent("race-second", "Race Second");
+    const contested = await Effect.runPromise(
+      createTask(
+        readyInput({
+          title: "Contested task",
+          requiredCapabilities: ["typescript"],
+          idempotencyKey: "create-contested-task",
+        }),
+        human,
+        taskServices,
+      ),
+    );
+    const competingResults = await runContendingTaskOperations([
+      {
+        command: "claimTask",
+        input: {
+          projectId,
+          taskId: contested.id,
+          expectedVersion: contested.version,
+          idempotencyKey: "competing-claim-first",
+        },
+        registration: firstAgent,
+        now,
+      },
+      {
+        command: "claimTask",
+        input: {
+          projectId,
+          taskId: contested.id,
+          expectedVersion: contested.version,
+          idempotencyKey: "competing-claim-second",
+        },
+        registration: secondAgent,
+        now,
+      },
+    ]);
+
+    expect(competingResults.filter((result) => result.ok)).toHaveLength(1);
+    expect(competingResults.filter((result) => !result.ok)).toHaveLength(1);
+    const rejected = competingResults.find((result) => !result.ok);
+    if (rejected && !rejected.ok) {
+      expect(["TaskClaimUnavailableError", "TaskVersionConflictError"]).toContain(
+        rejected.error["_tag"],
+      );
+    }
+    expect(
+      projectStore.database
+        .prepare("select count(*) from leases where task_id = ? and status = 'active'")
+        .pluck()
+        .get(contested.id),
+    ).toBe(1);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from attempts where task_id = ? and status = 'active'")
+        .pluck()
+        .get(contested.id),
+    ).toBe(1);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where entity_id = ? and kind = 'task.claimed'")
+        .pluck()
+        .get(contested.id),
+    ).toBe(1);
+
+    const nextContested = await Effect.runPromise(
+      createTask(
+        readyInput({
+          title: "Contested claim-next task",
+          requiredCapabilities: ["typescript"],
+          idempotencyKey: "create-contested-claim-next",
+        }),
+        human,
+        taskServices,
+      ),
+    );
+    const nextResults = await runContendingTaskOperations([
+      {
+        command: "claimNextTask",
+        input: { projectId, idempotencyKey: "competing-claim-next-first" },
+        registration: firstAgent,
+        now,
+      },
+      {
+        command: "claimNextTask",
+        input: { projectId, idempotencyKey: "competing-claim-next-second" },
+        registration: secondAgent,
+        now,
+      },
+    ]);
+    const nextClaimEvent = projectStore.database
+      .prepare<[string], string>(
+        "select payload_json from events where entity_id = ? and kind = 'task.claimed'",
+      )
+      .pluck()
+      .get(nextContested.id);
+
+    expect(nextResults.filter((result) => result.ok)).toHaveLength(1);
+    expect(nextResults.find((result) => !result.ok)).toMatchObject({
+      error: { _tag: "TaskClaimUnavailableError" },
+    });
+    expect(
+      projectStore.database
+        .prepare("select count(*) from leases where task_id = ? and status = 'active'")
+        .pluck()
+        .get(nextContested.id),
+    ).toBe(1);
+    expect(nextClaimEvent).toBeDefined();
+    expect(JSON.parse(nextClaimEvent ?? "{}")).toMatchObject({ selection: "next" });
+
+    const retryTask = await Effect.runPromise(
+      createTask(
+        readyInput({
+          title: "Concurrent retry task",
+          requiredCapabilities: ["typescript"],
+          idempotencyKey: "create-concurrent-retry-task",
+        }),
+        human,
+        taskServices,
+      ),
+    );
+    const retryCommand = {
+      projectId,
+      taskId: retryTask.id,
+      expectedVersion: retryTask.version,
+      idempotencyKey: "concurrent-idempotent-claim",
+    };
+    const retryResults = await runContendingTaskOperations([
+      {
+        command: "claimTask",
+        input: retryCommand,
+        registration: firstAgent,
+        now,
+      },
+      {
+        command: "claimTask",
+        input: retryCommand,
+        registration: firstAgent,
+        now,
+      },
+    ]);
+
+    const successfulRetries = retryResults.filter((result) => result.ok);
+    const failedRetries = retryResults.filter((result) => !result.ok);
+    expect(successfulRetries.length).toBeGreaterThanOrEqual(1);
+    if (successfulRetries.length === 2) {
+      expect(successfulRetries[1]).toEqual(successfulRetries[0]);
+    } else {
+      expect(failedRetries).toEqual([
+        expect.objectContaining({
+          error: expect.objectContaining({ _tag: "TaskLeaseError", reason: "inactive" }),
+        }),
+      ]);
+    }
+    expect(
+      projectStore.database
+        .prepare("select count(*) from leases where task_id = ?")
+        .pluck()
+        .get(retryTask.id),
+    ).toBe(1);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from idempotency_records where key = ?")
+        .pluck()
+        .get(retryCommand.idempotencyKey),
+    ).toBe(1);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where entity_id = ? and kind = 'task.claimed'")
+        .pluck()
+        .get(retryTask.id),
+    ).toBe(1);
+  }, 15_000);
+
+  it("renews only for the current owner, task version, and active registered run", async () => {
+    const registration = await registerAgent("renew-owner", "Renew Owner");
+    const foreignRegistration = await registerAgent("renew-foreign", "Renew Foreign");
+    const { grant } = await claimedTaskFixture(registration, "renewal");
+    now = "2026-09-03T12:01:00.000Z";
+    const command = {
+      leaseToken: grant.leaseToken,
+      expectedVersion: grant.task.version,
+      leaseDurationSeconds: 600,
+      idempotencyKey: "renew-owned-lease",
+    };
+
+    const renewed = await Effect.runPromise(renewTaskLease(command, registration, taskServices));
+    const retry = await Effect.runPromise(renewTaskLease(command, registration, taskServices));
+    const wrongOwner = await Effect.runPromise(
+      Effect.either(
+        renewTaskLease(
+          {
+            ...command,
+            expectedVersion: renewed.task.version,
+            idempotencyKey: "renew-wrong-owner",
+          },
+          foreignRegistration,
+          taskServices,
+        ),
+      ),
+    );
+    const staleVersion = await Effect.runPromise(
+      Effect.either(
+        renewTaskLease(
+          { ...command, idempotencyKey: "renew-stale-version" },
+          registration,
+          taskServices,
+        ),
+      ),
+    );
+    const missingRunRegistration: RegisteredAgentRun = {
+      profile: registration.profile,
+      run: {
+        ...registration.run,
+        id: "missing-agent-run",
+        mcpSessionId: "missing-agent-session",
+      },
+    };
+    const inactiveRun = await Effect.runPromise(
+      Effect.either(
+        renewTaskLease(
+          {
+            ...command,
+            expectedVersion: renewed.task.version,
+            idempotencyKey: "renew-inactive-run",
+          },
+          missingRunRegistration,
+          taskServices,
+        ),
+      ),
+    );
+
+    expect(retry).toEqual(renewed);
+    expect(renewed).toMatchObject({
+      task: { id: grant.task.id, lifecycle: "in_progress", version: 3 },
+      claim: {
+        id: grant.claim.id,
+        status: "active",
+        expiresAt: "2026-09-03T12:11:00.000Z",
+      },
+      leaseToken: grant.leaseToken,
+    });
+    expect(Either.isLeft(wrongOwner) && wrongOwner.left).toMatchObject({
+      _tag: "TaskLeaseError",
+      reason: "owner_mismatch",
+    });
+    expect(Either.isLeft(staleVersion) && staleVersion.left).toMatchObject({
+      _tag: "TaskVersionConflictError",
+      expectedVersion: 2,
+      currentVersion: 3,
+    });
+    expect(Either.isLeft(inactiveRun) && inactiveRun.left).toMatchObject({
+      _tag: "TaskLeaseError",
+      reason: "inactive_run",
+    });
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where entity_id = ? and kind = 'task.lease.renewed'")
+        .pluck()
+        .get(grant.task.id),
+    ).toBe(1);
+  });
+
+  it("serializes competing renewals and deduplicates identical renewal retries across workers", async () => {
+    const registration = await registerAgent("renew-race-owner", "Renew Race Owner");
+    const { grant } = await claimedTaskFixture(registration, "renew-race");
+    now = "2026-09-03T12:01:00.000Z";
+    const competingRenewals = await runContendingTaskOperations([
+      {
+        command: "renewTaskLease",
+        input: {
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          leaseDurationSeconds: 600,
+          idempotencyKey: "renew-race-first",
+        },
+        registration,
+        now,
+      },
+      {
+        command: "renewTaskLease",
+        input: {
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          leaseDurationSeconds: 600,
+          idempotencyKey: "renew-race-second",
+        },
+        registration,
+        now,
+      },
+    ]);
+    const competingState = projectStore.database
+      .prepare<
+        [string],
+        { lifecycle: string; version: number; leaseStatus: string; expiresAt: string }
+      >(
+        `select tasks.lifecycle, tasks.version, leases.status as leaseStatus, leases.expires_at as expiresAt
+         from tasks join leases on leases.task_id = tasks.id where tasks.id = ?`,
+      )
+      .get(grant.task.id);
+
+    expect(competingRenewals.filter((result) => result.ok)).toHaveLength(1);
+    expect(competingRenewals.find((result) => !result.ok)).toMatchObject({
+      error: {
+        _tag: "TaskVersionConflictError",
+        expectedVersion: grant.task.version,
+        currentVersion: grant.task.version + 1,
+      },
+    });
+    expect(competingState).toEqual({
+      lifecycle: "in_progress",
+      version: 3,
+      leaseStatus: "active",
+      expiresAt: "2026-09-03T12:11:00.000Z",
+    });
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where entity_id = ? and kind = 'task.lease.renewed'")
+        .pluck()
+        .get(grant.task.id),
+    ).toBe(1);
+    expect(
+      projectStore.database
+        .prepare(
+          "select count(*) from idempotency_records where key in ('renew-race-first', 'renew-race-second')",
+        )
+        .pluck()
+        .get(),
+    ).toBe(1);
+
+    const { grant: retryGrant } = await claimedTaskFixture(registration, "renew-retry-race");
+    now = "2026-09-03T12:02:00.000Z";
+    const retryInput = {
+      leaseToken: retryGrant.leaseToken,
+      expectedVersion: retryGrant.task.version,
+      leaseDurationSeconds: 300,
+      idempotencyKey: "renew-identical-race",
+    };
+    const retryResults = await runContendingTaskOperations([
+      { command: "renewTaskLease", input: retryInput, registration, now },
+      { command: "renewTaskLease", input: retryInput, registration, now },
+    ]);
+
+    expect(retryResults.every((result) => result.ok)).toBe(true);
+    expect(retryResults[1]).toEqual(retryResults[0]);
+    expect(
+      projectStore.database
+        .prepare("select version from tasks where id = ?")
+        .pluck()
+        .get(retryGrant.task.id),
+    ).toBe(3);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where entity_id = ? and kind = 'task.lease.renewed'")
+        .pluck()
+        .get(retryGrant.task.id),
+    ).toBe(1);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from idempotency_records where key = ?")
+        .pluck()
+        .get(retryInput.idempotencyKey),
+    ).toBe(1);
+  }, 15_000);
+
+  it("keeps renewal and human cancellation coherent under genuine contention", async () => {
+    const registration = await registerAgent("cancel-race-owner", "Cancel Race Owner");
+    const { grant } = await claimedTaskFixture(registration, "cancel-race");
+    now = "2026-09-03T12:01:00.000Z";
+    const [renewal, cancellation] = await runContendingTaskOperations([
+      {
+        command: "renewTaskLease",
+        input: {
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          leaseDurationSeconds: 600,
+          idempotencyKey: "renew-against-cancellation",
+        },
+        registration,
+        now,
+      },
+      {
+        command: "invalidateTaskClaim",
+        input: {
+          taskId: grant.task.id,
+          expectedVersion: grant.task.version,
+          disposition: "cancelled",
+          reason: "Human cancellation won or lost a real race.",
+          idempotencyKey: "cancel-against-renewal",
+        },
+        actor: human,
+        now,
+      },
+    ]);
+    const state = projectStore.database
+      .prepare<
+        [string],
+        {
+          lifecycle: string;
+          version: number;
+          leaseStatus: string;
+          attemptStatus: string;
+        }
+      >(
+        `select tasks.lifecycle, tasks.version, leases.status as leaseStatus,
+                attempts.status as attemptStatus
+         from tasks
+         join leases on leases.task_id = tasks.id
+         join attempts on attempts.id = leases.attempt_id
+         where tasks.id = ?`,
+      )
+      .get(grant.task.id);
+    const mutationEvents = projectStore.database
+      .prepare<[string], string>(
+        "select kind from events where entity_id = ? and kind in ('task.lease.renewed', 'task.lease.cancelled') order by cursor",
+      )
+      .pluck()
+      .all(grant.task.id);
+    expect([renewal, cancellation].filter((result) => result?.ok)).toHaveLength(1);
+    expect(state?.version).toBe(3);
+    expect(mutationEvents).toHaveLength(1);
+    if (renewal?.ok) {
+      expect(cancellation).toMatchObject({
+        ok: false,
+        error: {
+          _tag: "TaskVersionConflictError",
+          expectedVersion: 2,
+          currentVersion: 3,
+        },
+      });
+      expect(state).toEqual({
+        lifecycle: "in_progress",
+        version: 3,
+        leaseStatus: "active",
+        attemptStatus: "active",
+      });
+      expect(mutationEvents).toEqual(["task.lease.renewed"]);
+    } else {
+      expect(cancellation?.ok).toBe(true);
+      expect(renewal).toMatchObject({
+        ok: false,
+        error: { _tag: "TaskLeaseError", reason: "inactive" },
+      });
+      expect(state).toEqual({
+        lifecycle: "ready",
+        version: 3,
+        leaseStatus: "cancelled",
+        attemptStatus: "abandoned",
+      });
+      expect(mutationEvents).toEqual(["task.lease.cancelled"]);
+    }
+    expect(
+      projectStore.database
+        .prepare(
+          "select count(*) from idempotency_records where key in ('renew-against-cancellation', 'cancel-against-renewal')",
+        )
+        .pluck()
+        .get(),
+    ).toBe(1);
+  }, 15_000);
+
+  it("keeps renewal and expiration coherent when their clocks straddle the deadline", async () => {
+    const registration = await registerAgent("expiry-race-owner", "Expiry Race Owner");
+    const { grant } = await claimedTaskFixture(registration, "expiry-race");
+    const [renewal, reconciliation] = await runContendingTaskOperations([
+      {
+        command: "renewTaskLease",
+        input: {
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          leaseDurationSeconds: 300,
+          idempotencyKey: "renew-against-expiration",
+        },
+        registration,
+        now: "2026-09-03T12:04:59.000Z",
+      },
+      { command: "reconcileTaskLeases", now: grant.claim.expiresAt },
+    ]);
+    const state = projectStore.database
+      .prepare<
+        [string],
+        {
+          lifecycle: string;
+          version: number;
+          leaseStatus: string;
+          expiresAt: string;
+          attemptStatus: string;
+        }
+      >(
+        `select tasks.lifecycle, tasks.version, leases.status as leaseStatus,
+                leases.expires_at as expiresAt, attempts.status as attemptStatus
+         from tasks
+         join leases on leases.task_id = tasks.id
+         join attempts on attempts.id = leases.attempt_id
+         where tasks.id = ?`,
+      )
+      .get(grant.task.id);
+    const mutationEvents = projectStore.database
+      .prepare<[string], string>(
+        "select kind from events where entity_id = ? and kind in ('task.lease.renewed', 'task.lease.expired') order by cursor",
+      )
+      .pluck()
+      .all(grant.task.id);
+    const renewalRecordCount = projectStore.database
+      .prepare("select count(*) from idempotency_records where key = 'renew-against-expiration'")
+      .pluck()
+      .get();
+
+    expect(reconciliation?.ok).toBe(true);
+    expect(state?.version).toBe(3);
+    expect(mutationEvents).toHaveLength(1);
+    if (renewal?.ok) {
+      expect(reconciliation).toEqual({ ok: true, value: 0 });
+      expect(renewalRecordCount).toBe(1);
+      expect(state).toEqual({
+        lifecycle: "in_progress",
+        version: 3,
+        leaseStatus: "active",
+        expiresAt: "2026-09-03T12:09:59.000Z",
+        attemptStatus: "active",
+      });
+      expect(mutationEvents).toEqual(["task.lease.renewed"]);
+    } else {
+      expect(renewal).toMatchObject({
+        ok: false,
+        error: { _tag: "TaskLeaseError", reason: "expired" },
+      });
+      expect(reconciliation).toEqual({ ok: true, value: 1 });
+      expect(renewalRecordCount).toBe(0);
+      expect(state).toEqual({
+        lifecycle: "ready",
+        version: 3,
+        leaseStatus: "expired",
+        expiresAt: grant.claim.expiresAt,
+        attemptStatus: "abandoned",
+      });
+      expect(mutationEvents).toEqual(["task.lease.expired"]);
+    }
+  }, 15_000);
+
+  it("releases a lease idempotently and rejects stale renewal and late agent completion", async () => {
+    const registration = await registerAgent("release-owner", "Release Owner");
+    const { grant } = await claimedTaskFixture(registration, "release");
+    now = "2026-09-03T12:02:00.000Z";
+    const command = {
+      leaseToken: grant.leaseToken,
+      expectedVersion: grant.task.version,
+      reason: "Return work to the shared queue.",
+      idempotencyKey: "release-owned-lease",
+    };
+
+    const released = await Effect.runPromise(releaseTaskLease(command, registration, taskServices));
+    const retry = await Effect.runPromise(releaseTaskLease(command, registration, taskServices));
+    const staleRenewal = await Effect.runPromise(
+      Effect.either(
+        renewTaskLease(
+          {
+            leaseToken: grant.leaseToken,
+            expectedVersion: released.task.version,
+            idempotencyKey: "renew-released-lease",
+          },
+          registration,
+          taskServices,
+        ),
+      ),
+    );
+    const lateCompletion = await Effect.runPromise(
+      Effect.either(
+        completeTask(
+          {
+            taskId: grant.task.id,
+            expectedVersion: released.task.version,
+            idempotencyKey: "late-agent-completion",
+          },
+          { type: "agent", id: registration.run.id },
+          taskServices,
+        ),
+      ),
+    );
+    const attempt = projectStore.database
+      .prepare<[string], { status: string; summary: string; completedAt: string | null }>(
+        "select status, summary, completed_at as completedAt from attempts where id = ?",
+      )
+      .get(grant.attempt.id);
+
+    expect(retry).toEqual(released);
+    expect(released).toMatchObject({
+      task: {
+        id: grant.task.id,
+        lifecycle: "ready",
+        version: 3,
+        claim: null,
+        eligibility: { status: "claimable", claimable: true },
+      },
+      claim: {
+        id: grant.claim.id,
+        status: "released",
+        invalidatedAt: now,
+        invalidationReason: command.reason,
+      },
+    });
+    expect(attempt).toEqual({
+      status: "abandoned",
+      summary: command.reason,
+      completedAt: now,
+    });
+    expect(Either.isLeft(staleRenewal) && staleRenewal.left).toMatchObject({
+      _tag: "TaskLeaseError",
+      reason: "inactive",
+    });
+    expect(Either.isLeft(lateCompletion) && lateCompletion.left).toMatchObject({
+      _tag: "TaskLeaseError",
+      reason: "required",
+    });
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where entity_id = ? and kind = 'task.completed'")
+        .pluck()
+        .get(grant.task.id),
+    ).toBe(0);
+  });
+
+  it("expires claims deterministically, abandons attempts, and makes work claimable once", async () => {
+    const registration = await registerAgent("expiry-owner", "Expiry Owner");
+    const { grant } = await claimedTaskFixture(registration, "expiry");
+    now = grant.claim.expiresAt;
+
+    const reconciled = await Effect.runPromise(reconcileTaskLeases(taskServices));
+    const repeated = await Effect.runPromise(reconcileTaskLeases(taskServices));
+    const [task] = await Effect.runPromise(
+      listTasks({ projectId }, taskServices, registration.profile.capabilities),
+    );
+    const staleRenewal = await Effect.runPromise(
+      Effect.either(
+        renewTaskLease(
+          {
+            leaseToken: grant.leaseToken,
+            expectedVersion: task!.version,
+            idempotencyKey: "renew-expired-lease",
+          },
+          registration,
+          taskServices,
+        ),
+      ),
+    );
+    const lease = projectStore.database
+      .prepare<[string], { status: string; invalidatedAt: string; reason: string }>(
+        "select status, invalidated_at as invalidatedAt, invalidation_reason as reason from leases where id = ?",
+      )
+      .get(grant.claim.id);
+    const attempt = projectStore.database
+      .prepare<[string], { status: string; summary: string; completedAt: string }>(
+        "select status, summary, completed_at as completedAt from attempts where id = ?",
+      )
+      .get(grant.attempt.id);
+    const event = projectStore.database
+      .prepare<[string], { actorType: string; actorId: string; payload: string }>(
+        "select actor_type as actorType, actor_id as actorId, payload_json as payload from events where entity_id = ? and kind = 'task.lease.expired'",
+      )
+      .get(grant.task.id);
+
+    expect(reconciled).toBe(1);
+    expect(repeated).toBe(0);
+    expect(task).toMatchObject({
+      id: grant.task.id,
+      lifecycle: "ready",
+      version: 3,
+      claim: null,
+      eligibility: { status: "claimable", claimable: true },
+    });
+    expect(lease).toEqual({ status: "expired", invalidatedAt: now, reason: "Lease expired." });
+    expect(attempt).toEqual({
+      status: "abandoned",
+      summary: "Lease expired.",
+      completedAt: now,
+    });
+    expect(event).toMatchObject({ actorType: "system", actorId: "helm" });
+    expect(JSON.parse(event!.payload)).toMatchObject({
+      leaseId: grant.claim.id,
+      attemptId: grant.attempt.id,
+      previousVersion: 2,
+      version: 3,
+      reason: "Lease expired.",
+    });
+    expect(Either.isLeft(staleRenewal) && staleRenewal.left).toMatchObject({
+      _tag: "TaskLeaseError",
+      reason: "expired",
+    });
+  });
+
+  it("records human cancellation and reassignment while invalidating both stale tokens", async () => {
+    const firstAgent = await registerAgent("invalidate-first", "Invalidate First");
+    const secondAgent = await registerAgent("invalidate-second", "Invalidate Second");
+    const { grant: firstGrant } = await claimedTaskFixture(firstAgent, "invalidate");
+    now = "2026-09-03T12:01:00.000Z";
+    const cancelled = await Effect.runPromise(
+      invalidateTaskClaim(
+        {
+          taskId: firstGrant.task.id,
+          expectedVersion: firstGrant.task.version,
+          disposition: "cancelled",
+          reason: "Human cancelled the active execution.",
+          idempotencyKey: "cancel-active-claim",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    const cancelledToken = await Effect.runPromise(
+      Effect.either(
+        renewTaskLease(
+          {
+            leaseToken: firstGrant.leaseToken,
+            expectedVersion: cancelled.task.version,
+            idempotencyKey: "renew-cancelled-claim",
+          },
+          firstAgent,
+          taskServices,
+        ),
+      ),
+    );
+    now = "2026-09-03T12:02:00.000Z";
+    const secondGrant = await Effect.runPromise(
+      claimTask(
+        {
+          projectId,
+          taskId: firstGrant.task.id,
+          expectedVersion: cancelled.task.version,
+          idempotencyKey: "claim-for-reassignment",
+        },
+        secondAgent,
+        taskServices,
+      ),
+    );
+    const reassigned = await Effect.runPromise(
+      invalidateTaskClaim(
+        {
+          taskId: secondGrant.task.id,
+          expectedVersion: secondGrant.task.version,
+          disposition: "reassigned",
+          reason: "Move execution to another agent.",
+          idempotencyKey: "reassign-active-claim",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    const reassignedToken = await Effect.runPromise(
+      Effect.either(
+        renewTaskLease(
+          {
+            leaseToken: secondGrant.leaseToken,
+            expectedVersion: reassigned.task.version,
+            idempotencyKey: "renew-reassigned-claim",
+          },
+          secondAgent,
+          taskServices,
+        ),
+      ),
+    );
+    const leaseStatuses = projectStore.database
+      .prepare<[string], string>(
+        "select status from leases where task_id = ? order by acquired_at, id",
+      )
+      .pluck()
+      .all(firstGrant.task.id);
+    const invalidationEvents = projectStore.database
+      .prepare<[string], { kind: string; actorType: string; actorId: string }>(
+        "select kind, actor_type as actorType, actor_id as actorId from events where entity_id = ? and kind in ('task.lease.cancelled', 'task.lease.reassigned') order by cursor",
+      )
+      .all(firstGrant.task.id);
+
+    expect(cancelled).toMatchObject({
+      task: { lifecycle: "ready", version: 3, claim: null },
+      claim: { status: "cancelled" },
+    });
+    expect(reassigned).toMatchObject({
+      task: { lifecycle: "ready", version: 5, claim: null },
+      claim: { status: "reassigned" },
+    });
+    expect(Either.isLeft(cancelledToken) && cancelledToken.left).toMatchObject({
+      _tag: "TaskLeaseError",
+      reason: "inactive",
+    });
+    expect(Either.isLeft(reassignedToken) && reassignedToken.left).toMatchObject({
+      _tag: "TaskLeaseError",
+      reason: "inactive",
+    });
+    expect(leaseStatuses).toEqual(["cancelled", "reassigned"]);
+    expect(invalidationEvents).toEqual([
+      { kind: "task.lease.cancelled", actorType: "human", actorId: "local-human" },
+      { kind: "task.lease.reassigned", actorType: "human", actorId: "local-human" },
+    ]);
+  });
+
+  it("rolls task, attempt, lease, event, and idempotency state back when claim audit fails", async () => {
+    const registration = await registerAgent("rollback-agent", "Rollback Agent");
+    const task = await Effect.runPromise(
+      createTask(
+        readyInput({
+          title: "Rollback claim",
+          requiredCapabilities: ["typescript"],
+          idempotencyKey: "create-rollback-claim",
+        }),
+        human,
+        taskServices,
+      ),
+    );
+    projectStore.database.exec(`
+      create trigger reject_claim_event
+      before insert on events when NEW.kind = 'task.claimed'
+      begin select raise(abort, 'claim event rejected'); end;
+    `);
+
+    const result = await Effect.runPromise(
+      Effect.either(
+        claimTask(
+          {
+            projectId,
+            taskId: task.id,
+            expectedVersion: task.version,
+            idempotencyKey: "claim-with-rejected-event",
+          },
+          registration,
+          taskServices,
+        ),
+      ),
+    );
+    const storedTask = projectStore.database
+      .prepare<[string], { lifecycle: string; version: number }>(
+        "select lifecycle, version from tasks where id = ?",
+      )
+      .get(task.id);
+
+    expect(Either.isLeft(result) && result.left["_tag"]).toBe("TaskPersistenceError");
+    expect(storedTask).toEqual({ lifecycle: "ready", version: 1 });
+    expect(
+      projectStore.database
+        .prepare("select count(*) from attempts where task_id = ?")
+        .pluck()
+        .get(task.id),
+    ).toBe(0);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from leases where task_id = ?")
+        .pluck()
+        .get(task.id),
+    ).toBe(0);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from idempotency_records where key = ?")
+        .pluck()
+        .get("claim-with-rejected-event"),
+    ).toBe(0);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where entity_id = ? and kind = 'task.claimed'")
+        .pluck()
+        .get(task.id),
+    ).toBe(0);
+  });
+
   it("accepts representative input through normal and compiled task schemas", () => {
     const valid = backlogInput();
     expect(createTaskInputSchema.parse(valid)).toEqual(valid);
@@ -1575,5 +2956,55 @@ describe("task application commands", () => {
     };
     expect(createTaskRelationInputSchema.parse(relation)).toEqual(relation);
     expect(compiledCreateTaskRelationInputSchema.parse(relation)).toEqual(relation);
+
+    const chosenClaim = {
+      projectId: "project-1",
+      taskId: "task-1",
+      expectedVersion: 1,
+      leaseDurationSeconds: 300,
+      idempotencyKey: "chosen-claim",
+    };
+    expect(claimTaskInputSchema.parse(chosenClaim)).toEqual(chosenClaim);
+    expect(compiledClaimTaskInputSchema.parse(chosenClaim)).toEqual(chosenClaim);
+
+    const nextClaim = {
+      projectId: "project-1",
+      leaseDurationSeconds: 300,
+      idempotencyKey: "next-claim",
+    };
+    expect(claimNextTaskInputSchema.parse(nextClaim)).toEqual(nextClaim);
+    expect(compiledClaimNextTaskInputSchema.parse(nextClaim)).toEqual(nextClaim);
+
+    const renewal = {
+      leaseToken: "lease-token",
+      expectedVersion: 2,
+      leaseDurationSeconds: 300,
+      idempotencyKey: "renew-lease",
+    };
+    expect(renewTaskLeaseInputSchema.parse(renewal)).toEqual(renewal);
+    expect(compiledRenewTaskLeaseInputSchema.parse(renewal)).toEqual(renewal);
+
+    const release = {
+      leaseToken: "lease-token",
+      expectedVersion: 2,
+      reason: "Return work to the ready queue.",
+      idempotencyKey: "release-lease",
+    };
+    expect(releaseTaskLeaseInputSchema.parse(release)).toEqual(release);
+    expect(compiledReleaseTaskLeaseInputSchema.parse(release)).toEqual(release);
+
+    const invalidation = {
+      taskId: "task-1",
+      expectedVersion: 2,
+      disposition: "cancelled" as const,
+      reason: "Stop the current execution.",
+      idempotencyKey: "invalidate-claim",
+    };
+    expect(invalidateTaskClaimInputSchema.parse(invalidation)).toEqual(invalidation);
+    expect(compiledInvalidateTaskClaimInputSchema.parse(invalidation)).toEqual(invalidation);
+
+    expect(() =>
+      compiledClaimTaskInputSchema.parse({ ...chosenClaim, leaseDurationSeconds: 29 }),
+    ).toThrow();
   });
 });

@@ -2,12 +2,17 @@ import { Effect } from "effect";
 
 import {
   compiledArchiveTaskInputSchema,
+  compiledClaimNextTaskInputSchema,
+  compiledClaimTaskInputSchema,
   compiledCompleteTaskInputSchema,
   compiledCreateTaskInputSchema,
   compiledCreateTaskRelationInputSchema,
   compiledFindWorkInputSchema,
   compiledListTaskTagsInputSchema,
   compiledListTasksInputSchema,
+  compiledInvalidateTaskClaimInputSchema,
+  compiledReleaseTaskLeaseInputSchema,
+  compiledRenewTaskLeaseInputSchema,
   compiledTaskContextInputSchema,
   compiledPrepareTaskInputSchema,
   compiledReopenTaskInputSchema,
@@ -16,23 +21,31 @@ import {
   missingReadyPreparation,
   type Actor,
   type ArchiveTaskInput,
+  type ClaimNextTaskInput,
+  type ClaimTaskInput,
   type CompleteTaskInput,
   type CreateTaskInput,
   type CreateTaskRelationInput,
   type FindWorkInput,
   type ListTaskTagsInput,
   type ListTasksInput,
+  type InvalidateTaskClaimInput,
   type PrepareTaskInput,
   type ReopenTaskInput,
+  type ReleaseTaskLeaseInput,
+  type RenewTaskLeaseInput,
   type Task,
   type TaskContextInput,
   type TaskContextPackage,
   type TaskDiscoveryPage,
   type TaskEvaluationContext,
+  type TaskLeaseGrant,
+  type TaskLeaseMutationResult,
   type TaskRelation,
   type TaskTag,
   type UpdateTaskPlanningInput,
 } from "../domain/tasks";
+import type { RegisteredAgentRun } from "../domain/agents";
 import {
   InvalidTaskInputError,
   TaskTagConstraintError,
@@ -80,9 +93,46 @@ export interface TaskStore {
     actor: Actor,
     context: TaskEvaluationContext,
   ): Effect.Effect<Task, TaskCommandError>;
+  claimTask(
+    input: ClaimTaskInput,
+    claimant: TaskClaimant,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<TaskLeaseGrant, TaskCommandError>;
+  claimNext(
+    input: ClaimNextTaskInput,
+    claimant: TaskClaimant,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<TaskLeaseGrant, TaskCommandError>;
+  renewLease(
+    input: RenewTaskLeaseInput,
+    claimant: TaskClaimant,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<TaskLeaseGrant, TaskCommandError>;
+  releaseLease(
+    input: ReleaseTaskLeaseInput,
+    claimant: TaskClaimant,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<TaskLeaseMutationResult, TaskCommandError>;
+  invalidateClaim(
+    input: InvalidateTaskClaimInput,
+    actor: Actor,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<TaskLeaseMutationResult, TaskCommandError>;
+  cancelLeasesForRun(
+    agentRunId: string,
+    context: TaskEvaluationContext,
+  ): Effect.Effect<number, TaskCommandError>;
+  reconcileLeases(context: TaskEvaluationContext): Effect.Effect<number, TaskCommandError>;
 }
 
-export type TaskClock = { today(): string };
+export type TaskClaimant = {
+  readonly runId: string;
+  readonly profileId: string;
+  readonly displayName: string;
+  readonly capabilities: readonly string[];
+};
+
+export type TaskClock = { today(): string; now?(): string };
 export type TaskServices = { store: TaskStore; clock: TaskClock };
 export type TaskListQuery = ListTasksInput & TaskEvaluationContext;
 export type TaskDiscoveryQuery = FindWorkInput & TaskEvaluationContext;
@@ -96,13 +146,29 @@ export const systemTaskClock: TaskClock = {
     const day = String(date.getDate()).padStart(2, "0");
     return `${year}-${month}-${day}`;
   },
+  now() {
+    return new Date().toISOString();
+  },
 };
 
 function evaluationContext(
   services: TaskServices,
   agentCapabilities: readonly string[] = [],
 ): TaskEvaluationContext {
-  return { today: services.clock.today(), agentCapabilities };
+  return {
+    today: services.clock.today(),
+    now: services.clock.now?.() ?? new Date().toISOString(),
+    agentCapabilities,
+  };
+}
+
+function claimantFromRegistration(registration: RegisteredAgentRun): TaskClaimant {
+  return {
+    runId: registration.run.id,
+    profileId: registration.profile.id,
+    displayName: registration.profile.displayName,
+    capabilities: registration.profile.capabilities,
+  };
 }
 
 function parseInput<A>(parse: () => A): Effect.Effect<A, InvalidTaskInputError> {
@@ -289,4 +355,93 @@ export function getTaskContext(
         ...evaluationContext(services, agentCapabilities),
       }),
   );
+}
+
+export function claimTask(
+  input: unknown,
+  registration: RegisteredAgentRun,
+  services: TaskServices,
+) {
+  const claimant = claimantFromRegistration(registration);
+  return Effect.flatMap(
+    parseInput(() => compiledClaimTaskInputSchema.parse(input)),
+    (parsed) =>
+      services.store.claimTask(
+        parsed,
+        claimant,
+        evaluationContext(services, claimant.capabilities),
+      ),
+  );
+}
+
+export function claimNextTask(
+  input: unknown,
+  registration: RegisteredAgentRun,
+  services: TaskServices,
+) {
+  const claimant = claimantFromRegistration(registration);
+  return Effect.flatMap(
+    parseInput(() => compiledClaimNextTaskInputSchema.parse(input)),
+    (parsed) =>
+      services.store.claimNext(
+        parsed,
+        claimant,
+        evaluationContext(services, claimant.capabilities),
+      ),
+  );
+}
+
+export function renewTaskLease(
+  input: unknown,
+  registration: RegisteredAgentRun,
+  services: TaskServices,
+) {
+  const claimant = claimantFromRegistration(registration);
+  return Effect.flatMap(
+    parseInput(() => compiledRenewTaskLeaseInputSchema.parse(input)),
+    (parsed) =>
+      services.store.renewLease(
+        parsed,
+        claimant,
+        evaluationContext(services, claimant.capabilities),
+      ),
+  );
+}
+
+export function releaseTaskLease(
+  input: unknown,
+  registration: RegisteredAgentRun,
+  services: TaskServices,
+) {
+  const claimant = claimantFromRegistration(registration);
+  return Effect.flatMap(
+    parseInput(() => compiledReleaseTaskLeaseInputSchema.parse(input)),
+    (parsed) =>
+      services.store.releaseLease(
+        parsed,
+        claimant,
+        evaluationContext(services, claimant.capabilities),
+      ),
+  );
+}
+
+export function invalidateTaskClaim(
+  input: unknown,
+  actor: Actor,
+  services: TaskServices,
+  agentCapabilities: readonly string[] = [],
+) {
+  return Effect.flatMap(
+    parseInput(() => compiledInvalidateTaskClaimInputSchema.parse(input)),
+    (parsed) =>
+      services.store.invalidateClaim(parsed, actor, evaluationContext(services, agentCapabilities)),
+  );
+}
+
+export function reconcileTaskLeases(services: TaskServices) {
+  return services.store.reconcileLeases(evaluationContext(services));
+}
+
+export function cancelTaskLeasesForRun(agentRunId: string, services: TaskServices) {
+  return services.store.cancelLeasesForRun(agentRunId, evaluationContext(services));
 }

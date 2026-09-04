@@ -43,6 +43,13 @@
       "when": 1788470597276,
       "tag": "0005_majestic_patriot",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788505708112,
+      "tag": "0006_vengeful_mandroid",
+      "breakpoints": true
     }
   ]
 }

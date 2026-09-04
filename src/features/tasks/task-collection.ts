@@ -5,6 +5,8 @@ import type { QueryClient } from "@tanstack/react-query";
 import { taskSchema } from "../../domain/tasks";
 import { readTasks } from "../../server/task-functions";
 
+export const TASK_COLLECTION_REFETCH_INTERVAL_MS = 5_000;
+
 function buildTaskCollection(queryClient: QueryClient, projectId: string) {
   return createCollection(
     queryCollectionOptions({
@@ -14,6 +16,7 @@ function buildTaskCollection(queryClient: QueryClient, projectId: string) {
       schema: taskSchema,
       getKey: (task) => task.id,
       staleTime: 5_000,
+      refetchInterval: TASK_COLLECTION_REFETCH_INTERVAL_MS,
     }),
   );
 }

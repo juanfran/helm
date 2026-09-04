@@ -1,21 +1,51 @@
-import { createSqliteProjectStore } from "../infrastructure/sqlite-project-store.server";
-import { createSqliteTaskStore } from "../infrastructure/sqlite-task-store.server";
-import { createSqliteAgentStore } from "../infrastructure/sqlite-agent-store.server";
-import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
-import { systemTaskClock } from "../application/tasks";
-import { reconcileActiveAgentRuns } from "../application/agents";
 import { Effect } from "effect";
 
-const projectStore = createSqliteProjectStore();
+import { reconcileActiveAgentRuns } from "../application/agents";
+import { reconcileTaskLeases, systemTaskClock } from "../application/tasks";
+import { createSqliteAgentStore } from "../infrastructure/sqlite-agent-store.server";
+import { createSqliteProjectStore } from "../infrastructure/sqlite-project-store.server";
+import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
+import { createSqliteTaskStore } from "../infrastructure/sqlite-task-store.server";
 
-export const projectServices = {
-  inspector: localRepositoryInspector,
-  store: projectStore,
+function createProjectRuntime() {
+  const projectStore = createSqliteProjectStore();
+  const projectServices = {
+    inspector: localRepositoryInspector,
+    store: projectStore,
+  };
+  const taskServices = {
+    store: createSqliteTaskStore(projectStore.database),
+    clock: systemTaskClock,
+  };
+  const agentServices = { store: createSqliteAgentStore(projectStore.database) };
+
+  Effect.runSync(reconcileActiveAgentRuns(agentServices));
+  Effect.runSync(reconcileTaskLeases(taskServices));
+
+  const leaseReconciliationTimer = setInterval(() => {
+    void Effect.runPromise(reconcileTaskLeases(taskServices)).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : "unknown error";
+      process.stderr.write(`[helm] lease reconciliation failed: ${message}\n`);
+    });
+  }, 5_000);
+  leaseReconciliationTimer.unref();
+
+  return { agentServices, leaseReconciliationTimer, projectServices, projectStore, taskServices };
+}
+
+type ProjectRuntime = ReturnType<typeof createProjectRuntime>;
+const projectRuntimeKey = Symbol.for("helm.project-runtime");
+const legacyLeaseReconciliationTimerKey = Symbol.for("helm.lease-reconciliation-timer");
+const runtimeGlobal = globalThis as typeof globalThis & {
+  [projectRuntimeKey]?: ProjectRuntime;
+  [legacyLeaseReconciliationTimerKey]?: ReturnType<typeof setInterval>;
 };
 
-export const taskServices = {
-  store: createSqliteTaskStore(projectStore.database),
-  clock: systemTaskClock,
-};
-export const agentServices = { store: createSqliteAgentStore(projectStore.database) };
-Effect.runSync(reconcileActiveAgentRuns(agentServices));
+if (runtimeGlobal[legacyLeaseReconciliationTimerKey]) {
+  clearInterval(runtimeGlobal[legacyLeaseReconciliationTimerKey]);
+  delete runtimeGlobal[legacyLeaseReconciliationTimerKey];
+}
+
+const runtime = (runtimeGlobal[projectRuntimeKey] ??= createProjectRuntime());
+
+export const { agentServices, projectServices, taskServices } = runtime;

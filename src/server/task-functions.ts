@@ -9,6 +9,7 @@ import {
   compiledCreateTaskRelationInputSchema,
   compiledListTaskTagsInputSchema,
   compiledListTasksInputSchema,
+  compiledInvalidateTaskClaimInputSchema,
   compiledPrepareTaskInputSchema,
   compiledReopenTaskInputSchema,
   compiledUpdateTaskPlanningInputSchema,
@@ -20,6 +21,7 @@ import {
   executeCompleteTask,
   executeCreateTask,
   executeCreateTaskRelation,
+  executeInvalidateTaskClaim,
   executePrepareTask,
   executeReopenTask,
   executeUpdateTaskPlanning,
@@ -62,3 +64,7 @@ export const createHumanTaskRelation = createServerFn({ method: "POST" })
 export const archiveHumanTask = createServerFn({ method: "POST" })
   .validator(compiledArchiveTaskInputSchema)
   .handler(({ data }) => executeArchiveTask(data, LOCAL_HUMAN, taskServices));
+
+export const invalidateHumanTaskClaim = createServerFn({ method: "POST" })
+  .validator(compiledInvalidateTaskClaimInputSchema)
+  .handler(({ data }) => executeInvalidateTaskClaim(data, LOCAL_HUMAN, taskServices));

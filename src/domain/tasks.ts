@@ -65,7 +65,14 @@ export const checklistItemSchema = z.object({
 });
 export type ChecklistItem = z.infer<typeof checklistItemSchema>;
 
-export const taskLifecycleSchema = z.enum(["backlog", "ready", "done", "cancelled"]);
+export const taskLifecycleSchema = z.enum([
+  "backlog",
+  "ready",
+  "in_progress",
+  "review",
+  "done",
+  "cancelled",
+]);
 export type TaskLifecycle = z.infer<typeof taskLifecycleSchema>;
 
 export const taskPrioritySchema = z.enum(["urgent", "high", "normal", "low"]);
@@ -73,6 +80,30 @@ export type TaskPriority = z.infer<typeof taskPrioritySchema>;
 
 export const taskSizeSchema = z.enum(["xs", "s", "m", "l", "xl"]);
 export type TaskSize = z.infer<typeof taskSizeSchema>;
+
+export const taskLeaseStatusSchema = z.enum([
+  "active",
+  "released",
+  "expired",
+  "cancelled",
+  "reassigned",
+]);
+export type TaskLeaseStatus = z.infer<typeof taskLeaseStatusSchema>;
+
+export const taskClaimSchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  attemptId: z.string(),
+  agentRunId: z.string(),
+  agentProfileId: z.string(),
+  agentDisplayName: z.string(),
+  status: taskLeaseStatusSchema,
+  acquiredAt: z.string(),
+  expiresAt: z.string(),
+  invalidatedAt: z.string().nullable(),
+  invalidationReason: z.string().nullable(),
+});
+export type TaskClaim = z.infer<typeof taskClaimSchema>;
 
 export const taskDateSchema = z.iso.date({
   error: "Use a valid ISO date in YYYY-MM-DD format.",
@@ -199,6 +230,7 @@ export const taskEligibilitySchema = z.object({
     "blocked",
     "capability_mismatch",
     "claimable",
+    "claimed",
     "complete",
     "archived",
   ]),
@@ -225,6 +257,7 @@ export const taskSchema = z.object({
   tags: z.array(tagSchema).default([]),
   requiredCapabilities: z.array(capabilityNameSchema).default([]),
   referencedPaths: taskReferencedPathsSchema.default([]),
+  claim: taskClaimSchema.nullable().default(null),
   upstreamRelations: z.array(taskRelationSchema).default([]),
   downstreamRelations: z.array(taskRelationSchema).default([]),
   eligibility: taskEligibilitySchema.optional(),
@@ -252,6 +285,20 @@ export const taskAttemptSummarySchema = z.object({
   completedAt: z.string().nullable(),
 });
 export type TaskAttemptSummary = z.infer<typeof taskAttemptSummarySchema>;
+
+export const taskLeaseGrantSchema = z.object({
+  task: taskSchema,
+  attempt: taskAttemptSummarySchema,
+  claim: taskClaimSchema,
+  leaseToken: z.string(),
+});
+export type TaskLeaseGrant = z.infer<typeof taskLeaseGrantSchema>;
+
+export const taskLeaseMutationResultSchema = z.object({
+  task: taskSchema,
+  claim: taskClaimSchema,
+});
+export type TaskLeaseMutationResult = z.infer<typeof taskLeaseMutationResultSchema>;
 
 export const taskContextPackageSchema = z.object({
   projectId: z.string(),
@@ -302,6 +349,7 @@ export const taskCandidateSchema = z.object({
   size: taskSizeSchema.nullable(),
   tags: z.array(tagSchema),
   requiredCapabilities: z.array(capabilityNameSchema),
+  claim: taskClaimSchema.nullable(),
   eligibility: taskEligibilitySchema,
   version: z.number().int().positive(),
   descriptionText: z.string().optional(),
@@ -444,6 +492,49 @@ export const taskContextInputSchema = z.object({
 });
 export type TaskContextInput = z.infer<typeof taskContextInputSchema>;
 
+export const taskLeaseDurationSecondsSchema = z.number().int().min(30).max(3_600);
+
+export const claimTaskInputSchema = z.object({
+  projectId: z.string().trim().min(1),
+  taskId: z.string().trim().min(1),
+  expectedVersion: z.number().int().positive(),
+  leaseDurationSeconds: taskLeaseDurationSecondsSchema.optional().default(900),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type ClaimTaskInput = z.infer<typeof claimTaskInputSchema>;
+
+export const claimNextTaskInputSchema = z.object({
+  projectId: z.string().trim().min(1),
+  leaseDurationSeconds: taskLeaseDurationSecondsSchema.optional().default(900),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type ClaimNextTaskInput = z.infer<typeof claimNextTaskInputSchema>;
+
+export const renewTaskLeaseInputSchema = z.object({
+  leaseToken: z.string().trim().min(1).max(500),
+  expectedVersion: z.number().int().positive(),
+  leaseDurationSeconds: taskLeaseDurationSecondsSchema.optional().default(900),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type RenewTaskLeaseInput = z.infer<typeof renewTaskLeaseInputSchema>;
+
+export const releaseTaskLeaseInputSchema = z.object({
+  leaseToken: z.string().trim().min(1).max(500),
+  expectedVersion: z.number().int().positive(),
+  reason: z.string().trim().min(1).max(1_000),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type ReleaseTaskLeaseInput = z.infer<typeof releaseTaskLeaseInputSchema>;
+
+export const invalidateTaskClaimInputSchema = z.object({
+  taskId: z.string().trim().min(1),
+  expectedVersion: z.number().int().positive(),
+  disposition: z.enum(["cancelled", "reassigned"]),
+  reason: z.string().trim().min(1).max(1_000),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type InvalidateTaskClaimInput = z.infer<typeof invalidateTaskClaimInputSchema>;
+
 export const compiledCreateTaskInputSchema = z.compile(createTaskInputSchema);
 export const compiledPrepareTaskInputSchema = z.compile(prepareTaskInputSchema);
 export const compiledArchiveTaskInputSchema = z.compile(archiveTaskInputSchema);
@@ -455,6 +546,11 @@ export const compiledListTasksInputSchema = z.compile(listTasksInputSchema);
 export const compiledListTaskTagsInputSchema = z.compile(listTaskTagsInputSchema);
 export const compiledFindWorkInputSchema = z.compile(findWorkInputSchema);
 export const compiledTaskContextInputSchema = z.compile(taskContextInputSchema);
+export const compiledClaimTaskInputSchema = z.compile(claimTaskInputSchema);
+export const compiledClaimNextTaskInputSchema = z.compile(claimNextTaskInputSchema);
+export const compiledRenewTaskLeaseInputSchema = z.compile(renewTaskLeaseInputSchema);
+export const compiledReleaseTaskLeaseInputSchema = z.compile(releaseTaskLeaseInputSchema);
+export const compiledInvalidateTaskClaimInputSchema = z.compile(invalidateTaskClaimInputSchema);
 
 function nodePlainText(value: unknown): string {
   const parsed = tipTapNodeSchema.safeParse(value);
@@ -517,6 +613,7 @@ export const taskPriorityRank: Record<TaskPriority, number> = {
 export type TaskEvaluationContext = {
   readonly agentCapabilities: readonly string[];
   readonly today: string;
+  readonly now: string;
 };
 
 export type TaskOrderingKey = Pick<Task, "priority" | "position" | "dueAt" | "sequence">;
@@ -571,6 +668,16 @@ export function evaluateTaskEligibility(
       claimable: false,
       status: "complete",
       reasons: ["Task is complete."],
+      orderingExplanation,
+      missingCapabilities,
+      blockingTaskIds: [...blockingTaskIds],
+    };
+  }
+  if (task.claim) {
+    return {
+      claimable: false,
+      status: "claimed",
+      reasons: [`Claimed by ${task.claim.agentDisplayName} until ${task.claim.expiresAt}.`],
       orderingExplanation,
       missingCapabilities,
       blockingTaskIds: [...blockingTaskIds],

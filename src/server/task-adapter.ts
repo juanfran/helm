@@ -5,6 +5,7 @@ import {
   completeTask,
   createTask,
   createTaskRelation,
+  invalidateTaskClaim,
   prepareTask,
   reopenTask,
   updateTaskPlanning,
@@ -15,11 +16,14 @@ import {
   type TaskCommandError,
   type TaskErrorDto,
 } from "../application/task-errors";
-import type { Actor, Task, TaskRelation } from "../domain/tasks";
+import type { Actor, Task, TaskLeaseMutationResult, TaskRelation } from "../domain/tasks";
 
 export type TaskCommandResponse = { ok: true; task: Task } | { ok: false; error: TaskErrorDto };
 export type TaskRelationCommandResponse =
   | { ok: true; relation: TaskRelation }
+  | { ok: false; error: TaskErrorDto };
+export type TaskLeaseCommandResponse =
+  | { ok: true; result: TaskLeaseMutationResult }
   | { ok: false; error: TaskErrorDto };
 
 async function execute(
@@ -37,6 +41,15 @@ async function executeRelation(
   const result = await Effect.runPromise(Effect.either(operation));
   return Either.isRight(result)
     ? { ok: true, relation: result.right }
+    : { ok: false, error: toTaskErrorDto(result.left) };
+}
+
+async function executeLeaseMutation(
+  operation: Effect.Effect<TaskLeaseMutationResult, TaskCommandError>,
+): Promise<TaskLeaseCommandResponse> {
+  const result = await Effect.runPromise(Effect.either(operation));
+  return Either.isRight(result)
+    ? { ok: true, result: result.right }
     : { ok: false, error: toTaskErrorDto(result.left) };
 }
 
@@ -81,4 +94,8 @@ export function executeCreateTaskRelation(data: unknown, actor: Actor, services:
 
 export function executeArchiveTask(data: unknown, actor: Actor, services: TaskServices) {
   return execute(archiveTask(data, actor, services));
+}
+
+export function executeInvalidateTaskClaim(data: unknown, actor: Actor, services: TaskServices) {
+  return executeLeaseMutation(invalidateTaskClaim(data, actor, services));
 }

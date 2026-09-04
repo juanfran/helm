@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import Database from "better-sqlite3";
 import { and, asc, eq, isNull, max } from "drizzle-orm";
@@ -7,9 +7,11 @@ import { Effect } from "effect";
 
 import {
   TaskAlreadyArchivedError,
+  TaskClaimUnavailableError,
   TaskDiscoveryCursorStaleError,
   TaskIdempotencyConflictError,
   TaskLifecycleError,
+  TaskLeaseError,
   TaskNestingError,
   TaskNotFoundError,
   TaskPathError,
@@ -21,15 +23,19 @@ import {
   type TaskCommandError,
 } from "../application/task-errors";
 import type {
+  TaskClaimant,
   TaskContextQuery,
   TaskDiscoveryQuery,
   TaskListQuery,
   TaskStore,
 } from "../application/tasks";
 import {
+  agentProfiles,
+  agentRuns,
   attempts,
   events,
   idempotencyRecords,
+  leases,
   projects,
   schema,
   tags,
@@ -52,10 +58,14 @@ import {
   tagSchema,
   taskRelationSchema,
   taskContextPackageSchema,
+  taskLeaseGrantSchema,
+  taskLeaseMutationResultSchema,
   taskSchema,
   taskParentViolation,
   type Actor,
   type ArchiveTaskInput,
+  type ClaimNextTaskInput,
+  type ClaimTaskInput,
   type CompleteTaskInput,
   type CreateTaskInput,
   type CreateTaskRelationInput,
@@ -68,6 +78,9 @@ import {
   type TaskContextPackage,
   type TaskDiscoveryPage,
   type TaskEvaluationContext,
+  type TaskClaim,
+  type TaskLeaseGrant,
+  type TaskLeaseMutationResult,
   type TaskRelation,
   type UpdateTaskPlanningInput,
 } from "../domain/tasks";
@@ -85,6 +98,27 @@ type DrizzleTransaction = Parameters<Parameters<DrizzleDatabase["transaction"]>[
 type DatabaseSession = DrizzleDatabase | DrizzleTransaction;
 type TaskRow = typeof tasks.$inferSelect;
 type TaskRelationRow = typeof taskRelations.$inferSelect;
+type LeaseRow = typeof leases.$inferSelect;
+type AttemptRow = typeof attempts.$inferSelect;
+const inMemoryLeaseTokenCaches = new WeakMap<Database.Database, Map<string, string>>();
+const fileLeaseTokenCaches = new Map<string, Map<string, string>>();
+
+function leaseTokenCacheFor(database: Database.Database) {
+  if (database.name !== ":memory:") {
+    let cache = fileLeaseTokenCaches.get(database.name);
+    if (!cache) {
+      cache = new Map();
+      fileLeaseTokenCaches.set(database.name, cache);
+    }
+    return cache;
+  }
+  let cache = inMemoryLeaseTokenCaches.get(database);
+  if (!cache) {
+    cache = new Map();
+    inMemoryLeaseTokenCaches.set(database, cache);
+  }
+  return cache;
+}
 type PlanningAssignment = {
   priority: Task["priority"];
   position: number;
@@ -105,6 +139,69 @@ function persistenceError(error: unknown) {
   return new TaskPersistenceError({
     message: error instanceof Error ? error.message : "The task database operation failed.",
   });
+}
+
+function leaseTokenHash(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function leaseExpiration(now: string, durationSeconds: number) {
+  return new Date(Date.parse(now) + durationSeconds * 1_000).toISOString();
+}
+
+function attemptSummaryFromRow(row: AttemptRow) {
+  return {
+    id: row.id,
+    taskId: row.taskId,
+    agentRunId: row.agentRunId,
+    status: row.status,
+    summary: row.summary,
+    verification: JSON.parse(row.verificationJson),
+    createdAt: row.createdAt,
+    completedAt: row.completedAt,
+  };
+}
+
+function claimFromLeaseRow(db: DatabaseSession, row: LeaseRow): TaskClaim {
+  const run = db.select().from(agentRuns).where(eq(agentRuns.id, row.agentRunId)).limit(1).get();
+  const profile = run
+    ? db.select().from(agentProfiles).where(eq(agentProfiles.id, run.profileId)).limit(1).get()
+    : null;
+  if (!run || !profile) {
+    throw new TaskLeaseError({
+      taskId: row.taskId,
+      leaseId: row.id,
+      reason: "inactive_run",
+      message: "The claim owner no longer exists.",
+    });
+  }
+  return {
+    id: row.id,
+    taskId: row.taskId,
+    attemptId: row.attemptId,
+    agentRunId: row.agentRunId,
+    agentProfileId: profile.id,
+    agentDisplayName: profile.displayName,
+    status: row.status,
+    acquiredAt: row.acquiredAt,
+    expiresAt: row.expiresAt,
+    invalidatedAt: row.invalidatedAt,
+    invalidationReason: row.invalidationReason,
+  };
+}
+
+function activeClaimForTask(db: DatabaseSession, taskId: string, now: string) {
+  const row = db
+    .select()
+    .from(leases)
+    .where(and(eq(leases.taskId, taskId), eq(leases.status, "active")))
+    .orderBy(asc(leases.acquiredAt))
+    .limit(1)
+    .get();
+  if (!row || row.expiresAt <= now) return null;
+  const run = db.select().from(agentRuns).where(eq(agentRuns.id, row.agentRunId)).limit(1).get();
+  if (!run || run.status !== "active") return null;
+  return claimFromLeaseRow(db, row);
 }
 
 function relationFromRow(db: DatabaseSession, row: TaskRelationRow): TaskRelation {
@@ -203,6 +300,7 @@ function candidateFromTask(
     size: task.size,
     tags: task.tags,
     requiredCapabilities: task.requiredCapabilities,
+    claim: task.claim,
     eligibility: task.eligibility,
     version: task.version,
     ...(selectedFields.has("descriptionText") ? { descriptionText: task.descriptionText } : {}),
@@ -325,6 +423,7 @@ function taskFromRow(db: DatabaseSession, row: TaskRow, context?: TaskEvaluation
     tags: assignedTags,
     requiredCapabilities,
     referencedPaths: referencedPathsForTask(db, row.id),
+    claim: context ? activeClaimForTask(db, row.id, context.now) : null,
     upstreamRelations,
     downstreamRelations,
     description: JSON.parse(row.descriptionJson),
@@ -458,6 +557,13 @@ function assertCanUseParent(db: DatabaseSession, projectId: string, parentTaskId
       message: "Tasks may only be nested one level deep.",
     });
   }
+  if (parent.lifecycle === "in_progress" || parent.lifecycle === "review") {
+    throw new TaskLifecycleError({
+      taskId: parentTaskId,
+      lifecycle: parent.lifecycle,
+      message: "A child cannot be added while its parent has active work.",
+    });
+  }
 }
 
 function sequencePath(db: DatabaseSession, taskIds: readonly string[]) {
@@ -537,6 +643,102 @@ function findIdempotentRelationResult(
     });
   }
   return taskRelationSchema.parse(JSON.parse(existing.resultJson));
+}
+
+function findIdempotentLeaseResult(
+  db: DatabaseSession,
+  command: string,
+  key: string,
+  hash: string,
+  result: "grant" | "mutation",
+  options: {
+    tokenCache?: Map<string, string>;
+    providedToken?: string;
+    now?: string;
+  } = {},
+) {
+  const existing = db
+    .select()
+    .from(idempotencyRecords)
+    .where(eq(idempotencyRecords.key, key))
+    .limit(1)
+    .get();
+  if (!existing) return null;
+  if (existing.command !== command || existing.inputHash !== hash) {
+    throw new TaskIdempotencyConflictError({
+      key,
+      message: "That idempotency key was already used for a different command.",
+    });
+  }
+  const recorded = JSON.parse(existing.resultJson);
+  if (result === "mutation") return taskLeaseMutationResultSchema.parse(recorded);
+  const claimId = recorded?.claim?.id;
+  const leaseToken = options.providedToken ?? options.tokenCache?.get(claimId);
+  if (!leaseToken) {
+    throw new TaskLeaseError({
+      taskId: recorded?.task?.id,
+      leaseId: claimId,
+      reason: "inactive",
+      message:
+        "The original lease token is no longer available in this server process; claim the task again if it is eligible.",
+    });
+  }
+  const lease = db.select().from(leases).where(eq(leases.id, claimId)).limit(1).get();
+  if (!lease || lease.status !== "active" || lease.tokenHash !== leaseTokenHash(leaseToken)) {
+    if (claimId) options.tokenCache?.delete(claimId);
+    throw new TaskLeaseError({
+      taskId: recorded?.task?.id,
+      leaseId: claimId,
+      reason: lease?.status === "expired" ? "expired" : "inactive",
+      message: "The idempotent claim result no longer has a valid active lease.",
+    });
+  }
+  if (options.now && lease.expiresAt <= options.now) {
+    options.tokenCache?.delete(lease.id);
+    throw new TaskLeaseError({
+      taskId: lease.taskId,
+      leaseId: lease.id,
+      reason: "expired",
+      message: "The idempotent claim result has expired.",
+    });
+  }
+  return taskLeaseGrantSchema.parse({ ...recorded, leaseToken });
+}
+
+function recordLeaseMutation(
+  db: DatabaseSession,
+  input: { idempotencyKey: string },
+  command: string,
+  hash: string,
+  result: TaskLeaseGrant | TaskLeaseMutationResult,
+  actor: Actor,
+  event: { kind: string; payload: unknown; occurredAt: string },
+) {
+  db.insert(events)
+    .values({
+      projectId: result.task.projectId,
+      kind: event.kind,
+      actorType: actor.type,
+      actorId: actor.id,
+      entityType: "task",
+      entityId: result.task.id,
+      payloadJson: JSON.stringify(event.payload),
+      occurredAt: event.occurredAt,
+    })
+    .run();
+  const persistedResult =
+    "leaseToken" in result
+      ? (({ leaseToken: _leaseToken, ...withoutToken }) => withoutToken)(result)
+      : result;
+  db.insert(idempotencyRecords)
+    .values({
+      key: input.idempotencyKey,
+      command,
+      inputHash: hash,
+      resultJson: JSON.stringify(persistedResult),
+      createdAt: event.occurredAt,
+    })
+    .run();
 }
 
 function recordMutation(
@@ -630,16 +832,7 @@ function attemptSummariesForTask(db: DatabaseSession, taskId: string) {
     .where(eq(attempts.taskId, taskId))
     .orderBy(asc(attempts.createdAt))
     .all()
-    .map((row) => ({
-      id: row.id,
-      taskId: row.taskId,
-      agentRunId: row.agentRunId,
-      status: row.status,
-      summary: row.summary,
-      verification: JSON.parse(row.verificationJson),
-      createdAt: row.createdAt,
-      completedAt: row.completedAt,
-    }));
+    .map(attemptSummaryFromRow);
 }
 
 function taskContextFromInput(db: DatabaseSession, input: TaskContextQuery): TaskContextPackage {
@@ -695,9 +888,11 @@ function commandError(error: unknown): TaskCommandError {
   }
   if (
     error instanceof TaskAlreadyArchivedError ||
+    error instanceof TaskClaimUnavailableError ||
     error instanceof TaskDiscoveryCursorStaleError ||
     error instanceof TaskIdempotencyConflictError ||
     error instanceof TaskLifecycleError ||
+    error instanceof TaskLeaseError ||
     error instanceof TaskNestingError ||
     error instanceof TaskNotFoundError ||
     error instanceof TaskPathError ||
@@ -711,8 +906,313 @@ function commandError(error: unknown): TaskCommandError {
   return persistenceError(error);
 }
 
+function assertActiveClaimant(db: DatabaseSession, claimant: TaskClaimant) {
+  const run = db.select().from(agentRuns).where(eq(agentRuns.id, claimant.runId)).limit(1).get();
+  const profile = run
+    ? db.select().from(agentProfiles).where(eq(agentProfiles.id, run.profileId)).limit(1).get()
+    : null;
+  if (!run || run.status !== "active" || !profile || profile.id !== claimant.profileId) {
+    throw new TaskLeaseError({
+      reason: "inactive_run",
+      message: "The registered agent run is no longer active.",
+    });
+  }
+}
+
+function activeLeaseForToken(db: DatabaseSession, token: string, now: string) {
+  const row = db
+    .select()
+    .from(leases)
+    .where(eq(leases.tokenHash, leaseTokenHash(token)))
+    .limit(1)
+    .get();
+  if (!row) {
+    throw new TaskLeaseError({
+      reason: "not_found",
+      message: "That lease token is not recognized.",
+    });
+  }
+  if (row.status !== "active") {
+    throw new TaskLeaseError({
+      taskId: row.taskId,
+      leaseId: row.id,
+      reason: row.status === "expired" ? "expired" : "inactive",
+      message:
+        row.status === "expired"
+          ? "That lease has expired."
+          : `That lease was ${row.status} and is no longer valid.`,
+    });
+  }
+  if (row.expiresAt <= now) {
+    throw new TaskLeaseError({
+      taskId: row.taskId,
+      leaseId: row.id,
+      reason: "expired",
+      message: "That lease has expired.",
+    });
+  }
+  return row;
+}
+
+function assertLeaseOwner(db: DatabaseSession, row: LeaseRow, claimant: TaskClaimant) {
+  assertActiveClaimant(db, claimant);
+  if (row.agentRunId !== claimant.runId) {
+    throw new TaskLeaseError({
+      taskId: row.taskId,
+      leaseId: row.id,
+      reason: "owner_mismatch",
+      message: "That lease belongs to a different agent run.",
+    });
+  }
+}
+
+function closeLeaseAttempt(
+  db: DatabaseSession,
+  row: LeaseRow,
+  status: "released" | "expired" | "cancelled" | "reassigned",
+  reason: string,
+  now: string,
+) {
+  const attempt = db
+    .select({ summary: attempts.summary })
+    .from(attempts)
+    .where(eq(attempts.id, row.attemptId))
+    .limit(1)
+    .get();
+  db.update(leases)
+    .set({ status, invalidatedAt: now, invalidationReason: reason })
+    .where(and(eq(leases.id, row.id), eq(leases.status, "active")))
+    .run();
+  db.update(attempts)
+    .set({
+      status: "abandoned",
+      summary: attempt?.summary.trim() ? attempt.summary : reason,
+      completedAt: now,
+    })
+    .where(and(eq(attempts.id, row.attemptId), eq(attempts.status, "active")))
+    .run();
+}
+
+function invalidateLeaseAsSystem(
+  db: DatabaseSession,
+  lease: LeaseRow,
+  status: "expired" | "cancelled",
+  reason: string,
+  now: string,
+) {
+  const task = currentTask(db, lease.taskId);
+  closeLeaseAttempt(db, lease, status, reason, now);
+  const returnsToReady = task.lifecycle === "in_progress" && !task.archivedAt;
+  if (returnsToReady) {
+    db.update(tasks)
+      .set({ lifecycle: "ready", version: task.version + 1, updatedAt: now })
+      .where(and(eq(tasks.id, task.id), eq(tasks.version, task.version)))
+      .run();
+  }
+  db.insert(events)
+    .values({
+      projectId: task.projectId,
+      kind: status === "expired" ? "task.lease.expired" : "task.lease.cancelled",
+      actorType: "system",
+      actorId: "helm",
+      entityType: "task",
+      entityId: task.id,
+      payloadJson: JSON.stringify({
+        leaseId: lease.id,
+        attemptId: lease.attemptId,
+        agentRunId: lease.agentRunId,
+        previousVersion: task.version,
+        version: returnsToReady ? task.version + 1 : task.version,
+        reason,
+      }),
+      occurredAt: now,
+    })
+    .run();
+}
+
+function reconcileLeaseRows(db: DatabaseSession, context: TaskEvaluationContext) {
+  const activeLeases = db.select().from(leases).where(eq(leases.status, "active")).all();
+  const reconciledLeaseIds: string[] = [];
+  for (const lease of activeLeases) {
+    const run = db
+      .select()
+      .from(agentRuns)
+      .where(eq(agentRuns.id, lease.agentRunId))
+      .limit(1)
+      .get();
+    const expired = lease.expiresAt <= context.now;
+    if (!expired && run?.status === "active") continue;
+    const status = expired ? "expired" : "cancelled";
+    const reason = expired ? "Lease expired." : "Agent run closed.";
+    invalidateLeaseAsSystem(db, lease, status, reason, context.now);
+    reconciledLeaseIds.push(lease.id);
+  }
+  return reconciledLeaseIds;
+}
+
+function cancelLeaseRowsForRun(
+  db: DatabaseSession,
+  agentRunId: string,
+  context: TaskEvaluationContext,
+) {
+  const run = db
+    .select({ status: agentRuns.status })
+    .from(agentRuns)
+    .where(eq(agentRuns.id, agentRunId))
+    .limit(1)
+    .get();
+  if (run?.status !== "closed") return [];
+
+  const activeLeases = db
+    .select()
+    .from(leases)
+    .where(and(eq(leases.agentRunId, agentRunId), eq(leases.status, "active")))
+    .all();
+  for (const lease of activeLeases) {
+    const expired = lease.expiresAt <= context.now;
+    invalidateLeaseAsSystem(
+      db,
+      lease,
+      expired ? "expired" : "cancelled",
+      expired ? "Lease expired." : "Agent session closed.",
+      context.now,
+    );
+  }
+  return activeLeases.map((lease) => lease.id);
+}
+
+function reconcileLeasesImmediately(db: DrizzleDatabase, context: TaskEvaluationContext) {
+  return db.transaction((tx) => reconcileLeaseRows(tx, context), {
+    behavior: "immediate",
+  });
+}
+
+function createClaimGrant(
+  db: DatabaseSession,
+  row: TaskRow,
+  input: ClaimTaskInput | ClaimNextTaskInput,
+  claimant: TaskClaimant,
+  context: TaskEvaluationContext,
+  command: "task.claim" | "task.claim_next",
+  hash: string,
+) {
+  assertActiveClaimant(db, claimant);
+  const evaluated = taskFromRow(db, row, context);
+  if (!evaluated.eligibility?.claimable) {
+    throw new TaskClaimUnavailableError({
+      taskId: row.id,
+      eligibilityStatus: evaluated.eligibility?.status,
+      reasons: evaluated.eligibility?.reasons ?? ["Task is not claimable."],
+      message: `Task #${row.sequence} is not claimable.`,
+    });
+  }
+
+  const now = context.now;
+  const attempt = {
+    id: randomUUID(),
+    taskId: row.id,
+    agentRunId: claimant.runId,
+    status: "active" as const,
+    summary: "",
+    verificationJson: "[]",
+    createdAt: now,
+    completedAt: null,
+  };
+  const token = randomBytes(32).toString("base64url");
+  const lease = {
+    id: randomUUID(),
+    taskId: row.id,
+    attemptId: attempt.id,
+    agentRunId: claimant.runId,
+    tokenHash: leaseTokenHash(token),
+    status: "active" as const,
+    acquiredAt: now,
+    expiresAt: leaseExpiration(now, input.leaseDurationSeconds),
+    invalidatedAt: null,
+    invalidationReason: null,
+  };
+  db.insert(attempts).values(attempt).run();
+  db.insert(leases).values(lease).run();
+  db.update(tasks)
+    .set({ lifecycle: "in_progress", version: row.version + 1, updatedAt: now })
+    .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
+    .run();
+  const task = taskFromRow(db, currentTask(db, row.id), context);
+  const grant = taskLeaseGrantSchema.parse({
+    task,
+    attempt: attemptSummaryFromRow(attempt),
+    claim: claimFromLeaseRow(db, lease),
+    leaseToken: token,
+  });
+  recordLeaseMutation(
+    db,
+    input,
+    command,
+    hash,
+    grant,
+    { type: "agent", id: claimant.runId },
+    {
+      kind: "task.claimed",
+      occurredAt: now,
+      payload: {
+        leaseId: lease.id,
+        attemptId: attempt.id,
+        agentRunId: claimant.runId,
+        previousVersion: row.version,
+        version: task.version,
+        expiresAt: lease.expiresAt,
+        selection: command === "task.claim_next" ? "next" : "chosen",
+      },
+    },
+  );
+  return grant;
+}
+
+function invalidateLease(
+  db: DatabaseSession,
+  lease: LeaseRow,
+  status: "released" | "cancelled" | "reassigned",
+  reason: string,
+  context: TaskEvaluationContext,
+) {
+  const row = currentTask(db, lease.taskId);
+  if (row.lifecycle !== "in_progress") {
+    throw new TaskLeaseError({
+      taskId: row.id,
+      leaseId: lease.id,
+      reason: "inactive",
+      message: "The claimed task is no longer in progress.",
+    });
+  }
+  closeLeaseAttempt(db, lease, status, reason, context.now);
+  db.update(tasks)
+    .set({ lifecycle: "ready", version: row.version + 1, updatedAt: context.now })
+    .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
+    .run();
+  return taskLeaseMutationResultSchema.parse({
+    task: taskFromRow(db, currentTask(db, row.id), context),
+    claim: claimFromLeaseRow(db, {
+      ...lease,
+      status,
+      invalidatedAt: context.now,
+      invalidationReason: reason,
+    }),
+  });
+}
+
 export function createSqliteTaskStore(database: Database.Database): TaskStore {
   const db = drizzle(database, { schema });
+  const leaseTokenCache = leaseTokenCacheFor(database);
+
+  function evictLeaseTokens(leaseIds: readonly string[]) {
+    for (const leaseId of leaseIds) leaseTokenCache.delete(leaseId);
+  }
+
+  function reconcileAndEvict(context: TaskEvaluationContext) {
+    const leaseIds = reconcileLeasesImmediately(db, context);
+    evictLeaseTokens(leaseIds);
+    return leaseIds.length;
+  }
 
   return {
     list(input: TaskListQuery) {
@@ -766,6 +1266,376 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
         catch: commandError,
       });
     },
+    claimTask(input, claimant, context) {
+      return Effect.try({
+        try: () => {
+          const command = "task.claim";
+          assertActiveClaimant(db, claimant);
+          const hash = inputHash(command, {
+            ...withoutIdempotencyKey(input),
+            claimantRunId: claimant.runId,
+          });
+          const cached = findIdempotentLeaseResult(
+            db,
+            command,
+            input.idempotencyKey,
+            hash,
+            "grant",
+            { tokenCache: leaseTokenCache, now: context.now },
+          );
+          if (cached) return taskLeaseGrantSchema.parse(cached);
+          reconcileAndEvict(context);
+          const grant = db.transaction(
+            (tx) => {
+              const existing = findIdempotentLeaseResult(
+                tx,
+                command,
+                input.idempotencyKey,
+                hash,
+                "grant",
+                { tokenCache: leaseTokenCache, now: context.now },
+              );
+              if (existing) return taskLeaseGrantSchema.parse(existing);
+              const row = currentTask(tx, input.taskId);
+              if (row.projectId !== input.projectId) {
+                throw new TaskNotFoundError({
+                  taskId: input.taskId,
+                  message: "That task does not belong to the requested project.",
+                });
+              }
+              assertExpectedVersion(row, input.expectedVersion);
+              return createClaimGrant(tx, row, input, claimant, context, command, hash);
+            },
+            { behavior: "immediate" },
+          );
+          leaseTokenCache.set(grant.claim.id, grant.leaseToken);
+          return grant;
+        },
+        catch: commandError,
+      });
+    },
+    claimNext(input, claimant, context) {
+      return Effect.try({
+        try: () => {
+          const command = "task.claim_next";
+          assertActiveClaimant(db, claimant);
+          const hash = inputHash(command, {
+            ...withoutIdempotencyKey(input),
+            claimantRunId: claimant.runId,
+          });
+          const cached = findIdempotentLeaseResult(
+            db,
+            command,
+            input.idempotencyKey,
+            hash,
+            "grant",
+            { tokenCache: leaseTokenCache, now: context.now },
+          );
+          if (cached) return taskLeaseGrantSchema.parse(cached);
+          reconcileAndEvict(context);
+          const grant = db.transaction(
+            (tx) => {
+              const existing = findIdempotentLeaseResult(
+                tx,
+                command,
+                input.idempotencyKey,
+                hash,
+                "grant",
+                { tokenCache: leaseTokenCache, now: context.now },
+              );
+              if (existing) return taskLeaseGrantSchema.parse(existing);
+              assertActiveClaimant(tx, claimant);
+              const next = discoverableTasks(tx, {
+                ...input,
+                limit: 1,
+                cursor: null,
+                fields: [],
+                ...context,
+              })[0];
+              if (!next) {
+                throw new TaskClaimUnavailableError({
+                  reasons: ["No task is currently eligible for this agent."],
+                  message: "No claimable task is available.",
+                });
+              }
+              return createClaimGrant(
+                tx,
+                currentTask(tx, next.id),
+                input,
+                claimant,
+                context,
+                command,
+                hash,
+              );
+            },
+            { behavior: "immediate" },
+          );
+          leaseTokenCache.set(grant.claim.id, grant.leaseToken);
+          return grant;
+        },
+        catch: commandError,
+      });
+    },
+    renewLease(input, claimant, context) {
+      return Effect.try({
+        try: () => {
+          const command = "task.lease.renew";
+          assertActiveClaimant(db, claimant);
+          const hash = inputHash(command, {
+            ...withoutIdempotencyKey(input),
+            claimantRunId: claimant.runId,
+          });
+          const cached = findIdempotentLeaseResult(
+            db,
+            command,
+            input.idempotencyKey,
+            hash,
+            "grant",
+            {
+              providedToken: input.leaseToken,
+              tokenCache: leaseTokenCache,
+              now: context.now,
+            },
+          );
+          if (cached) return taskLeaseGrantSchema.parse(cached);
+          reconcileAndEvict(context);
+          return db.transaction(
+            (tx) => {
+              const existing = findIdempotentLeaseResult(
+                tx,
+                command,
+                input.idempotencyKey,
+                hash,
+                "grant",
+                {
+                  providedToken: input.leaseToken,
+                  tokenCache: leaseTokenCache,
+                  now: context.now,
+                },
+              );
+              if (existing) return taskLeaseGrantSchema.parse(existing);
+              const lease = activeLeaseForToken(tx, input.leaseToken, context.now);
+              assertLeaseOwner(tx, lease, claimant);
+              const row = currentTask(tx, lease.taskId);
+              assertExpectedVersion(row, input.expectedVersion);
+              if (row.lifecycle !== "in_progress") {
+                throw new TaskLeaseError({
+                  taskId: row.id,
+                  leaseId: lease.id,
+                  reason: "inactive",
+                  message: "Only an in-progress claim can be renewed.",
+                });
+              }
+              const expiresAt = leaseExpiration(context.now, input.leaseDurationSeconds);
+              tx.update(leases)
+                .set({ expiresAt })
+                .where(and(eq(leases.id, lease.id), eq(leases.status, "active")))
+                .run();
+              tx.update(tasks)
+                .set({ version: row.version + 1, updatedAt: context.now })
+                .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
+                .run();
+              const updatedLease = { ...lease, expiresAt };
+              const attempt = tx
+                .select()
+                .from(attempts)
+                .where(eq(attempts.id, lease.attemptId))
+                .limit(1)
+                .get();
+              if (!attempt) {
+                throw new TaskLeaseError({
+                  taskId: row.id,
+                  leaseId: lease.id,
+                  reason: "inactive",
+                  message: "The lease attempt no longer exists.",
+                });
+              }
+              const grant = taskLeaseGrantSchema.parse({
+                task: taskFromRow(tx, currentTask(tx, row.id), context),
+                attempt: attemptSummaryFromRow(attempt),
+                claim: claimFromLeaseRow(tx, updatedLease),
+                leaseToken: input.leaseToken,
+              });
+              recordLeaseMutation(
+                tx,
+                input,
+                command,
+                hash,
+                grant,
+                { type: "agent", id: claimant.runId },
+                {
+                  kind: "task.lease.renewed",
+                  occurredAt: context.now,
+                  payload: {
+                    leaseId: lease.id,
+                    attemptId: lease.attemptId,
+                    previousVersion: row.version,
+                    version: grant.task.version,
+                    expiresAt,
+                  },
+                },
+              );
+              return grant;
+            },
+            { behavior: "immediate" },
+          );
+        },
+        catch: commandError,
+      });
+    },
+    releaseLease(input, claimant, context) {
+      return Effect.try({
+        try: () => {
+          const command = "task.lease.release";
+          assertActiveClaimant(db, claimant);
+          const hash = inputHash(command, {
+            ...withoutIdempotencyKey(input),
+            claimantRunId: claimant.runId,
+          });
+          const cached = findIdempotentLeaseResult(
+            db,
+            command,
+            input.idempotencyKey,
+            hash,
+            "mutation",
+          );
+          if (cached) {
+            const result = taskLeaseMutationResultSchema.parse(cached);
+            leaseTokenCache.delete(result.claim.id);
+            return result;
+          }
+          reconcileAndEvict(context);
+          const mutation = db.transaction(
+            (tx) => {
+              const existing = findIdempotentLeaseResult(
+                tx,
+                command,
+                input.idempotencyKey,
+                hash,
+                "mutation",
+              );
+              if (existing) return taskLeaseMutationResultSchema.parse(existing);
+              const lease = activeLeaseForToken(tx, input.leaseToken, context.now);
+              assertLeaseOwner(tx, lease, claimant);
+              const row = currentTask(tx, lease.taskId);
+              assertExpectedVersion(row, input.expectedVersion);
+              const result = invalidateLease(tx, lease, "released", input.reason, context);
+              recordLeaseMutation(
+                tx,
+                input,
+                command,
+                hash,
+                result,
+                { type: "agent", id: claimant.runId },
+                {
+                  kind: "task.lease.released",
+                  occurredAt: context.now,
+                  payload: {
+                    leaseId: lease.id,
+                    attemptId: lease.attemptId,
+                    previousVersion: row.version,
+                    version: result.task.version,
+                    reason: input.reason,
+                  },
+                },
+              );
+              return result;
+            },
+            { behavior: "immediate" },
+          );
+          leaseTokenCache.delete(mutation.claim.id);
+          return mutation;
+        },
+        catch: commandError,
+      });
+    },
+    invalidateClaim(input, actor, context) {
+      return Effect.try({
+        try: () => {
+          const command = "task.claim.invalidate";
+          const hash = inputHash(command, withoutIdempotencyKey(input));
+          const cached = findIdempotentLeaseResult(
+            db,
+            command,
+            input.idempotencyKey,
+            hash,
+            "mutation",
+          );
+          if (cached) {
+            const result = taskLeaseMutationResultSchema.parse(cached);
+            leaseTokenCache.delete(result.claim.id);
+            return result;
+          }
+          reconcileAndEvict(context);
+          const mutation = db.transaction(
+            (tx) => {
+              const existing = findIdempotentLeaseResult(
+                tx,
+                command,
+                input.idempotencyKey,
+                hash,
+                "mutation",
+              );
+              if (existing) return taskLeaseMutationResultSchema.parse(existing);
+              const row = currentTask(tx, input.taskId);
+              assertExpectedVersion(row, input.expectedVersion);
+              const lease = tx
+                .select()
+                .from(leases)
+                .where(and(eq(leases.taskId, row.id), eq(leases.status, "active")))
+                .limit(1)
+                .get();
+              if (!lease) {
+                throw new TaskLeaseError({
+                  taskId: row.id,
+                  reason: "required",
+                  message: "That task has no active claim to invalidate.",
+                });
+              }
+              const result = invalidateLease(tx, lease, input.disposition, input.reason, context);
+              recordLeaseMutation(tx, input, command, hash, result, actor, {
+                kind:
+                  input.disposition === "reassigned"
+                    ? "task.lease.reassigned"
+                    : "task.lease.cancelled",
+                occurredAt: context.now,
+                payload: {
+                  leaseId: lease.id,
+                  attemptId: lease.attemptId,
+                  agentRunId: lease.agentRunId,
+                  previousVersion: row.version,
+                  version: result.task.version,
+                  reason: input.reason,
+                },
+              });
+              return result;
+            },
+            { behavior: "immediate" },
+          );
+          leaseTokenCache.delete(mutation.claim.id);
+          return mutation;
+        },
+        catch: commandError,
+      });
+    },
+    cancelLeasesForRun(agentRunId, context) {
+      return Effect.try({
+        try: () => {
+          const leaseIds = db.transaction((tx) => cancelLeaseRowsForRun(tx, agentRunId, context), {
+            behavior: "immediate",
+          });
+          evictLeaseTokens(leaseIds);
+          return leaseIds.length;
+        },
+        catch: commandError,
+      });
+    },
+    reconcileLeases(context) {
+      return Effect.try({
+        try: () => reconcileAndEvict(context),
+        catch: commandError,
+      });
+    },
     create(input: CreateTaskInput, actor: Actor, context: TaskEvaluationContext) {
       return Effect.try({
         try: () =>
@@ -804,6 +1674,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
               tags: [],
               requiredCapabilities: [],
               referencedPaths: [],
+              claim: null,
               upstreamRelations: [],
               downstreamRelations: [],
               description: input.description,
@@ -1008,6 +1879,13 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
             if (existing) return existing;
             const row = currentTask(tx, input.taskId);
             assertExpectedVersion(row, input.expectedVersion);
+            if (actor.type === "agent") {
+              throw new TaskLeaseError({
+                taskId: row.id,
+                reason: "required",
+                message: "Agent completion requires an active lease and structured attempt report.",
+              });
+            }
             if (row.archivedAt) {
               throw new TaskAlreadyArchivedError({
                 taskId: row.id,
@@ -1092,6 +1970,14 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
             const target = currentTask(tx, input.targetTaskId);
             assertExpectedVersion(source, input.expectedSourceVersion);
             assertExpectedVersion(target, input.expectedTargetVersion);
+            const activeTask = [source, target].find((task) => task.lifecycle === "in_progress");
+            if (activeTask) {
+              throw new TaskLifecycleError({
+                taskId: activeTask.id,
+                lifecycle: activeTask.lifecycle,
+                message: "Cancel the active claim before changing task relations.",
+              });
+            }
             if (source.projectId !== input.projectId || target.projectId !== input.projectId) {
               throw new TaskRelationError({
                 sourceTaskId: input.sourceTaskId,
@@ -1184,8 +2070,8 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
     },
     archive(input: ArchiveTaskInput, actor: Actor, context: TaskEvaluationContext) {
       return Effect.try({
-        try: () =>
-          db.transaction((tx) => {
+        try: () => {
+          const archivedTask = db.transaction((tx) => {
             const command = "task.archive";
             const hash = inputHash(command, withoutIdempotencyKey(input));
             const existing = findIdempotentResult(tx, command, input.idempotencyKey, hash, context);
@@ -1200,6 +2086,21 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
             }
 
             const now = new Date().toISOString();
+            const activeLease = tx
+              .select()
+              .from(leases)
+              .where(and(eq(leases.taskId, row.id), eq(leases.status, "active")))
+              .limit(1)
+              .get();
+            if (activeLease) {
+              closeLeaseAttempt(
+                tx,
+                activeLease,
+                "cancelled",
+                `Task archived: ${input.reason}`,
+                now,
+              );
+            }
             tx.update(tasks)
               .set({ archivedAt: now, version: row.version + 1, updatedAt: now })
               .where(and(eq(tasks.id, row.id), eq(tasks.version, row.version)))
@@ -1211,10 +2112,25 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
                 previousVersion: row.version,
                 version: task.version,
                 reason: input.reason,
+                ...(activeLease
+                  ? {
+                      invalidatedLeaseId: activeLease.id,
+                      abandonedAttemptId: activeLease.attemptId,
+                    }
+                  : {}),
               },
             });
             return task;
-          }),
+          });
+          const leaseIds = db
+            .select({ id: leases.id })
+            .from(leases)
+            .where(eq(leases.taskId, archivedTask.id))
+            .all()
+            .map((lease) => lease.id);
+          evictLeaseTokens(leaseIds);
+          return archivedTask;
+        },
         catch: commandError,
       });
     },

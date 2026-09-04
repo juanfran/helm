@@ -418,7 +418,7 @@ export function createSqliteAgentStore(database: Database.Database): AgentStore 
         try: () =>
           db.transaction((tx) => {
             const run = findRunBySession(tx, sessionId);
-            if (!run || run.status === "closed") return;
+            if (!run || run.status === "closed") return null;
             const now = new Date().toISOString();
             tx.update(agentRuns)
               .set({ status: "closed", endedAt: now, lastSeenAt: now })
@@ -430,6 +430,7 @@ export function createSqliteAgentStore(database: Database.Database): AgentStore 
               "agent.run.closed",
               now,
             );
+            return run.id;
           }),
         catch: persistenceError,
       });

@@ -78,6 +78,26 @@ export class TaskDiscoveryCursorStaleError extends Data.TaggedError(
   readonly message: string;
 }> {}
 
+export class TaskClaimUnavailableError extends Data.TaggedError("TaskClaimUnavailableError")<{
+  readonly taskId?: string;
+  readonly eligibilityStatus?: string;
+  readonly reasons: readonly string[];
+  readonly message: string;
+}> {}
+
+export class TaskLeaseError extends Data.TaggedError("TaskLeaseError")<{
+  readonly taskId?: string;
+  readonly leaseId?: string;
+  readonly reason:
+    | "not_found"
+    | "required"
+    | "expired"
+    | "inactive"
+    | "owner_mismatch"
+    | "inactive_run";
+  readonly message: string;
+}> {}
+
 export class TaskPersistenceError extends Data.TaggedError("TaskPersistenceError")<{
   readonly message: string;
 }> {}
@@ -96,6 +116,8 @@ export type TaskCommandError =
   | TaskTagDefinitionConflictError
   | TaskPathError
   | TaskDiscoveryCursorStaleError
+  | TaskClaimUnavailableError
+  | TaskLeaseError
   | TaskPersistenceError;
 
 export type TaskErrorDto = {
@@ -119,6 +141,10 @@ export type TaskErrorDto = {
   sourceTaskId?: string;
   targetTaskId?: string;
   relationPath?: readonly string[];
+  eligibilityStatus?: string;
+  reasons?: readonly string[];
+  leaseId?: string;
+  leaseReason?: TaskLeaseError["reason"];
 };
 
 export function toTaskErrorDto(error: TaskCommandError): TaskErrorDto {
@@ -183,6 +209,22 @@ export function toTaskErrorDto(error: TaskCommandError): TaskErrorDto {
         cursorRevision: error.cursorRevision,
         currentRevision: error.currentRevision,
         staleBecause: error.staleBecause,
+      };
+    case "TaskClaimUnavailableError":
+      return {
+        type: error["_tag"],
+        message: error.message,
+        taskId: error.taskId,
+        eligibilityStatus: error.eligibilityStatus,
+        reasons: error.reasons,
+      };
+    case "TaskLeaseError":
+      return {
+        type: error["_tag"],
+        message: error.message,
+        taskId: error.taskId,
+        leaseId: error.leaseId,
+        leaseReason: error.reason,
       };
     default:
       return { type: error["_tag"], message: error.message };

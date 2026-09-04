@@ -15,6 +15,8 @@ import {
   emptyRichTextDocument,
   taskContextPackageSchema,
   taskDiscoveryPageSchema,
+  taskLeaseGrantSchema,
+  taskLeaseMutationResultSchema,
   taskSchema,
 } from "../domain/tasks";
 import { createSqliteAgentStore } from "../infrastructure/sqlite-agent-store.server";
@@ -39,10 +41,19 @@ const successfulContextSchema = z.object({
   ok: z.literal(true),
   context: taskContextPackageSchema,
 });
+const successfulLeaseGrantSchema = z.object({
+  ok: z.literal(true),
+  grant: taskLeaseGrantSchema,
+});
+const successfulLeaseMutationSchema = z.object({
+  ok: z.literal(true),
+  result: taskLeaseMutationResultSchema,
+});
 
 let temporaryRoot: string;
 let projectStore: SqliteProjectStore;
 let projectId: string;
+let now: string;
 let client: Client;
 let transport: StreamableHTTPClientTransport;
 let handleMcpRequest: ReturnType<typeof createMcpRequestHandler>;
@@ -79,9 +90,13 @@ beforeEach(async () => {
   );
   projectId = project.id;
 
+  now = "2026-09-03T12:00:00.000Z";
   taskServices = {
     store: createSqliteTaskStore(projectStore.database),
-    clock: { today: () => "2026-09-03" },
+    clock: {
+      today: () => "2026-09-03",
+      now: () => now,
+    },
   };
   agentServices = { store: createSqliteAgentStore(projectStore.database) };
   handleMcpRequest = createMcpRequestHandler(projectServices, taskServices, agentServices);
@@ -115,7 +130,263 @@ function readyTaskArguments(title: string, idempotencyKey: string, capabilities:
   };
 }
 
-describe("MCP agent run and work discovery contract", () => {
+function persistedLeaseState(leaseId: string) {
+  return projectStore.database
+    .prepare<
+      [string],
+      {
+        attemptStatus: string;
+        attemptSummary: string;
+        invalidationReason: string | null;
+        leaseStatus: string;
+        runStatus: string;
+        taskLifecycle: string;
+        taskVersion: number;
+      }
+    >(
+      `select
+        a.status as attemptStatus,
+        a.summary as attemptSummary,
+        l.invalidation_reason as invalidationReason,
+        l.status as leaseStatus,
+        ar.status as runStatus,
+        t.lifecycle as taskLifecycle,
+        t.version as taskVersion
+      from leases l
+      join attempts a on a.id = l.attempt_id
+      join agent_runs ar on ar.id = l.agent_run_id
+      join tasks t on t.id = l.task_id
+      where l.id = ?`,
+    )
+    .get(leaseId);
+}
+
+function persistedLeaseEvents(taskId: string) {
+  return projectStore.database
+    .prepare<[string], { actorId: string; actorType: string; kind: string; payload: string }>(
+      `select
+        actor_id as actorId,
+        actor_type as actorType,
+        kind,
+        payload_json as payload
+      from events
+      where entity_id = ? and kind in ('task.lease.cancelled', 'task.lease.expired')
+      order by cursor`,
+    )
+    .all(taskId);
+}
+
+describe("MCP agent run, work discovery, and lease contract", () => {
+  it("claims chosen and next work, renews and releases leases, and rejects stale ownership", async () => {
+    const tools = await client.listTools();
+    expect(tools.tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(["claim_task", "claim_next", "renew_lease", "release_lease"]),
+    );
+    expect(tools.tools.find((tool) => tool.name === "complete_task")?.description).toMatch(
+      /currently unavailable.*lease-aware completion.*deferred/i,
+    );
+
+    const unregistered = await client.callTool({
+      name: "claim_next",
+      arguments: { projectId, idempotencyKey: "unregistered-claim" },
+    });
+    expect(unregistered).toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        error: { type: "AgentRunRequiredError" },
+      },
+    });
+
+    await client.callTool({
+      name: "register_agent_run",
+      arguments: {
+        profileKey: "lease-agent",
+        displayName: "Lease Agent",
+        capabilities: ["typescript"],
+        idempotencyKey: "register-lease-agent",
+      },
+    });
+    const firstResult = await client.callTool({
+      name: "create_task",
+      arguments: readyTaskArguments("First ranked lease task", "first-lease-task", ["typescript"]),
+    });
+    const chosenResult = await client.callTool({
+      name: "create_task",
+      arguments: readyTaskArguments("Chosen lease task", "chosen-lease-task", ["typescript"]),
+    });
+    expect(firstResult.structuredContent).toMatchObject({ ok: true });
+    expect(chosenResult.structuredContent).toMatchObject({ ok: true });
+    const firstTask = successfulTaskSchema.parse(firstResult.structuredContent).task;
+    const chosenTask = successfulTaskSchema.parse(chosenResult.structuredContent).task;
+    const chosenArguments = {
+      projectId,
+      taskId: chosenTask.id,
+      expectedVersion: chosenTask.version,
+      leaseDurationSeconds: 300,
+      idempotencyKey: "claim-chosen-task",
+    };
+
+    const chosenClaimResult = await client.callTool({
+      name: "claim_task",
+      arguments: chosenArguments,
+    });
+    const chosenClaim = successfulLeaseGrantSchema.parse(chosenClaimResult.structuredContent).grant;
+    expect(chosenClaim).toMatchObject({
+      task: { id: chosenTask.id, lifecycle: "in_progress" },
+      attempt: { taskId: chosenTask.id, status: "active" },
+      claim: {
+        taskId: chosenTask.id,
+        attemptId: chosenClaim.attempt.id,
+        status: "active",
+        agentDisplayName: "Lease Agent",
+      },
+    });
+    expect(chosenClaim.leaseToken).toEqual(expect.any(String));
+
+    const chosenRetry = await client.callTool({
+      name: "claim_task",
+      arguments: chosenArguments,
+    });
+    expect(chosenRetry.structuredContent).toEqual(chosenClaimResult.structuredContent);
+    const unavailableClaim = await client.callTool({
+      name: "claim_task",
+      arguments: {
+        ...chosenArguments,
+        expectedVersion: chosenClaim.task.version,
+        idempotencyKey: "claim-chosen-task-again",
+      },
+    });
+    expect(unavailableClaim).toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        error: {
+          type: "TaskClaimUnavailableError",
+          taskId: chosenTask.id,
+          eligibilityStatus: "claimed",
+          reasons: expect.any(Array),
+        },
+      },
+    });
+
+    const nextClaimResult = await client.callTool({
+      name: "claim_next",
+      arguments: {
+        projectId,
+        leaseDurationSeconds: 300,
+        idempotencyKey: "claim-next-task",
+      },
+    });
+    const nextClaim = successfulLeaseGrantSchema.parse(nextClaimResult.structuredContent).grant;
+    expect(nextClaim.task).toMatchObject({ id: firstTask.id, lifecycle: "in_progress" });
+
+    const renewedResult = await client.callTool({
+      name: "renew_lease",
+      arguments: {
+        leaseToken: chosenClaim.leaseToken,
+        expectedVersion: chosenClaim.task.version,
+        leaseDurationSeconds: 600,
+        idempotencyKey: "renew-chosen-lease",
+      },
+    });
+    const renewed = successfulLeaseGrantSchema.parse(renewedResult.structuredContent).grant;
+    expect(renewed).toMatchObject({
+      task: { id: chosenTask.id, lifecycle: "in_progress" },
+      claim: { id: chosenClaim.claim.id, status: "active" },
+      leaseToken: chosenClaim.leaseToken,
+    });
+
+    const foreignTransport = new StreamableHTTPClientTransport(
+      new URL("http://helm.local/api/mcp"),
+      { fetch: (url, init) => handleMcpRequest(new Request(url, init)) },
+    );
+    const foreignClient = new Client({ name: "foreign-client", version: "1.0.0" });
+    await foreignClient.connect(foreignTransport);
+    try {
+      await foreignClient.callTool({
+        name: "register_agent_run",
+        arguments: {
+          profileKey: "foreign-agent",
+          displayName: "Foreign Agent",
+          capabilities: ["typescript"],
+          idempotencyKey: "register-foreign-agent",
+        },
+      });
+      const foreignRenewal = await foreignClient.callTool({
+        name: "renew_lease",
+        arguments: {
+          leaseToken: nextClaim.leaseToken,
+          expectedVersion: nextClaim.task.version,
+          idempotencyKey: "foreign-renewal",
+        },
+      });
+      expect(foreignRenewal).toMatchObject({
+        isError: true,
+        structuredContent: {
+          ok: false,
+          error: { type: "TaskLeaseError", leaseReason: "owner_mismatch" },
+        },
+      });
+    } finally {
+      await foreignTransport.terminateSession();
+      await foreignClient.close();
+    }
+
+    const releaseArguments = {
+      leaseToken: chosenClaim.leaseToken,
+      expectedVersion: renewed.task.version,
+      reason: "Return the task to the shared queue.",
+      idempotencyKey: "release-chosen-lease",
+    };
+    const releaseResult = await client.callTool({
+      name: "release_lease",
+      arguments: releaseArguments,
+    });
+    const released = successfulLeaseMutationSchema.parse(releaseResult.structuredContent).result;
+    expect(released).toMatchObject({
+      task: { id: chosenTask.id, lifecycle: "ready", claim: null },
+      claim: { id: chosenClaim.claim.id, status: "released" },
+    });
+    const releaseRetry = await client.callTool({
+      name: "release_lease",
+      arguments: releaseArguments,
+    });
+    expect(releaseRetry.structuredContent).toEqual(releaseResult.structuredContent);
+
+    const staleRenewal = await client.callTool({
+      name: "renew_lease",
+      arguments: {
+        leaseToken: chosenClaim.leaseToken,
+        expectedVersion: released.task.version,
+        idempotencyKey: "renew-released-lease",
+      },
+    });
+    expect(staleRenewal).toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        error: { type: "TaskLeaseError", leaseReason: "inactive" },
+      },
+    });
+
+    const lateCompletion = await client.callTool({
+      name: "complete_task",
+      arguments: {
+        taskId: chosenTask.id,
+        expectedVersion: released.task.version,
+        idempotencyKey: "complete-released-lease-task",
+      },
+    });
+    expect(lateCompletion).toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        error: { type: "TaskLeaseError", leaseReason: "required" },
+      },
+    });
+  });
+
   it("serializes registration, paginated discovery, context, typed errors, and attribution", async () => {
     const tools = await client.listTools();
     expect(tools.tools.map((tool) => tool.name)).not.toContain("discover_tasks");
@@ -230,6 +501,8 @@ describe("MCP agent run and work discovery contract", () => {
       name: "create_task",
       arguments: readyTaskArguments("Incompatible task", "incompatible-task", ["sqlite"]),
     });
+    expect(firstResult.structuredContent).toMatchObject({ ok: true });
+    expect(secondResult.structuredContent).toMatchObject({ ok: true });
     const firstTask = successfulTaskSchema.parse(firstResult.structuredContent).task;
     const secondTask = successfulTaskSchema.parse(secondResult.structuredContent).task;
     expect(firstTask.eligibility).toMatchObject({ claimable: true, missingCapabilities: [] });
@@ -402,6 +675,119 @@ describe("MCP agent run and work discovery contract", () => {
     ]);
   });
 
+  it("cancels a live lease and returns its task to ready when the session terminates", async () => {
+    const registrationResult = await client.callTool({
+      name: "register_agent_run",
+      arguments: {
+        profileKey: "session-close-agent",
+        displayName: "Session Close Agent",
+        capabilities: ["typescript"],
+        idempotencyKey: "register-session-close-agent",
+      },
+    });
+    const registration = successfulRegistrationSchema.parse(registrationResult.structuredContent);
+    const taskResult = await client.callTool({
+      name: "create_task",
+      arguments: readyTaskArguments("Session close task", "session-close-task", ["typescript"]),
+    });
+    const task = successfulTaskSchema.parse(taskResult.structuredContent).task;
+    const claimResult = await client.callTool({
+      name: "claim_task",
+      arguments: {
+        projectId,
+        taskId: task.id,
+        expectedVersion: task.version,
+        leaseDurationSeconds: 300,
+        idempotencyKey: "claim-session-close-task",
+      },
+    });
+    const grant = successfulLeaseGrantSchema.parse(claimResult.structuredContent).grant;
+
+    await transport.terminateSession();
+    await client.close();
+
+    expect(persistedLeaseState(grant.claim.id)).toEqual({
+      attemptStatus: "abandoned",
+      attemptSummary: "Agent session closed.",
+      invalidationReason: "Agent session closed.",
+      leaseStatus: "cancelled",
+      runStatus: "closed",
+      taskLifecycle: "ready",
+      taskVersion: grant.task.version + 1,
+    });
+    const events = persistedLeaseEvents(task.id);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      actorId: "helm",
+      actorType: "system",
+      kind: "task.lease.cancelled",
+    });
+    expect(JSON.parse(events[0]?.payload ?? "{}")).toMatchObject({
+      leaseId: grant.claim.id,
+      attemptId: grant.attempt.id,
+      agentRunId: registration.registration.run.id,
+      previousVersion: grant.task.version,
+      version: grant.task.version + 1,
+      reason: "Agent session closed.",
+    });
+  });
+
+  it("expires an elapsed lease instead of cancelling it when its session terminates", async () => {
+    await client.callTool({
+      name: "register_agent_run",
+      arguments: {
+        profileKey: "expired-close-agent",
+        displayName: "Expired Close Agent",
+        capabilities: ["typescript"],
+        idempotencyKey: "register-expired-close-agent",
+      },
+    });
+    const taskResult = await client.callTool({
+      name: "create_task",
+      arguments: readyTaskArguments("Expired session task", "expired-session-task", ["typescript"]),
+    });
+    const task = successfulTaskSchema.parse(taskResult.structuredContent).task;
+    const claimResult = await client.callTool({
+      name: "claim_task",
+      arguments: {
+        projectId,
+        taskId: task.id,
+        expectedVersion: task.version,
+        leaseDurationSeconds: 30,
+        idempotencyKey: "claim-expired-session-task",
+      },
+    });
+    const grant = successfulLeaseGrantSchema.parse(claimResult.structuredContent).grant;
+    now = grant.claim.expiresAt;
+
+    await transport.terminateSession();
+    await client.close();
+
+    expect(persistedLeaseState(grant.claim.id)).toEqual({
+      attemptStatus: "abandoned",
+      attemptSummary: "Lease expired.",
+      invalidationReason: "Lease expired.",
+      leaseStatus: "expired",
+      runStatus: "closed",
+      taskLifecycle: "ready",
+      taskVersion: grant.task.version + 1,
+    });
+    const events = persistedLeaseEvents(task.id);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      actorId: "helm",
+      actorType: "system",
+      kind: "task.lease.expired",
+    });
+    expect(JSON.parse(events[0]?.payload ?? "{}")).toMatchObject({
+      leaseId: grant.claim.id,
+      attemptId: grant.attempt.id,
+      previousVersion: grant.task.version,
+      version: grant.task.version + 1,
+      reason: "Lease expired.",
+    });
+  });
+
   it("reconciles a run left active by a server restart before resuming it", async () => {
     const registrationResult = await client.callTool({
       name: "register_agent_run",
@@ -444,7 +830,7 @@ describe("MCP agent run and work discovery contract", () => {
     });
   });
 
-  it("requires an explicit takeover to recover a run from a stale live session", async () => {
+  it("requires takeover and ignores closure of the displaced session", async () => {
     const registrationResult = await client.callTool({
       name: "register_agent_run",
       arguments: {
@@ -455,6 +841,22 @@ describe("MCP agent run and work discovery contract", () => {
       },
     });
     const registration = successfulRegistrationSchema.parse(registrationResult.structuredContent);
+    const taskResult = await client.callTool({
+      name: "create_task",
+      arguments: readyTaskArguments("Takeover lease task", "takeover-lease-task", ["typescript"]),
+    });
+    const task = successfulTaskSchema.parse(taskResult.structuredContent).task;
+    const claimResult = await client.callTool({
+      name: "claim_task",
+      arguments: {
+        projectId,
+        taskId: task.id,
+        expectedVersion: task.version,
+        leaseDurationSeconds: 300,
+        idempotencyKey: "claim-takeover-lease-task",
+      },
+    });
+    const grant = successfulLeaseGrantSchema.parse(claimResult.structuredContent).grant;
     const replacementTransport = new StreamableHTTPClientTransport(
       new URL("http://helm.local/api/mcp"),
       { fetch: (url, init) => handleMcpRequest(new Request(url, init)) },
@@ -489,6 +891,37 @@ describe("MCP agent run and work discovery contract", () => {
         isError: true,
         structuredContent: { ok: false, error: { type: "AgentRunRequiredError" } },
       });
+
+      await transport.terminateSession();
+      await client.close();
+      const renewalResult = await replacementClient.callTool({
+        name: "renew_lease",
+        arguments: {
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          leaseDurationSeconds: 600,
+          idempotencyKey: "renew-after-takeover",
+        },
+      });
+      const renewed = successfulLeaseGrantSchema.parse(renewalResult.structuredContent).grant;
+
+      expect(renewed).toMatchObject({
+        leaseToken: grant.leaseToken,
+        task: { id: task.id, lifecycle: "in_progress" },
+        claim: { id: grant.claim.id, status: "active" },
+      });
+      expect(persistedLeaseState(grant.claim.id)).toMatchObject({
+        attemptStatus: "active",
+        invalidationReason: null,
+        leaseStatus: "active",
+        runStatus: "active",
+        taskLifecycle: "in_progress",
+      });
+      const activeSessionId = projectStore.database
+        .prepare<[string], string>("select mcp_session_id from agent_runs where id = ?")
+        .pluck()
+        .get(registration.registration.run.id);
+      expect(activeSessionId).toBe(replacementTransport.sessionId);
     } finally {
       await replacementTransport.terminateSession();
       await replacementClient.close();

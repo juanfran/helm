@@ -7,19 +7,33 @@ import { z } from "zod";
 import { toAgentErrorDto, type AgentErrorDto } from "../application/agent-errors";
 import { registerAgentRun, requireAgentRun, type AgentServices } from "../application/agents";
 import { getAppState, listProjects, type ProjectServices } from "../application/projects";
-import { findWork, getTaskContext, type TaskServices } from "../application/tasks";
+import {
+  claimNextTask,
+  claimTask,
+  findWork,
+  getTaskContext,
+  releaseTaskLease,
+  renewTaskLease,
+  type TaskServices,
+} from "../application/tasks";
 import { toTaskErrorDto } from "../application/task-errors";
 import { registeredAgentRunSchema, registerAgentRunInputSchema } from "../domain/agents";
 import { appStateSchema, projectSchema } from "../domain/projects";
 import {
+  claimNextTaskInputSchema,
+  claimTaskInputSchema,
   completeTaskInputSchema,
   createTaskInputSchema,
   createTaskRelationInputSchema,
   findWorkInputSchema,
+  releaseTaskLeaseInputSchema,
   reopenTaskInputSchema,
+  renewTaskLeaseInputSchema,
   taskContextInputSchema,
   taskContextPackageSchema,
   taskDiscoveryPageSchema,
+  taskLeaseGrantSchema,
+  taskLeaseMutationResultSchema,
   taskRelationSchema,
   taskSchema,
   type Actor,
@@ -116,6 +130,27 @@ const taskErrorSchema = z.discriminatedUnion("type", [
     cursorRevision: z.number(),
     currentRevision: z.number(),
     staleBecause: z.enum(["queue_changed", "evaluation_context_changed"]),
+  }),
+  z.object({
+    type: z.literal("TaskClaimUnavailableError"),
+    message: z.string(),
+    taskId: z.string().optional(),
+    eligibilityStatus: z.string().optional(),
+    reasons: z.array(z.string()),
+  }),
+  z.object({
+    type: z.literal("TaskLeaseError"),
+    message: z.string(),
+    taskId: z.string().optional(),
+    leaseId: z.string().optional(),
+    leaseReason: z.enum([
+      "not_found",
+      "required",
+      "expired",
+      "inactive",
+      "owner_mismatch",
+      "inactive_run",
+    ]),
   }),
   z.object({ type: z.literal("TaskPersistenceError"), message: z.string() }),
 ]);
@@ -279,6 +314,115 @@ export function createHelmMcpServer(
   );
 
   server.registerTool(
+    "claim_task",
+    {
+      title: "Claim a Helm task",
+      description:
+        "Atomically claim a chosen eligible task for the registered agent run and return its renewable lease.",
+      inputSchema: claimTaskInputSchema,
+      // SDK 1.30 clients validate structured errors against this root schema despite isError.
+      outputSchema: {
+        ok: z.boolean(),
+        grant: taskLeaseGrantSchema.optional(),
+        error: z.union([agentErrorSchema, taskErrorSchema]).optional(),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const result = await Effect.runPromise(
+        Effect.either(claimTask(input, registered.registration, taskServices)),
+      );
+      const structuredContent = Either.isRight(result)
+        ? { ok: true, grant: result.right }
+        : { ok: false, error: toTaskErrorDto(result.left) };
+      return jsonToolResult(structuredContent, !structuredContent.ok);
+    },
+  );
+
+  server.registerTool(
+    "claim_next",
+    {
+      title: "Claim the next Helm task",
+      description:
+        "Atomically select and claim the highest-ranked eligible task for the registered agent run.",
+      inputSchema: claimNextTaskInputSchema,
+      outputSchema: {
+        ok: z.boolean(),
+        grant: taskLeaseGrantSchema.optional(),
+        error: z.union([agentErrorSchema, taskErrorSchema]).optional(),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const result = await Effect.runPromise(
+        Effect.either(claimNextTask(input, registered.registration, taskServices)),
+      );
+      const structuredContent = Either.isRight(result)
+        ? { ok: true, grant: result.right }
+        : { ok: false, error: toTaskErrorDto(result.left) };
+      return jsonToolResult(structuredContent, !structuredContent.ok);
+    },
+  );
+
+  server.registerTool(
+    "renew_lease",
+    {
+      title: "Renew a Helm task lease",
+      description:
+        "Renew an active task lease owned by the registered agent run using its opaque lease token.",
+      inputSchema: renewTaskLeaseInputSchema,
+      outputSchema: {
+        ok: z.boolean(),
+        grant: taskLeaseGrantSchema.optional(),
+        error: z.union([agentErrorSchema, taskErrorSchema]).optional(),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const result = await Effect.runPromise(
+        Effect.either(renewTaskLease(input, registered.registration, taskServices)),
+      );
+      const structuredContent = Either.isRight(result)
+        ? { ok: true, grant: result.right }
+        : { ok: false, error: toTaskErrorDto(result.left) };
+      return jsonToolResult(structuredContent, !structuredContent.ok);
+    },
+  );
+
+  server.registerTool(
+    "release_lease",
+    {
+      title: "Release a Helm task lease",
+      description:
+        "Release an active task lease owned by the registered agent run and return the task to ready work.",
+      inputSchema: releaseTaskLeaseInputSchema,
+      outputSchema: {
+        ok: z.boolean(),
+        result: taskLeaseMutationResultSchema.optional(),
+        error: z.union([agentErrorSchema, taskErrorSchema]).optional(),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (input, extra) => {
+      const registered = await registeredRunForTool(extra, agentServices, client);
+      if (!registered.ok) return jsonToolResult({ ok: false, error: registered.error }, true);
+      const result = await Effect.runPromise(
+        Effect.either(releaseTaskLease(input, registered.registration, taskServices)),
+      );
+      const structuredContent = Either.isRight(result)
+        ? { ok: true, result: result.right }
+        : { ok: false, error: toTaskErrorDto(result.left) };
+      return jsonToolResult(structuredContent, !structuredContent.ok);
+    },
+  );
+
+  server.registerTool(
     "create_task",
     {
       title: "Create a Helm task",
@@ -332,7 +476,7 @@ export function createHelmMcpServer(
     {
       title: "Complete a Helm task",
       description:
-        "Mark a task complete through the shared lifecycle command so dependent eligibility updates.",
+        "Agent completion is currently unavailable; lease-aware completion with structured attempt reports is deferred to the execution-reporting slice.",
       inputSchema: completeTaskInputSchema,
       outputSchema: {
         ok: z.boolean(),

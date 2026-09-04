@@ -20,7 +20,7 @@ export interface AgentStore {
     session: McpSessionContext,
   ): Effect.Effect<RegisteredAgentRun, AgentCommandError>;
   resolveRun(session: McpSessionContext): Effect.Effect<RegisteredAgentRun, AgentCommandError>;
-  closeRun(sessionId: string): Effect.Effect<void, AgentPersistenceError>;
+  closeRun(sessionId: string): Effect.Effect<string | null, AgentPersistenceError>;
   reconcileActiveRuns(): Effect.Effect<void, AgentPersistenceError>;
 }
 

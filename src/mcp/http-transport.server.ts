@@ -6,7 +6,7 @@ import { Effect } from "effect";
 
 import { closeAgentRun, type AgentServices } from "../application/agents";
 import type { ProjectServices } from "../application/projects";
-import type { TaskServices } from "../application/tasks";
+import { cancelTaskLeasesForRun, type TaskServices } from "../application/tasks";
 import { createHelmMcpServer } from "./project-server.server";
 
 type McpHttpSession = {
@@ -39,7 +39,13 @@ export function createMcpRequestHandler(
     if (closingSessions.has(sessionId)) return;
     closingSessions.add(sessionId);
     try {
-      await Effect.runPromise(Effect.ignore(closeAgentRun(sessionId, agentServices)));
+      const closedRunId = await Effect.runPromise(closeAgentRun(sessionId, agentServices));
+      if (closedRunId) {
+        await Effect.runPromise(cancelTaskLeasesForRun(closedRunId, taskServices));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown error";
+      process.stderr.write(`[helm] MCP session cleanup failed: ${message}\n`);
     } finally {
       closingSessions.delete(sessionId);
     }
