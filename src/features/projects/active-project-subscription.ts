@@ -1,5 +1,4 @@
 import type { ProjectEvent } from "../../domain/activity";
-import { readProjectEvents } from "../../server/activity-functions";
 import {
   subscribeToProjectEvents,
   type EventSourceLike,
@@ -16,19 +15,6 @@ export function isActiveProjectChangeEvent(event: ProjectEvent) {
 
 export function isAgentRunChangeEvent(event: ProjectEvent) {
   return event.changes.scopes.includes("agents") && event.kind.startsWith("agent.run.");
-}
-
-export async function readApplicationEventCursor() {
-  const page = await readProjectEvents({
-    data: {
-      projectId: null,
-      direction: "backward",
-      afterCursor: 0,
-      beforeCursor: null,
-      limit: 1,
-    },
-  });
-  return page.latestCursor;
 }
 
 export function subscribeToActiveProjectChanges({

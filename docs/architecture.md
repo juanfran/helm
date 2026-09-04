@@ -168,6 +168,16 @@ TanStack DB is the default for task-shaped reactive data. Collections use the Ta
 
 This division avoids duplicate caches: TanStack DB owns reactive task data; TanStack Query is its transport/cache adapter and owns only reads that do not justify a collection.
 
+Client loading is a tested production boundary. Vite emits a client manifest, and the production build
+walks its static-import graph before recording a valid build fingerprint. Hard limits cover the initial
+shell, each JavaScript asset, every dynamic-entry increment, and each route's deduplicated
+pre-interaction payload. Navigation accounting includes route split closures plus any automatic dynamic
+descendants named by the source contract; the current workspace, search, and saved-view surfaces are
+direct component dependencies. Route loader, component, and error-component entries are required
+independently; the operational dashboard and rich-text editor remain interaction-loaded dynamic entries.
+The exact measurement rules and limits live in
+[the client bundle budget](client-bundle-budget.md).
+
 ## Backend runtime
 
 Effect owns application workflows, service dependencies, resource lifetime, typed errors, retries, and interruption. Drizzle owns SQL construction and migrations. SQLite transactions are exposed to application commands through a narrow repository service.

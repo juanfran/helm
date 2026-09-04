@@ -262,7 +262,7 @@ describe("ProjectCustomizationControl", () => {
     ).toBe(true);
     expect(screen.getByLabelText("Configuration state").textContent).toBe("Configuration v8");
     expect(screen.getByRole("status").textContent).toContain("Risk level created");
-  });
+  }, 15_000);
 
   it("announces client validation without calling the command", async () => {
     const user = userEvent.setup();

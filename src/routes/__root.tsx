@@ -10,15 +10,13 @@ import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
 import { TanStackDevtools } from "@tanstack/react-devtools";
 
 import TanStackQueryDevtools from "../integrations/tanstack-query/devtools";
-import {
-  readApplicationEventCursor,
-  subscribeToApplicationChanges,
-} from "../features/projects/active-project-subscription";
+import { subscribeToApplicationChanges } from "../features/projects/active-project-subscription";
 import {
   activeAgentRunsQueryKey,
   refreshActiveAgentRuns,
 } from "../features/dashboard/agent-runs-query";
 import { resetProjectNavigation } from "../features/projects/project-navigation";
+import { readApplicationEventCursor } from "../server/application-cursor-function";
 import { readAppState } from "../server/project-functions";
 import { getThemeProps } from "../styles/theme";
 import { tokens } from "../styles/tokens.stylex";

@@ -140,6 +140,9 @@ pnpm start
 `pnpm start` fingerprints production inputs and rebuilds when `.output` is missing or stale before
 starting the local server. `./start.sh` changes to the repository root and delegates to the same
 command, so both entry points have identical environment, database, build, and host safeguards.
+The production build also enforces Helm's manifest-based client loading limits before its fingerprint
+can become current. See [docs/client-bundle-budget.md](docs/client-bundle-budget.md) for the measured
+closures, hard limits, and regression workflow.
 
 Apply migrations explicitly when needed with:
 
@@ -154,6 +157,7 @@ The command is safe with a new nested database path whose parent directories do 
 ```sh
 pnpm check
 pnpm build
+pnpm bundle:check
 pnpm smoke:operational
 ```
 

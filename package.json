@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "vite dev --port 3000",
     "build": "node scripts/build.mjs",
+    "bundle:check": "node scripts/client-bundle-budget.mjs",
     "start": "node scripts/start.mjs",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
     "format": "oxfmt .",

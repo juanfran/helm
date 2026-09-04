@@ -13,6 +13,10 @@ const config = defineConfig(({ command, mode }) => {
   const host = command === "serve" ? serverHostFromEnvironment(environment) : undefined;
 
   return {
+    build: {
+      chunkSizeWarningLimit: 450,
+      manifest: true,
+    },
     envDir: false,
     resolve: {
       tsconfigPaths: true,

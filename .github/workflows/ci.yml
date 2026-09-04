@@ -70,8 +70,10 @@ jobs:
       - name: Run tests
         run: pnpm test
 
-      - name: Build production application
-        run: pnpm build
+      - name: Build production application and enforce client bundle budgets
+        run: |
+          pnpm build
+          pnpm bundle:check
 
       - name: Verify committed Drizzle artifacts
         env:

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { join, relative } from "node:path";
 import { spawn } from "node:child_process";
 
+import { assertClientBundleBudget, formatClientBundleReport } from "./client-bundle-budget.mjs";
 import { HELM_PROJECT_ROOT } from "./environment.mjs";
 
 const BUILD_MANIFEST_VERSION = 1;
@@ -115,6 +116,9 @@ export async function buildProduction(projectRoot = HELM_PROJECT_ROOT) {
     env: process.env,
     stdio: "inherit",
   });
+
+  const bundleReport = assertClientBundleBudget(projectRoot);
+  process.stdout.write(`${formatClientBundleReport(bundleReport)}\n`);
 
   if (computeBuildFingerprint(projectRoot) !== fingerprint) {
     throw new Error("Helm inputs changed during the production build. Run the build again.");

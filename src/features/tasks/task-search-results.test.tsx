@@ -55,6 +55,21 @@ function item(
 }
 
 describe("TaskSearchResults", () => {
+  it("renders a useful read-only result view before bulk selection is activated", () => {
+    render(
+      <TaskSearchResults
+        items={[item("task-1", 1, "Design the search", "ready")]}
+        visibleFields={["title", "lifecycle", "priority"]}
+      />,
+    );
+
+    const results = screen.getByRole("region", { name: "Task search results" });
+    expect(within(results).getByText("Design the search")).toBeTruthy();
+    expect(within(results).getByText("Ready")).toBeTruthy();
+    expect(within(results).getByText("urgent")).toBeTruthy();
+    expect(within(results).queryByRole("checkbox")).toBeNull();
+  });
+
   it("defaults to an accessible list and selects a result", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();

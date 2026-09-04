@@ -1,22 +1,24 @@
-import { useMemo, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type ComponentType,
+  type CSSProperties,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import * as stylex from "@stylexjs/stylex";
 import {
   Activity,
-  Archive,
   Bot,
   CheckCircle2,
   Clock3,
-  GitBranch,
   Inbox,
-  Link2,
   Plus,
   ShipWheel,
   SlidersHorizontal,
-  X,
 } from "lucide-react";
 
-import { Button } from "../../components/ui/button";
-import { Checkbox } from "../../components/ui/checkbox";
 import type {
   ActivityEntry,
   CreateHumanActivityEntryInput,
@@ -27,20 +29,11 @@ import type {
   WithdrawActivityEntryInput,
 } from "../../domain/activity";
 import type { AgentRunSummary } from "../../domain/agents";
-import type {
-  CustomFieldDefinition,
-  CustomFieldValue,
-  SetTaskReviewModeOverrideInput,
-  TaskCustomFieldAssignment,
-} from "../../domain/customization";
+import type { SetTaskReviewModeOverrideInput } from "../../domain/customization";
 import { type Project, type SetProjectReviewModeInput, type Theme } from "../../domain/projects";
 import {
   emptyRichTextDocument,
   compareTaskOrder,
-  taskPrioritySchema,
-  taskRelationTypeSchema,
-  taskSizeSchema,
-  tagInputSchema,
   type ApproveTaskReviewInput,
   type ArchiveTaskInput,
   type CancelTaskInput,
@@ -51,12 +44,10 @@ import {
   type ReopenTaskInput,
   type RequestTaskChangesInput,
   type RestoreCancelledTaskInput,
-  type RichTextDocument,
   type Task,
   type TaskAttemptSummary,
   type TaskClaim,
   type TaskLifecycle,
-  type TagInput,
   type TaskTag,
   type UpdateTaskPlanningInput,
 } from "../../domain/tasks";
@@ -71,17 +62,55 @@ import type {
   TaskRelationCommandResponse,
   TaskTransitionCommandResponse,
 } from "../../server/task-adapter";
+import {
+  createRetryableLazyModuleLoader,
+  type RetryableLazyModuleLoader,
+} from "../../components/retryable-lazy-module";
+import { useExplicitLazyModule } from "../../components/use-explicit-lazy-module";
 import { tokens } from "../../styles/tokens.stylex";
-import { ProjectActivityFeed } from "../activity/project-activity-feed";
-import { NotificationCenter } from "../activity/notification-center";
-import { TaskCollaboration } from "../activity/task-collaboration";
-import { OperationalDashboard } from "../dashboard/operational-dashboard";
-import { ProjectReviewModeControl } from "../projects/project-review-mode-control";
-import { ThemeControl } from "../projects/theme-control";
-import { BulkTaskControls, type BulkTaskControlsProps } from "./bulk-task-controls";
-import { RichTextEditor } from "./rich-text-editor";
-import { TaskExecutionPanel } from "./task-execution-panel";
+import type { BulkTaskControlsProps } from "./bulk-task-controls";
+import type {
+  RichTextEditorModuleLoader,
+  TaskCollaborationModuleLoader,
+  TaskDetailPanelProps,
+} from "./task-detail-panel";
 import { useVisibleTaskSelection } from "./visible-task-selection";
+
+const operationalDashboardModule = createRetryableLazyModuleLoader(() =>
+  import("../dashboard/operational-dashboard").then(({ OperationalDashboard }) => ({
+    default: OperationalDashboard,
+  })),
+);
+const bulkTaskControlsModule = createRetryableLazyModuleLoader(() =>
+  import("./bulk-task-controls").then(({ BulkTaskControls }) => ({ default: BulkTaskControls })),
+);
+const projectActivityFeedModule = createRetryableLazyModuleLoader(() =>
+  import("../activity/project-activity-feed").then(({ ProjectActivityFeed }) => ({
+    default: ProjectActivityFeed,
+  })),
+);
+const projectReviewModeControlModule = createRetryableLazyModuleLoader(() =>
+  import("../projects/project-review-mode-control").then(({ ProjectReviewModeControl }) => ({
+    default: ProjectReviewModeControl,
+  })),
+);
+const notificationCenterModule = createRetryableLazyModuleLoader(() =>
+  import("../activity/notification-center").then(({ NotificationCenter }) => ({
+    default: NotificationCenter,
+  })),
+);
+const themeControlModule = createRetryableLazyModuleLoader(() =>
+  import("../projects/theme-control").then(({ ThemeControl }) => ({ default: ThemeControl })),
+);
+const taskDetailPanelModule = createRetryableLazyModuleLoader(() =>
+  import("./task-detail-panel").then(({ TaskDetailPanel }) => ({
+    default: TaskDetailPanel,
+  })),
+);
+
+type TaskDetailPanelModuleLoader = RetryableLazyModuleLoader<{
+  default: ComponentType<TaskDetailPanelProps>;
+}>;
 
 type TaskWorkspaceProps = {
   project: Project;
@@ -94,8 +123,17 @@ type TaskWorkspaceProps = {
   projectEvents: readonly ProjectEvent[];
   importantEvents?: readonly ProjectEvent[];
   activeAgentRuns?: readonly AgentRunSummary[];
+  initialSelectedTaskId?: string | null;
+  taskDetailModuleLoader?: TaskDetailPanelModuleLoader;
+  dashboardModuleLoader?: typeof operationalDashboardModule;
+  activityModuleLoader?: typeof projectActivityFeedModule;
+  bulkModuleLoader?: typeof bulkTaskControlsModule;
+  notificationsModuleLoader?: typeof notificationCenterModule;
+  appearanceModuleLoader?: typeof themeControlModule;
+  richTextEditorModuleLoader?: RichTextEditorModuleLoader;
+  collaborationModuleLoader?: TaskCollaborationModuleLoader;
   liveStatus: "connecting" | "live" | "retrying";
-  projectSwitcher?: ReactNode;
+  projectSwitcher?: { preload: () => void; surface: ReactNode };
   customizationControl?: ReactNode;
   portabilityControl?: ReactNode;
   renderSearchLink?: (props: { className?: string; style?: CSSProperties }) => ReactNode;
@@ -131,7 +169,6 @@ type TaskWorkspaceProps = {
   onChangeProjectReviewMode: (input: SetProjectReviewModeInput) => Promise<ProjectCommandResponse>;
 };
 
-type TagDraft = TagInput & { draftId: string };
 const noActiveAgentRuns: readonly AgentRunSummary[] = [];
 
 export function TaskWorkspace({
@@ -145,6 +182,15 @@ export function TaskWorkspace({
   projectEvents,
   importantEvents = projectEvents,
   activeAgentRuns = noActiveAgentRuns,
+  initialSelectedTaskId = null,
+  taskDetailModuleLoader = taskDetailPanelModule,
+  dashboardModuleLoader = operationalDashboardModule,
+  activityModuleLoader = projectActivityFeedModule,
+  bulkModuleLoader = bulkTaskControlsModule,
+  notificationsModuleLoader = notificationCenterModule,
+  appearanceModuleLoader = themeControlModule,
+  richTextEditorModuleLoader,
+  collaborationModuleLoader,
   liveStatus,
   projectSwitcher,
   customizationControl,
@@ -176,20 +222,41 @@ export function TaskWorkspace({
   const [workspaceView, setWorkspaceView] = useState<
     "dashboard" | "tasks" | "activity" | "settings"
   >("tasks");
-  const [selectedId, setSelectedId] = useState<string | null>(orderedTasks[0]?.id ?? null);
+  const [selectedId, setSelectedId] = useState<string | null>(() =>
+    orderedTasks.some((task) => task.id === initialSelectedTaskId) ? initialSelectedTaskId : null,
+  );
   const [bulkSelectedTaskIds, setBulkSelectedTaskIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const [projectSwitcherRequested, setProjectSwitcherRequested] = useState(false);
   const [pendingCapture, setPendingCapture] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
-  const selectedTask =
-    orderedTasks.find((task) => task.id === selectedId) ?? orderedTasks[0] ?? null;
+  const selectedTask = orderedTasks.find((task) => task.id === selectedId) ?? null;
   const visibleTaskIds = useMemo(() => orderedTasks.map((task) => task.id), [orderedTasks]);
   const bulkSelection = useVisibleTaskSelection({
     visibleTaskIds,
     selectedTaskIds: bulkSelectedTaskIds,
     onSelectedTaskIdsChange: setBulkSelectedTaskIds,
   });
+  const dashboardModule = useExplicitLazyModule(dashboardModuleLoader);
+  const activityModule = useExplicitLazyModule(activityModuleLoader);
+  const bulkModule = useExplicitLazyModule(bulkModuleLoader);
+  const reviewPolicyModule = useExplicitLazyModule(projectReviewModeControlModule);
+  const notificationsModule = useExplicitLazyModule(notificationsModuleLoader);
+  const appearanceModule = useExplicitLazyModule(appearanceModuleLoader);
+  const taskDetailModule = useExplicitLazyModule(taskDetailModuleLoader);
+  const bulkMode = bulkModule.state.status !== "idle";
+  const taskDetailStatus = taskDetailModule.state.status;
+  const activateTaskDetail = taskDetailModule.activate;
+  useEffect(() => {
+    if (
+      initialSelectedTaskId &&
+      selectedId === initialSelectedTaskId &&
+      taskDetailStatus === "idle"
+    ) {
+      activateTaskDetail();
+    }
+  }, [activateTaskDetail, initialSelectedTaskId, selectedId, taskDetailStatus]);
   const counts = useMemo(
     () => ({
       backlog: tasks.filter((task) => task.lifecycle === "backlog").length,
@@ -201,10 +268,14 @@ export function TaskWorkspace({
     }),
     [tasks],
   );
+  const notificationIntentLabel = importantEvents.some((event) => event.importance !== "routine")
+    ? "Notifications, attention available"
+    : "Notifications, none unread";
 
   function selectTask(taskId: string) {
     setSelectedId(taskId);
     setWorkspaceView("tasks");
+    if (taskDetailModule.state.status === "idle") taskDetailModule.activate();
   }
 
   async function capture(event: FormEvent<HTMLFormElement>) {
@@ -228,7 +299,7 @@ export function TaskWorkspace({
       });
       if (response.ok) {
         setCaptureTitle("");
-        setSelectedId(response.task.id);
+        selectTask(response.task.id);
       } else {
         setCaptureError(response.error.message);
       }
@@ -255,7 +326,12 @@ export function TaskWorkspace({
           <button
             type="button"
             aria-pressed={workspaceView === "dashboard"}
-            onClick={() => setWorkspaceView("dashboard")}
+            onFocus={dashboardModule.preload}
+            onPointerEnter={dashboardModule.preload}
+            onClick={() => {
+              setWorkspaceView("dashboard");
+              if (dashboardModule.state.status === "idle") dashboardModule.activate();
+            }}
             {...stylex.props(
               styles.viewButton,
               workspaceView === "dashboard" && styles.viewButtonActive,
@@ -277,7 +353,12 @@ export function TaskWorkspace({
           <button
             type="button"
             aria-pressed={workspaceView === "activity"}
-            onClick={() => setWorkspaceView("activity")}
+            onFocus={activityModule.preload}
+            onPointerEnter={activityModule.preload}
+            onClick={() => {
+              setWorkspaceView("activity");
+              if (activityModule.state.status === "idle") activityModule.activate();
+            }}
             {...stylex.props(
               styles.viewButton,
               workspaceView === "activity" && styles.viewButtonActive,
@@ -289,7 +370,12 @@ export function TaskWorkspace({
             <button
               type="button"
               aria-pressed={workspaceView === "settings"}
-              onClick={() => setWorkspaceView("settings")}
+              onFocus={reviewPolicyModule.preload}
+              onPointerEnter={reviewPolicyModule.preload}
+              onClick={() => {
+                setWorkspaceView("settings");
+                if (reviewPolicyModule.state.status === "idle") reviewPolicyModule.activate();
+              }}
               {...stylex.props(
                 styles.viewButton,
                 workspaceView === "settings" && styles.viewButtonActive,
@@ -312,18 +398,86 @@ export function TaskWorkspace({
                 ? "Reconnecting"
                 : "Connecting"}
           </span>
-          <NotificationCenter
-            projectId={project.id}
-            events={importantEvents}
-            tasks={orderedTasks}
-            onSelectTask={selectTask}
-          />
-          <ThemeControl theme={theme} onChange={onChangeTheme} />
+          <button
+            type="button"
+            aria-controls="workspace-notifications"
+            aria-disabled={
+              notificationsModule.state.status === "loading" ||
+              notificationsModule.state.status === "ready"
+            }
+            aria-expanded={notificationsModule.state.status === "ready"}
+            aria-label={notificationIntentLabel}
+            onFocus={notificationsModule.preload}
+            onPointerEnter={notificationsModule.preload}
+            onClick={() => {
+              if (notificationsModule.state.status === "idle") notificationsModule.activate();
+              if (notificationsModule.state.status === "error") notificationsModule.retry();
+            }}
+            {...stylex.props(styles.utilityButton)}
+          >
+            Notifications
+          </button>
+          <div id="workspace-notifications">
+            {notificationsModule.state.status === "ready" ? (
+              <notificationsModule.state.module.default
+                projectId={project.id}
+                events={importantEvents}
+                tasks={orderedTasks}
+                onSelectTask={selectTask}
+              />
+            ) : notificationsModule.state.status === "error" ? (
+              <LazyWorkspaceFailure surface="notifications" onRetry={notificationsModule.retry} />
+            ) : notificationsModule.state.status === "loading" ? (
+              <LazyWorkspaceFallback surface="notifications" />
+            ) : null}
+          </div>
+          <button
+            type="button"
+            aria-controls="workspace-appearance"
+            aria-disabled={
+              appearanceModule.state.status === "loading" ||
+              appearanceModule.state.status === "ready"
+            }
+            aria-expanded={appearanceModule.state.status === "ready"}
+            onFocus={appearanceModule.preload}
+            onPointerEnter={appearanceModule.preload}
+            onClick={() => {
+              if (appearanceModule.state.status === "idle") appearanceModule.activate();
+              if (appearanceModule.state.status === "error") appearanceModule.retry();
+            }}
+            {...stylex.props(styles.utilityButton)}
+          >
+            Appearance
+          </button>
+          <div id="workspace-appearance">
+            {appearanceModule.state.status === "ready" ? (
+              <appearanceModule.state.module.default theme={theme} onChange={onChangeTheme} />
+            ) : appearanceModule.state.status === "error" ? (
+              <LazyWorkspaceFailure surface="appearance" onRetry={appearanceModule.retry} />
+            ) : appearanceModule.state.status === "loading" ? (
+              <LazyWorkspaceFallback surface="appearance" />
+            ) : null}
+          </div>
         </div>
       </header>
 
       {projectSwitcher ? (
-        <div {...stylex.props(styles.projectToolbar)}>{projectSwitcher}</div>
+        <div {...stylex.props(styles.projectToolbar)}>
+          <button
+            type="button"
+            aria-disabled={projectSwitcherRequested}
+            aria-expanded={projectSwitcherRequested}
+            onFocus={projectSwitcher.preload}
+            onPointerEnter={projectSwitcher.preload}
+            onClick={() => {
+              if (!projectSwitcherRequested) setProjectSwitcherRequested(true);
+            }}
+            {...stylex.props(styles.intentButton)}
+          >
+            Switch project
+          </button>
+          {projectSwitcherRequested ? projectSwitcher.surface : null}
+        </div>
       ) : null}
 
       <div
@@ -358,11 +512,6 @@ export function TaskWorkspace({
                 <SlidersHorizontal size={14} aria-hidden="true" /> {counts.claimable} claimable
               </span>
             </section>
-            <ProjectReviewModeControl
-              key={`${project.id}:${project.version}`}
-              project={project}
-              onChange={onChangeProjectReviewMode}
-            />
             <form onSubmit={capture} {...stylex.props(styles.capture)} aria-label="Quick capture">
               <label htmlFor="capture-title" {...stylex.props(styles.srOnly)}>
                 Task title
@@ -376,43 +525,79 @@ export function TaskWorkspace({
                 required
                 {...stylex.props(styles.input)}
               />
-              <Button
+              <button
                 type="submit"
                 aria-label="Add backlog task"
                 disabled={pendingCapture || captureTitle.trim().length === 0}
+                {...stylex.props(styles.button, styles.iconButton)}
               >
                 <Plus size={17} aria-hidden="true" />
-              </Button>
+              </button>
             </form>
             {captureError ? (
               <p role="alert" {...stylex.props(styles.error)}>
                 {captureError}
               </p>
             ) : null}
-            <BulkTaskControls
-              projectId={project.id}
-              tagDefinitions={tagDefinitions}
-              selection={bulkSelection}
-              onPreview={onPreviewBulkTasks}
-              onExecute={onExecuteBulkTasks}
-            />
+            <button
+              type="button"
+              aria-controls="workspace-bulk-actions"
+              aria-disabled={
+                bulkModule.state.status === "loading" || bulkModule.state.status === "ready"
+              }
+              aria-expanded={bulkModule.state.status === "ready"}
+              onFocus={bulkModule.preload}
+              onPointerEnter={bulkModule.preload}
+              onClick={() => {
+                if (bulkModule.state.status === "idle") bulkModule.activate();
+                if (bulkModule.state.status === "error") bulkModule.retry();
+              }}
+              {...stylex.props(styles.intentButton)}
+            >
+              Bulk actions
+            </button>
+            <div id="workspace-bulk-actions">
+              {bulkModule.state.status === "ready" ? (
+                <bulkModule.state.module.default
+                  projectId={project.id}
+                  tagDefinitions={tagDefinitions}
+                  selection={bulkSelection}
+                  onPreview={onPreviewBulkTasks}
+                  onExecute={onExecuteBulkTasks}
+                />
+              ) : bulkModule.state.status === "error" ? (
+                <LazyWorkspaceFailure surface="bulk" onRetry={bulkModule.retry} />
+              ) : bulkModule.state.status === "loading" ? (
+                <LazyWorkspaceFallback surface="bulk" />
+              ) : null}
+            </div>
             <ul aria-label="Tasks" {...stylex.props(styles.taskList)}>
               {orderedTasks.map((task) => (
                 <li
                   key={task.id}
                   {...stylex.props(
                     styles.taskRow,
+                    bulkMode && styles.taskRowBulkMode,
                     bulkSelection.isTaskSelected(task.id) && styles.taskRowBulkSelected,
                     task.id === selectedTask?.id && styles.taskRowSelected,
                   )}
                 >
-                  <Checkbox
-                    aria-label={`Select task #${task.sequence}: ${task.title}`}
-                    checked={bulkSelection.isTaskSelected(task.id)}
-                    onCheckedChange={(checked) => bulkSelection.setTaskSelected(task.id, checked)}
-                  />
+                  {bulkMode ? (
+                    <input
+                      type="checkbox"
+                      aria-label={`Select task #${task.sequence}: ${task.title}`}
+                      aria-checked={bulkSelection.isTaskSelected(task.id)}
+                      checked={bulkSelection.isTaskSelected(task.id)}
+                      onChange={(event) =>
+                        bulkSelection.setTaskSelected(task.id, event.target.checked)
+                      }
+                      {...stylex.props(styles.bulkCheckbox)}
+                    />
+                  ) : null}
                   <button
                     type="button"
+                    onFocus={taskDetailModule.preload}
+                    onPointerEnter={taskDetailModule.preload}
                     onClick={() => selectTask(task.id)}
                     aria-current={task.id === selectedTask?.id ? "true" : undefined}
                     aria-label={`Open task #${task.sequence}: ${task.title}`}
@@ -451,66 +636,97 @@ export function TaskWorkspace({
         >
           {workspaceView === "settings" ? (
             <div {...stylex.props(styles.detailStack, styles.settingsStack)}>
-              <ProjectReviewModeControl
-                key={`settings:${project.id}:${project.version}`}
-                project={project}
-                onChange={onChangeProjectReviewMode}
-              />
+              {reviewPolicyModule.state.status === "ready" ? (
+                <reviewPolicyModule.state.module.default
+                  key={`settings:${project.id}:${project.version}`}
+                  project={project}
+                  onChange={onChangeProjectReviewMode}
+                />
+              ) : reviewPolicyModule.state.status === "error" ? (
+                <LazyWorkspaceFailure surface="reviewPolicy" onRetry={reviewPolicyModule.retry} />
+              ) : (
+                <LazyWorkspaceFallback surface="reviewPolicy" />
+              )}
               {customizationControl}
               {portabilityControl}
             </div>
           ) : workspaceView === "dashboard" ? (
-            <OperationalDashboard
-              tasks={orderedTasks}
-              attempts={attempts}
-              events={projectEvents}
-              activeAgentRuns={activeAgentRuns}
-              onSelectTask={selectTask}
-            />
+            dashboardModule.state.status === "ready" ? (
+              <dashboardModule.state.module.default
+                tasks={orderedTasks}
+                attempts={attempts}
+                events={projectEvents}
+                activeAgentRuns={activeAgentRuns}
+                onSelectTask={selectTask}
+              />
+            ) : dashboardModule.state.status === "error" ? (
+              <LazyWorkspaceFailure surface="dashboard" onRetry={dashboardModule.retry} />
+            ) : (
+              <LazyWorkspaceFallback surface="dashboard" />
+            )
           ) : workspaceView === "activity" ? (
-            <ProjectActivityFeed
-              events={projectEvents}
-              tasks={orderedTasks}
-              entries={activityEntries}
-              attempts={attempts}
-            />
+            activityModule.state.status === "ready" ? (
+              <activityModule.state.module.default
+                events={projectEvents}
+                tasks={orderedTasks}
+                entries={activityEntries}
+                attempts={attempts}
+              />
+            ) : activityModule.state.status === "error" ? (
+              <LazyWorkspaceFailure surface="activity" onRetry={activityModule.retry} />
+            ) : (
+              <LazyWorkspaceFallback surface="activity" />
+            )
           ) : selectedTask ? (
             <div {...stylex.props(styles.detailStack)}>
-              <TaskExecutionPanel
-                key={selectedTask.id}
-                task={selectedTask}
-                attempts={attempts}
-                onApproveReview={onApproveTaskReview}
-                onRequestChanges={onRequestTaskChanges}
-                onCancelTask={onCancelTask}
-                onRestoreTask={onRestoreCancelledTask}
-                onReopenTask={onReopenTask}
-              />
-              <PreparationPanel
-                key={`${selectedTask.id}:${selectedTask.version}`}
-                task={selectedTask}
-                tasks={orderedTasks}
-                tagDefinitions={tagDefinitions}
-                activityEntries={activityEntries}
-                manualBlockers={manualBlockers}
-                onCreateTask={onCreateTask}
-                onPrepare={onPrepareTask}
-                onUpdatePlanning={onUpdateTaskPlanning}
-                onSetReviewModeOverride={onSetTaskReviewModeOverride}
-                onCreateRelation={onCreateTaskRelation}
-                onArchive={onArchiveTask}
-                onInvalidateClaim={onInvalidateClaim}
-                onCreateActivityEntry={onCreateActivityEntry}
-                onWithdrawActivityEntry={onWithdrawActivityEntry}
-                onCreateManualBlocker={onCreateManualBlocker}
-                onResolveManualBlocker={onResolveManualBlocker}
-              />
+              {taskDetailModule.state.status === "ready" ? (
+                <taskDetailModule.state.module.default
+                  key={`${selectedTask.id}:${selectedTask.version}`}
+                  task={selectedTask}
+                  tasks={orderedTasks}
+                  attempts={attempts}
+                  tagDefinitions={tagDefinitions}
+                  activityEntries={activityEntries}
+                  manualBlockers={manualBlockers}
+                  richTextEditorModuleLoader={richTextEditorModuleLoader}
+                  collaborationModuleLoader={collaborationModuleLoader}
+                  onApproveReview={onApproveTaskReview}
+                  onRequestChanges={onRequestTaskChanges}
+                  onCancelTask={onCancelTask}
+                  onRestoreTask={onRestoreCancelledTask}
+                  onReopenTask={onReopenTask}
+                  onCreateTask={onCreateTask}
+                  onPrepare={onPrepareTask}
+                  onUpdatePlanning={onUpdateTaskPlanning}
+                  onSetReviewModeOverride={onSetTaskReviewModeOverride}
+                  onCreateRelation={onCreateTaskRelation}
+                  onArchive={onArchiveTask}
+                  onInvalidateClaim={onInvalidateClaim}
+                  onCreateActivityEntry={onCreateActivityEntry}
+                  onWithdrawActivityEntry={onWithdrawActivityEntry}
+                  onCreateManualBlocker={onCreateManualBlocker}
+                  onResolveManualBlocker={onResolveManualBlocker}
+                />
+              ) : (
+                <>
+                  <TaskDetailReadingSummary task={selectedTask} />
+                  {taskDetailModule.state.status === "error" ? (
+                    <LazyWorkspaceFailure surface="taskDetail" onRetry={taskDetailModule.retry} />
+                  ) : (
+                    <LazyWorkspaceFallback surface="taskDetail" />
+                  )}
+                </>
+              )}
             </div>
           ) : (
             <div {...stylex.props(styles.empty)}>
               <Inbox size={32} aria-hidden="true" />
-              <h2>Capture the first task</h2>
-              <p>A title is enough. Preparation can happen when the work is understood.</p>
+              <h2>{orderedTasks.length === 0 ? "Capture the first task" : "Select a task"}</h2>
+              <p>
+                {orderedTasks.length === 0
+                  ? "A title is enough. Preparation can happen when the work is understood."
+                  : "Choose a task from the work queue to read its details or make changes."}
+              </p>
             </div>
           )}
         </section>
@@ -519,871 +735,127 @@ export function TaskWorkspace({
   );
 }
 
-function PreparationPanel({
-  task,
-  tasks,
-  tagDefinitions,
-  activityEntries,
-  manualBlockers,
-  onCreateTask,
-  onPrepare,
-  onUpdatePlanning,
-  onSetReviewModeOverride,
-  onCreateRelation,
-  onArchive,
-  onInvalidateClaim,
-  onCreateActivityEntry,
-  onWithdrawActivityEntry,
-  onCreateManualBlocker,
-  onResolveManualBlocker,
-}: {
-  task: Task;
-  tasks: readonly Task[];
-  tagDefinitions: readonly TaskTag[];
-  activityEntries: readonly ActivityEntry[];
-  manualBlockers: readonly ManualBlocker[];
-  onCreateTask: TaskWorkspaceProps["onCreateTask"];
-  onPrepare: TaskWorkspaceProps["onPrepareTask"];
-  onUpdatePlanning: TaskWorkspaceProps["onUpdateTaskPlanning"];
-  onSetReviewModeOverride: TaskWorkspaceProps["onSetTaskReviewModeOverride"];
-  onCreateRelation: TaskWorkspaceProps["onCreateTaskRelation"];
-  onArchive: TaskWorkspaceProps["onArchiveTask"];
-  onInvalidateClaim: TaskWorkspaceProps["onInvalidateClaim"];
-  onCreateActivityEntry: TaskWorkspaceProps["onCreateActivityEntry"];
-  onWithdrawActivityEntry: TaskWorkspaceProps["onWithdrawActivityEntry"];
-  onCreateManualBlocker: TaskWorkspaceProps["onCreateManualBlocker"];
-  onResolveManualBlocker: TaskWorkspaceProps["onResolveManualBlocker"];
-}) {
-  const [title, setTitle] = useState(task.title);
-  const [description, setDescription] = useState<RichTextDocument>(task.description);
-  const [expectedOutcome, setExpectedOutcome] = useState(task.expectedOutcome);
-  const [acceptanceCriteria, setAcceptanceCriteria] = useState(task.acceptanceCriteria);
-  const [agentContext, setAgentContext] = useState(task.agentContext);
-  const [checklist, setChecklist] = useState(task.checklist.map((item) => item.text).join("\n"));
-  const [priority, setPriority] = useState(task.priority);
-  const [position, setPosition] = useState(String(task.position));
-  const [notBefore, setNotBefore] = useState(task.notBefore ?? "");
-  const [dueAt, setDueAt] = useState(task.dueAt ?? "");
-  const [size, setSize] = useState(task.size ?? "");
-  const knownTags = useMemo(
-    () => new Map(tagDefinitions.map((tag) => [tag.name, tag])),
-    [tagDefinitions],
-  );
-  const [tagInputs, setTagInputs] = useState<TagDraft[]>(
-    task.tags.map(({ id, name, description: tagDescription, color, exclusiveGroup }) => ({
-      draftId: id,
-      name,
-      description: tagDescription,
-      color,
-      exclusiveGroup,
-    })),
-  );
-  const [requiredCapabilities, setRequiredCapabilities] = useState(
-    task.requiredCapabilities.join("\n"),
-  );
-  const [customFieldValues, setCustomFieldValues] = useState<
-    Record<string, CustomFieldValue | null>
-  >(() =>
-    Object.fromEntries(
-      task.customFields.map((assignment) => [
-        assignment.definition.id,
-        assignment.source === "explicit" ? assignment.value : null,
-      ]),
-    ),
-  );
-  const [reviewModeOverride, setReviewModeOverride] = useState<"required" | "direct" | null>(
-    task.reviewModeOverride,
-  );
-  const [reviewModeReason, setReviewModeReason] = useState("");
-  const [referencedPaths, setReferencedPaths] = useState(task.referencedPaths.join("\n"));
-  const [childTitle, setChildTitle] = useState("");
-  const [relationTargetId, setRelationTargetId] = useState(
-    tasks.find((candidate) => candidate.id !== task.id)?.id ?? "",
-  );
-  const [relationType, setRelationType] = useState("blocks");
-  const [claimReason, setClaimReason] = useState("");
-  const [claimPendingDisposition, setClaimPendingDisposition] = useState<
-    InvalidateTaskClaimInput["disposition"] | null
-  >(null);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const parentTask = task.parentTaskId
-    ? tasks.find((candidate) => candidate.id === task.parentTaskId)
-    : null;
-  const childTasks = task.childTaskIds
-    .map((childId) => tasks.find((candidate) => candidate.id === childId))
-    .filter((child) => child !== undefined);
-  const relationTarget = tasks.find((candidate) => candidate.id === relationTargetId);
-  const editable = task.lifecycle === "backlog" || task.lifecycle === "ready";
-  const executionReadOnly =
-    task.lifecycle === "in_progress" ||
-    task.lifecycle === "review" ||
-    task.lifecycle === "cancelled";
-
-  function currentPlanningFields() {
-    return {
-      priority,
-      position: Number(position),
-      notBefore: notBefore || null,
-      dueAt: dueAt || null,
-      size: taskSizeSchema.nullable().parse(size || null),
-      tags: tagInputs
-        .filter((tag) => tag.name.trim().length > 0)
-        .map(({ draftId: _draftId, ...tag }) => tagInputSchema.parse(tag)),
-      requiredCapabilities: parseLines(requiredCapabilities),
-      ...(task.customFields.some(({ definition }) => definition.retiredAt === null)
-        ? {
-            customFields: task.customFields
-              .filter(({ definition }) => definition.retiredAt === null)
-              .map(({ definition }) => ({
-                fieldId: definition.id,
-                value: customFieldValues[definition.id] ?? null,
-              })),
-          }
-        : {}),
-    };
-  }
-
-  async function prepare(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!editable) return;
-    setPending(true);
-    setError(null);
-    try {
-      const response = await onPrepare({
-        taskId: task.id,
-        title,
-        description,
-        expectedOutcome,
-        acceptanceCriteria,
-        agentContext,
-        referencedPaths: parseLines(referencedPaths),
-        checklist: checklist
-          .split("\n")
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .map((text, index) => ({ id: `item-${index + 1}`, text, checked: false })),
-        ...currentPlanningFields(),
-        expectedVersion: task.version,
-        idempotencyKey: crypto.randomUUID(),
-      });
-      if (!response.ok) setError(response.error.message);
-    } catch {
-      setError("Helm could not prepare the task.");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function updatePlanning() {
-    if (!editable) return;
-    setPending(true);
-    setError(null);
-    try {
-      const response = await onUpdatePlanning({
-        taskId: task.id,
-        ...currentPlanningFields(),
-        expectedVersion: task.version,
-        idempotencyKey: crypto.randomUUID(),
-      });
-      if (!response.ok) setError(response.error.message);
-    } catch {
-      setError("Helm could not update task planning.");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function changeReviewModeOverride() {
-    if (!editable || reviewModeOverride === task.reviewModeOverride) return;
-    if (!reviewModeReason.trim()) {
-      setError("Explain why the task review policy is changing.");
-      return;
-    }
-    setPending(true);
-    setError(null);
-    try {
-      const response = await onSetReviewModeOverride({
-        projectId: task.projectId,
-        taskId: task.id,
-        reviewModeOverride,
-        expectedTaskVersion: task.version,
-        reason: reviewModeReason.trim(),
-        idempotencyKey: crypto.randomUUID(),
-      });
-      if (!response.ok) setError(response.error.message);
-    } catch {
-      setError("Helm could not change the task review policy.");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function archive() {
-    if (executionReadOnly) return;
-    setPending(true);
-    setError(null);
-    try {
-      const response = await onArchive({
-        taskId: task.id,
-        expectedVersion: task.version,
-        reason: "Archived from the task workspace",
-        idempotencyKey: crypto.randomUUID(),
-      });
-      if (!response.ok) setError(response.error.message);
-    } catch {
-      setError("Helm could not archive the task.");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function createChild() {
-    if (executionReadOnly) return;
-    setPending(true);
-    setError(null);
-    try {
-      const response = await onCreateTask({
-        projectId: task.projectId,
-        parentTaskId: task.id,
-        lifecycle: "backlog",
-        title: childTitle,
-        description: emptyRichTextDocument,
-        expectedOutcome: "",
-        acceptanceCriteria: "",
-        agentContext: "",
-        checklist: [],
-        referencedPaths: [],
-        expectedVersion: 0,
-        idempotencyKey: crypto.randomUUID(),
-      });
-      if (response.ok) setChildTitle("");
-      else setError(response.error.message);
-    } catch {
-      setError("Helm could not create the child task.");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function createRelation() {
-    if (executionReadOnly || !relationTarget) return;
-    setPending(true);
-    setError(null);
-    try {
-      const response = await onCreateRelation({
-        projectId: task.projectId,
-        sourceTaskId: task.id,
-        targetTaskId: relationTarget.id,
-        type: taskRelationTypeSchema.parse(relationType),
-        expectedSourceVersion: task.version,
-        expectedTargetVersion: relationTarget.version,
-        idempotencyKey: crypto.randomUUID(),
-      });
-      if (!response.ok) setError(response.error.message);
-    } catch {
-      setError("Helm could not create the task relation.");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function invalidateClaim(disposition: InvalidateTaskClaimInput["disposition"]) {
-    if (!task.claim || claimReason.trim().length === 0) return;
-    const confirmed = window.confirm(
-      disposition === "cancelled"
-        ? `Stop ${task.claim.agentDisplayName}'s claim? Their lease will stop immediately and the current attempt will be marked abandoned.`
-        : `Make this task available for reassignment? ${task.claim.agentDisplayName}'s lease will stop immediately and the current attempt will be marked abandoned.`,
-    );
-    if (!confirmed) return;
-
-    setPending(true);
-    setClaimPendingDisposition(disposition);
-    setError(null);
-    try {
-      const response = await onInvalidateClaim({
-        taskId: task.id,
-        expectedVersion: task.version,
-        disposition,
-        reason: claimReason.trim(),
-        idempotencyKey: crypto.randomUUID(),
-      });
-      if (!response.ok) setError(response.error.message);
-    } catch {
-      setError("Helm could not change the current claim.");
-    } finally {
-      setPending(false);
-      setClaimPendingDisposition(null);
-    }
-  }
-
-  function addTag() {
-    const colors = ["#2563eb", "#16a34a", "#c2410c", "#7c3aed", "#0f766e"];
-    setTagInputs((current) => [
-      ...current,
-      {
-        draftId: crypto.randomUUID(),
-        name: "",
-        description: "",
-        color: colors[current.length % colors.length] ?? "#2563eb",
-        exclusiveGroup: null,
-      },
-    ]);
-  }
-
-  function updateTagName(index: number, name: string) {
-    setTagInputs((current) =>
-      current.map((tag, tagIndex) => {
-        if (tagIndex !== index) return tag;
-        const known = knownTags.get(name.trim());
-        return known
-          ? {
-              draftId: tag.draftId,
-              name: known.name,
-              description: known.description,
-              color: known.color,
-              exclusiveGroup: known.exclusiveGroup,
-            }
-          : { ...tag, name };
-      }),
-    );
-  }
-
-  function updateTag(index: number, update: Partial<TagInput>) {
-    setTagInputs((current) =>
-      current.map((tag, tagIndex) => (tagIndex === index ? { ...tag, ...update } : tag)),
-    );
-  }
-
+function TaskDetailReadingSummary({ task }: { task: Task }) {
   return (
-    <div {...stylex.props(styles.detailStack)}>
-      <form onSubmit={prepare} {...stylex.props(styles.form)} aria-label="Prepare task">
-        <div {...stylex.props(styles.detailHeader)}>
-          <div>
-            <p {...stylex.props(styles.eyebrow)}>Task #{task.sequence}</p>
-            <p {...stylex.props(styles.version)}>Version {task.version}</p>
-          </div>
-          <span {...stylex.props(styles.headerActions)}>
-            <Button
-              type="button"
-              variant="quiet"
-              disabled={pending || executionReadOnly}
-              onClick={() => void archive()}
-            >
-              <Archive size={15} aria-hidden="true" /> Archive
-            </Button>
-          </span>
+    <article aria-label={`Task #${task.sequence} summary`} {...stylex.props(styles.readingSummary)}>
+      <header {...stylex.props(styles.readingSummaryHeader)}>
+        <div>
+          <p {...stylex.props(styles.eyebrow)}>Task #{task.sequence}</p>
+          <h2 {...stylex.props(styles.readingSummaryTitle)}>{task.title}</h2>
         </div>
-        {task.claim ? (
-          <section
-            aria-label="Current claim"
-            aria-live="polite"
-            aria-busy={claimPendingDisposition !== null}
-            {...stylex.props(styles.claimCard)}
-          >
-            <ClaimLeaseSummary claim={task.claim} />
-            <fieldset disabled={pending} {...stylex.props(styles.claimActions)}>
-              <legend {...stylex.props(styles.fieldLabel)}>Change current claim</legend>
-              <label htmlFor={`claim-reason-${task.id}`} {...stylex.props(styles.claimReasonLabel)}>
-                Reason
-              </label>
-              <textarea
-                id={`claim-reason-${task.id}`}
-                value={claimReason}
-                onChange={(event) => setClaimReason(event.target.value)}
-                aria-describedby={`claim-warning-${task.id}`}
-                rows={2}
-                maxLength={1_000}
-                required
-                {...stylex.props(styles.textarea)}
-              />
-              <p id={`claim-warning-${task.id}`} {...stylex.props(styles.hint)}>
-                These claim controls return the task to Ready. Cancelling the task itself uses the
-                separate lifecycle action above.
-              </p>
-              <div {...stylex.props(styles.claimActionButtons)}>
-                <Button
-                  type="button"
-                  variant="quiet"
-                  disabled={pending || claimReason.trim().length === 0}
-                  onClick={() => void invalidateClaim("cancelled")}
-                >
-                  {claimPendingDisposition === "cancelled" ? "Stopping claim…" : "Stop claim"}
-                </Button>
-                <Button
-                  type="button"
-                  disabled={pending || claimReason.trim().length === 0}
-                  onClick={() => void invalidateClaim("reassigned")}
-                >
-                  {claimPendingDisposition === "reassigned"
-                    ? "Making available…"
-                    : "Make available for reassignment"}
-                </Button>
-              </div>
-            </fieldset>
-          </section>
-        ) : null}
-        <section {...stylex.props(styles.relations)} aria-label="Task relations">
-          <div>
-            <p {...stylex.props(styles.fieldLabel)}>Hierarchy</p>
-            <p {...stylex.props(styles.hint)}>
-              Parent: {parentTask ? `#${parentTask.sequence} ${parentTask.title}` : "None"}
-            </p>
-            <p {...stylex.props(styles.hint)}>
-              Children:{" "}
-              {childTasks.length > 0
-                ? childTasks.map((child) => `#${child.sequence} ${child.title}`).join(", ")
-                : "None"}
-            </p>
-          </div>
-          <div>
-            <p {...stylex.props(styles.fieldLabel)}>Upstream</p>
-            <RelationList
-              empty="No upstream relations"
-              relations={task.upstreamRelations.map(
-                (relation) =>
-                  `${relation.type} from #${relation.sourceSequence} ${relation.sourceTitle}`,
-              )}
-            />
-          </div>
-          <div>
-            <p {...stylex.props(styles.fieldLabel)}>Downstream</p>
-            <RelationList
-              empty="No downstream relations"
-              relations={task.downstreamRelations.map(
-                (relation) =>
-                  `${relation.type} to #${relation.targetSequence} ${relation.targetTitle}`,
-              )}
-            />
-          </div>
+        <span {...stylex.props(styles.readingSummaryMeta)}>
+          {task.priority} · {taskLifecycleLabel(task.lifecycle)}
+        </span>
+      </header>
+      <section aria-labelledby={`task-reading-description-${task.id}`}>
+        <h3 id={`task-reading-description-${task.id}`} {...stylex.props(styles.readingFieldTitle)}>
+          Description
+        </h3>
+        <p aria-label="Task description" {...stylex.props(styles.readingText)}>
+          {task.descriptionText || "No description has been added."}
+        </p>
+      </section>
+      {task.expectedOutcome ? (
+        <section>
+          <h3 {...stylex.props(styles.readingFieldTitle)}>Expected outcome</h3>
+          <p {...stylex.props(styles.readingText)}>{task.expectedOutcome}</p>
         </section>
-        {task.reviewPolicy ? (
-          <section aria-label="Effective review policy" {...stylex.props(styles.policyCard)}>
-            <div>
-              <p {...stylex.props(styles.fieldLabel)}>Effective review policy</p>
-              <strong>
-                {task.reviewPolicy.mode === "required" ? "Human review" : "Direct completion"}
-              </strong>
-            </div>
-            <p {...stylex.props(styles.hint)}>{task.reviewPolicy.explanation}</p>
-          </section>
-        ) : null}
-        <fieldset
-          disabled={executionReadOnly}
-          {...stylex.props(styles.taskActions, executionReadOnly && styles.readOnlyGroup)}
-        >
-          <legend {...stylex.props(styles.srOnly)}>Task structure actions</legend>
-          <div {...stylex.props(styles.inlineForm)}>
-            <input
-              aria-label="Child task title"
-              value={childTitle}
-              onChange={(event) => setChildTitle(event.target.value)}
-              placeholder="Child task title"
-              maxLength={300}
-              {...stylex.props(styles.input)}
-            />
-            <Button
-              type="button"
-              disabled={pending || childTitle.trim().length === 0}
-              onClick={() => void createChild()}
-            >
-              <GitBranch size={16} aria-hidden="true" />
-              Add child
-            </Button>
-          </div>
-          <div {...stylex.props(styles.inlineForm)}>
-            <select
-              aria-label="Relation type"
-              value={relationType}
-              onChange={(event) => setRelationType(event.target.value)}
-              {...stylex.props(styles.select, styles.fullWidth)}
-            >
-              <option value="blocks">Blocks</option>
-              <option value="related_to">Related to</option>
-              <option value="duplicates">Duplicates</option>
-              <option value="discovered_from">Discovered from</option>
-            </select>
-            <select
-              aria-label="Relation target"
-              value={relationTargetId}
-              onChange={(event) => setRelationTargetId(event.target.value)}
-              {...stylex.props(styles.select, styles.fullWidth)}
-            >
-              <option value="">Select target</option>
-              {tasks
-                .filter((candidate) => candidate.id !== task.id)
-                .map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>
-                    #{candidate.sequence} {candidate.title}
-                  </option>
-                ))}
-            </select>
-            <Button
-              type="button"
-              disabled={pending || !relationTargetId}
-              onClick={() => void createRelation()}
-            >
-              <Link2 size={16} aria-hidden="true" />
-              Add relation
-            </Button>
-          </div>
-        </fieldset>
-        <fieldset
-          disabled={!editable}
-          {...stylex.props(styles.editableFields, !editable && styles.readOnlyGroup)}
-        >
-          <legend {...stylex.props(styles.srOnly)}>Editable task details</legend>
-          <Field label="Title" required>
-            <input
-              aria-label="Title"
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              maxLength={300}
-              required
-              {...stylex.props(styles.input)}
-            />
-          </Field>
-          <Field label="Description" hint="Rich text is saved as a versioned TipTap document.">
-            <RichTextEditor value={description} onChange={setDescription} editable={editable} />
-          </Field>
-          <div {...stylex.props(styles.planningGrid)}>
-            <Field label="Priority">
-              <select
-                aria-label="Priority"
-                value={priority}
-                onChange={(event) => setPriority(taskPrioritySchema.parse(event.target.value))}
-                {...stylex.props(styles.select, styles.fullWidth)}
-              >
-                <option value="urgent">Urgent</option>
-                <option value="high">High</option>
-                <option value="normal">Normal</option>
-                <option value="low">Low</option>
-              </select>
-            </Field>
-            <Field label="Position">
-              <input
-                aria-label="Position"
-                type="number"
-                min={0}
-                value={position}
-                onChange={(event) => setPosition(event.target.value)}
-                {...stylex.props(styles.input)}
-              />
-            </Field>
-            <Field label="Start date">
-              <input
-                aria-label="Start date"
-                type="date"
-                value={notBefore}
-                onChange={(event) => setNotBefore(event.target.value)}
-                {...stylex.props(styles.input)}
-              />
-            </Field>
-            <Field label="Due date">
-              <input
-                aria-label="Due date"
-                type="date"
-                value={dueAt}
-                onChange={(event) => setDueAt(event.target.value)}
-                {...stylex.props(styles.input)}
-              />
-            </Field>
-            <Field label="Size">
-              <select
-                aria-label="Size"
-                value={size}
-                onChange={(event) => setSize(event.target.value)}
-                {...stylex.props(styles.select, styles.fullWidth)}
-              >
-                <option value="">Unestimated</option>
-                <option value="xs">XS</option>
-                <option value="s">S</option>
-                <option value="m">M</option>
-                <option value="l">L</option>
-                <option value="xl">XL</option>
-              </select>
-            </Field>
-            <Field
-              label="Review policy"
-              hint="Task overrides are applied as a separate, reason-bearing audit command."
-            >
-              <div {...stylex.props(styles.reviewPolicyCommand)}>
-                <select
-                  aria-label="Task review policy override"
-                  value={reviewModeOverride ?? ""}
-                  onChange={(event) =>
-                    setReviewModeOverride(
-                      event.target.value === ""
-                        ? null
-                        : event.target.value === "required"
-                          ? "required"
-                          : "direct",
-                    )
-                  }
-                  {...stylex.props(styles.select, styles.fullWidth)}
-                >
-                  <option value="">Inherit project or tags</option>
-                  <option value="required">Require human review</option>
-                  <option value="direct">Complete directly</option>
-                </select>
-                <input
-                  aria-label="Review policy change reason"
-                  value={reviewModeReason}
-                  onChange={(event) => setReviewModeReason(event.target.value)}
-                  placeholder="Why should this task differ?"
-                  maxLength={1_000}
-                  disabled={reviewModeOverride === task.reviewModeOverride}
-                  {...stylex.props(styles.input)}
-                />
-                <Button
-                  type="button"
-                  variant="quiet"
-                  disabled={
-                    pending ||
-                    reviewModeOverride === task.reviewModeOverride ||
-                    reviewModeReason.trim().length === 0
-                  }
-                  onClick={() => void changeReviewModeOverride()}
-                >
-                  Apply review policy
-                </Button>
-              </div>
-            </Field>
-          </div>
-          {task.customFields.length > 0 ? (
-            <section aria-label="Custom fields" {...stylex.props(styles.customFields)}>
-              <div>
-                <p {...stylex.props(styles.fieldLabel)}>Custom fields</p>
-                <p {...stylex.props(styles.hint)}>
-                  Project-defined typed values are shared with filters, bulk actions, and agents.
-                </p>
-              </div>
-              <div {...stylex.props(styles.planningGrid)}>
-                {task.customFields.map((assignment) => (
-                  <CustomFieldControl
-                    key={assignment.definition.id}
-                    assignment={assignment}
-                    explicitValue={customFieldValues[assignment.definition.id] ?? null}
-                    disabled={!editable || assignment.definition.retiredAt !== null}
-                    onChange={(value) =>
-                      setCustomFieldValues((current) => ({
-                        ...current,
-                        [assignment.definition.id]: value,
-                      }))
-                    }
-                  />
-                ))}
-              </div>
-            </section>
-          ) : null}
-          <Field
-            label="Tags"
-            hint="Tag definitions are shared across the project. Existing metadata stays canonical."
-          >
-            <fieldset {...stylex.props(styles.tagEditor)}>
-              <legend {...stylex.props(styles.srOnly)}>Tags</legend>
-              {tagInputs.map((tag, index) => {
-                const known = knownTags.has(tag.name);
-                return (
-                  <div key={tag.draftId} {...stylex.props(styles.tagRow)}>
-                    <input
-                      aria-label={`Tag ${index + 1} name`}
-                      value={tag.name}
-                      onChange={(event) => updateTagName(index, event.target.value)}
-                      placeholder="Tag name"
-                      maxLength={80}
-                      {...stylex.props(styles.input)}
-                    />
-                    <input
-                      aria-label={`Tag ${index + 1} description`}
-                      value={tag.description}
-                      onChange={(event) => updateTag(index, { description: event.target.value })}
-                      placeholder="Description"
-                      maxLength={1_000}
-                      disabled={known}
-                      {...stylex.props(styles.input)}
-                    />
-                    <input
-                      aria-label={`Tag ${index + 1} color`}
-                      type="color"
-                      value={tag.color}
-                      onChange={(event) => updateTag(index, { color: event.target.value })}
-                      disabled={known}
-                      {...stylex.props(styles.colorInput)}
-                    />
-                    <input
-                      aria-label={`Tag ${index + 1} exclusive group`}
-                      value={tag.exclusiveGroup ?? ""}
-                      onChange={(event) =>
-                        updateTag(index, { exclusiveGroup: event.target.value || null })
-                      }
-                      placeholder="Exclusive group"
-                      maxLength={80}
-                      disabled={known}
-                      {...stylex.props(styles.input)}
-                    />
-                    <Button
-                      type="button"
-                      variant="quiet"
-                      aria-label={`Remove tag ${tag.name || index + 1}`}
-                      disabled={pending}
-                      onClick={() =>
-                        setTagInputs((current) =>
-                          current.filter((_, tagIndex) => tagIndex !== index),
-                        )
-                      }
-                    >
-                      <X size={15} aria-hidden="true" />
-                    </Button>
-                  </div>
-                );
-              })}
-              <Button type="button" variant="quiet" disabled={pending} onClick={addTag}>
-                <Plus size={15} aria-hidden="true" /> Add tag
-              </Button>
-            </fieldset>
-          </Field>
-          <Field label="Required capabilities">
-            <textarea
-              aria-label="Required capabilities"
-              value={requiredCapabilities}
-              onChange={(event) => setRequiredCapabilities(event.target.value)}
-              rows={3}
-              {...stylex.props(styles.textarea)}
-            />
-          </Field>
-          <Field
-            label="Referenced paths"
-            hint="One normalized repository-relative file or directory path per line."
-          >
-            <textarea
-              aria-label="Referenced paths"
-              value={referencedPaths}
-              onChange={(event) => setReferencedPaths(event.target.value)}
-              rows={3}
-              placeholder="src/domain/tasks.ts"
-              {...stylex.props(styles.textarea)}
-            />
-          </Field>
-          {task.eligibility ? (
-            <p {...stylex.props(styles.hint)}>
-              {task.eligibility.status}: {task.eligibility.reasons.join(" ")}{" "}
-              {task.eligibility.orderingExplanation}
-            </p>
-          ) : null}
-          <Field label="Expected outcome" required>
-            <textarea
-              aria-label="Expected outcome"
-              value={expectedOutcome}
-              onChange={(event) => setExpectedOutcome(event.target.value)}
-              rows={3}
-              required
-              {...stylex.props(styles.textarea)}
-            />
-          </Field>
-          <Field label="Acceptance criteria" required>
-            <textarea
-              aria-label="Acceptance criteria"
-              value={acceptanceCriteria}
-              onChange={(event) => setAcceptanceCriteria(event.target.value)}
-              rows={4}
-              required
-              {...stylex.props(styles.textarea)}
-            />
-          </Field>
-          <Field label="Agent context" hint="Paths, constraints, and execution-specific guidance.">
-            <textarea
-              aria-label="Agent context"
-              value={agentContext}
-              onChange={(event) => setAgentContext(event.target.value)}
-              rows={3}
-              {...stylex.props(styles.textarea)}
-            />
-          </Field>
-          <Field label="Checklist" hint="One required verification step per line." required>
-            <textarea
-              aria-label="Checklist"
-              value={checklist}
-              onChange={(event) => setChecklist(event.target.value)}
-              rows={4}
-              required
-              {...stylex.props(styles.textarea)}
-            />
-          </Field>
-        </fieldset>
-        {error ? (
-          <p role="alert" {...stylex.props(styles.error)}>
-            {error}
-          </p>
-        ) : null}
-        <div {...stylex.props(styles.formFooter)}>
-          <p>Ready requires an outcome, acceptance criteria, and at least one checklist item.</p>
-          <span {...stylex.props(styles.footerActions)}>
-            {editable ? (
-              <>
-                <Button
-                  type="button"
-                  variant="quiet"
-                  disabled={pending}
-                  onClick={() => void updatePlanning()}
-                >
-                  <SlidersHorizontal size={16} aria-hidden="true" />
-                  Save planning
-                </Button>
-                <Button type="submit" disabled={pending}>
-                  <CheckCircle2 size={16} aria-hidden="true" />
-                  {pending
-                    ? "Saving…"
-                    : task.lifecycle === "ready"
-                      ? "Save preparation"
-                      : "Move to ready"}
-                </Button>
-              </>
-            ) : (
-              <span {...stylex.props(styles.hint)}>{readOnlyExplanation(task.lifecycle)}</span>
-            )}
-          </span>
-        </div>
-      </form>
-      <TaskCollaboration
-        task={task}
-        entries={activityEntries}
-        blockers={manualBlockers}
-        onCreateEntry={onCreateActivityEntry}
-        onWithdrawEntry={onWithdrawActivityEntry}
-        onCreateBlocker={onCreateManualBlocker}
-        onResolveBlocker={onResolveManualBlocker}
-      />
-    </div>
+      ) : null}
+      {task.acceptanceCriteria ? (
+        <section>
+          <h3 {...stylex.props(styles.readingFieldTitle)}>Acceptance criteria</h3>
+          <p {...stylex.props(styles.readingText)}>{task.acceptanceCriteria}</p>
+        </section>
+      ) : null}
+      {task.checklist.length > 0 ? (
+        <section>
+          <h3 {...stylex.props(styles.readingFieldTitle)}>Checklist</h3>
+          <ul {...stylex.props(styles.readingChecklist)}>
+            {task.checklist.map((item) => (
+              <li key={item.id}>{item.text}</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+    </article>
   );
 }
 
-function parseLines(value: string) {
-  return value
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+type LazyWorkspaceSurface =
+  | "activity"
+  | "appearance"
+  | "bulk"
+  | "dashboard"
+  | "notifications"
+  | "reviewPolicy"
+  | "taskDetail";
+
+const lazyWorkspaceLabels = {
+  activity: "Loading project activity",
+  appearance: "Loading appearance control",
+  bulk: "Loading bulk controls",
+  dashboard: "Loading dashboard",
+  notifications: "Loading notifications",
+  reviewPolicy: "Loading review policy",
+  taskDetail: "Loading task details",
+} as const satisfies Record<LazyWorkspaceSurface, string>;
+
+function LazyWorkspaceFallback({ surface }: { surface: LazyWorkspaceSurface }) {
+  const label = lazyWorkspaceLabels[surface];
+  return (
+    <output
+      aria-live="polite"
+      aria-label={label}
+      {...stylex.props(
+        styles.lazyFallback,
+        surface === "activity" && styles.activityFallback,
+        surface === "appearance" && styles.utilityFallback,
+        surface === "bulk" && styles.bulkFallback,
+        surface === "dashboard" && styles.dashboardFallback,
+        surface === "notifications" && styles.utilityFallback,
+        surface === "reviewPolicy" && styles.reviewPolicyFallback,
+        surface === "taskDetail" && styles.taskDetailFallback,
+      )}
+    >
+      {label}…
+    </output>
+  );
+}
+
+function LazyWorkspaceFailure({
+  surface,
+  onRetry,
+}: {
+  surface: LazyWorkspaceSurface;
+  onRetry: () => void;
+}) {
+  const label = lazyWorkspaceLabels[surface].replace("Loading ", "");
+  return (
+    <section
+      role="alert"
+      aria-label={`${label} unavailable`}
+      {...stylex.props(
+        styles.lazyFallback,
+        styles.lazyFailure,
+        surface === "activity" && styles.activityFallback,
+        surface === "appearance" && styles.utilityFallback,
+        surface === "bulk" && styles.bulkFallback,
+        surface === "dashboard" && styles.dashboardFallback,
+        surface === "notifications" && styles.utilityFallback,
+        surface === "reviewPolicy" && styles.reviewPolicyFallback,
+        surface === "taskDetail" && styles.taskDetailFallback,
+      )}
+    >
+      <span>{label} could not load.</span>
+      <button type="button" onClick={onRetry} {...stylex.props(styles.button, styles.buttonQuiet)}>
+        Retry
+      </button>
+    </section>
+  );
 }
 
 function taskLifecycleLabel(lifecycle: TaskLifecycle) {
   return lifecycle === "in_progress" ? "in progress" : lifecycle;
-}
-
-function readOnlyExplanation(lifecycle: TaskLifecycle) {
-  switch (lifecycle) {
-    case "in_progress":
-      return "Agent execution is active. Task changes are locked while the claim is held.";
-    case "review":
-      return "This task is awaiting review. Task changes are locked until a review action is taken.";
-    case "done":
-      return "Reopen this task before editing it.";
-    case "cancelled":
-      return "Cancelled tasks are read-only.";
-    case "backlog":
-    case "ready":
-      return "";
-  }
-  return "";
 }
 
 function formatClaimExpiry(value: string) {
@@ -1413,206 +885,29 @@ function ClaimLeaseSummary({ claim, compact = false }: { claim: TaskClaim; compa
   );
 }
 
-function customFieldValueText(value: CustomFieldValue | null) {
-  if (value === null) return "unset";
-  if (value.type === "boolean") return value.value ? "yes" : "no";
-  return String(value.value);
-}
-
-function customFieldHint(assignment: TaskCustomFieldAssignment) {
-  const details = [assignment.definition.display.description];
-  if (assignment.definition.retiredAt) {
-    details.push("Retired; the historical value is read-only.");
-  } else if (assignment.definition.defaultValue) {
-    details.push(`Default: ${customFieldValueText(assignment.definition.defaultValue)}.`);
-  } else {
-    details.push("No project default.");
-  }
-  return details.filter(Boolean).join(" ");
-}
-
-function CustomFieldControl({
-  assignment,
-  explicitValue,
-  disabled,
-  onChange,
-}: {
-  assignment: TaskCustomFieldAssignment;
-  explicitValue: CustomFieldValue | null;
-  disabled: boolean;
-  onChange: (value: CustomFieldValue | null) => void;
-}) {
-  const definition: CustomFieldDefinition = assignment.definition;
-  const label = definition.display.label;
-  const common = {
-    disabled,
-    "aria-label": `Custom field: ${label}`,
-  } as const;
-  let control: ReactNode;
-
-  switch (definition.type) {
-    case "text":
-      control = (
-        <input
-          {...common}
-          value={explicitValue?.type === "text" ? explicitValue.value : ""}
-          placeholder={
-            definition.defaultValue?.type === "text" ? definition.defaultValue.value : undefined
-          }
-          minLength={definition.validation.minLength}
-          maxLength={definition.validation.maxLength}
-          onChange={(event) => onChange({ type: "text", value: event.target.value })}
-          {...stylex.props(styles.input)}
-        />
-      );
-      break;
-    case "number":
-      control = (
-        <input
-          {...common}
-          type="number"
-          value={explicitValue?.type === "number" ? explicitValue.value : ""}
-          placeholder={
-            definition.defaultValue?.type === "number"
-              ? String(definition.defaultValue.value)
-              : undefined
-          }
-          min={definition.validation.min ?? undefined}
-          max={definition.validation.max ?? undefined}
-          step={definition.validation.integer ? 1 : "any"}
-          onChange={(event) =>
-            onChange(
-              event.target.value === ""
-                ? null
-                : { type: "number", value: Number(event.target.value) },
-            )
-          }
-          {...stylex.props(styles.input)}
-        />
-      );
-      break;
-    case "boolean":
-      control = (
-        <select
-          {...common}
-          value={explicitValue?.type === "boolean" ? String(explicitValue.value) : ""}
-          onChange={(event) =>
-            onChange(
-              event.target.value === ""
-                ? null
-                : { type: "boolean", value: event.target.value === "true" },
-            )
-          }
-          {...stylex.props(styles.select, styles.fullWidth)}
-        >
-          <option value="">Use project default</option>
-          <option value="true">Yes</option>
-          <option value="false">No</option>
-        </select>
-      );
-      break;
-    case "date":
-      control = (
-        <input
-          {...common}
-          type="date"
-          value={explicitValue?.type === "date" ? explicitValue.value : ""}
-          min={definition.validation.min ?? undefined}
-          max={definition.validation.max ?? undefined}
-          onChange={(event) =>
-            onChange(event.target.value === "" ? null : { type: "date", value: event.target.value })
-          }
-          {...stylex.props(styles.input)}
-        />
-      );
-      break;
-    case "single_select":
-      control = (
-        <select
-          {...common}
-          value={explicitValue?.type === "single_select" ? explicitValue.value : ""}
-          onChange={(event) =>
-            onChange(
-              event.target.value === ""
-                ? null
-                : { type: "single_select", value: event.target.value },
-            )
-          }
-          {...stylex.props(styles.select, styles.fullWidth)}
-        >
-          <option value="">Use project default</option>
-          {definition.validation.options.map((option) => (
-            <option key={option.id} value={option.id}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      );
-      break;
-  }
-
-  return (
-    <Field
-      label={`${label}${definition.retiredAt ? " (retired)" : ""}`}
-      hint={customFieldHint(assignment)}
-    >
-      {definition.retiredAt ? (
-        <output aria-label={`Custom field: ${label}`} {...stylex.props(styles.readOnlyValue)}>
-          {customFieldValueText(assignment.value)}
-        </output>
-      ) : (
-        <div {...stylex.props(styles.customFieldInput)}>
-          {control}
-          <Button
-            type="button"
-            variant="quiet"
-            disabled={disabled || explicitValue === null}
-            onClick={() => onChange(null)}
-          >
-            Use default
-          </Button>
-        </div>
-      )}
-    </Field>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  required = false,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <div {...stylex.props(styles.field)}>
-      <span {...stylex.props(styles.fieldLabel)}>
-        {label} {required ? <span {...stylex.props(styles.required)}>Required</span> : null}
-      </span>
-      {children}
-      {hint ? <span {...stylex.props(styles.hint)}>{hint}</span> : null}
-    </div>
-  );
-}
-
-function RelationList({ relations, empty }: { relations: readonly string[]; empty: string }) {
-  return relations.length > 0 ? (
-    <ul {...stylex.props(styles.relationList)}>
-      {relations.map((relation) => (
-        <li key={relation}>{relation}</li>
-      ))}
-    </ul>
-  ) : (
-    <p {...stylex.props(styles.hint)}>{empty}</p>
-  );
-}
-
 const styles = stylex.create({
   page: { minHeight: "100vh" },
+  lazyFallback: {
+    alignItems: "center",
+    backgroundColor: tokens.surfaceMuted,
+    borderColor: tokens.border,
+    borderRadius: tokens.radius2,
+    borderStyle: "solid",
+    borderWidth: 1,
+    color: tokens.foregroundMuted,
+    display: "flex",
+    fontSize: 13,
+    justifyContent: "center",
+    padding: tokens.space4,
+    width: "100%",
+  },
+  lazyFailure: { flexDirection: "column", gap: tokens.space3 },
+  activityFallback: { minHeight: 420 },
+  bulkFallback: { minHeight: 44 },
+  dashboardFallback: { minHeight: 520 },
+  reviewPolicyFallback: { minHeight: 84 },
+  taskDetailFallback: { minHeight: 160 },
+  utilityFallback: { minHeight: 36, minWidth: 112, padding: tokens.space2, width: "auto" },
   header: {
     alignItems: "center",
     borderBlockEndColor: tokens.border,
@@ -1662,6 +957,79 @@ const styles = stylex.create({
     display: "flex",
     gap: tokens.space3,
   },
+  button: {
+    alignItems: "center",
+    backgroundColor: tokens.accent,
+    borderColor: tokens.accent,
+    borderRadius: tokens.radius2,
+    borderStyle: "solid",
+    borderWidth: 1,
+    color: tokens.background,
+    cursor: "pointer",
+    display: "inline-flex",
+    font: "inherit",
+    fontSize: 14,
+    fontWeight: 650,
+    gap: tokens.space2,
+    justifyContent: "center",
+    minHeight: 36,
+    paddingInline: tokens.space4,
+    ":disabled": { cursor: "not-allowed", opacity: 0.45 },
+    ":focus-visible": {
+      outlineColor: tokens.accent,
+      outlineOffset: 2,
+      outlineStyle: "solid",
+      outlineWidth: 2,
+    },
+  },
+  buttonQuiet: {
+    backgroundColor: tokens.surface,
+    borderColor: tokens.border,
+    color: tokens.foreground,
+    ":hover": { borderColor: tokens.accent },
+  },
+  iconButton: { paddingInline: tokens.space3 },
+  intentButton: {
+    backgroundColor: tokens.surface,
+    borderColor: tokens.border,
+    borderRadius: tokens.radius2,
+    borderStyle: "solid",
+    borderWidth: 1,
+    color: tokens.foreground,
+    cursor: "pointer",
+    font: "inherit",
+    fontSize: 13,
+    fontWeight: 650,
+    minHeight: 40,
+    paddingInline: tokens.space3,
+    ":hover": { borderColor: tokens.accent },
+    ":focus-visible": {
+      outlineColor: tokens.accent,
+      outlineOffset: 2,
+      outlineStyle: "solid",
+      outlineWidth: 2,
+    },
+  },
+  utilityButton: {
+    backgroundColor: tokens.surface,
+    borderColor: tokens.border,
+    borderRadius: tokens.radius2,
+    borderStyle: "solid",
+    borderWidth: 1,
+    color: tokens.foreground,
+    cursor: "pointer",
+    font: "inherit",
+    fontSize: 12,
+    minHeight: 36,
+    paddingInline: tokens.space3,
+    ":hover": { borderColor: tokens.accent },
+    ":focus-visible": {
+      outlineColor: tokens.accent,
+      outlineOffset: 2,
+      outlineStyle: "solid",
+      outlineWidth: 2,
+    },
+  },
   viewButton: {
     backgroundColor: "transparent",
     borderColor: "transparent",
@@ -1702,14 +1070,6 @@ const styles = stylex.create({
     height: 7,
     width: 7,
   },
-  select: {
-    backgroundColor: tokens.surface,
-    borderColor: tokens.border,
-    borderRadius: 6,
-    color: tokens.foreground,
-    minHeight: 32,
-  },
-  fullWidth: { width: "100%" },
   workspace: {
     display: "grid",
     gridTemplateColumns: "minmax(300px, 380px) minmax(0, 1fr)",
@@ -1779,10 +1139,11 @@ const styles = stylex.create({
     color: tokens.foreground,
     display: "grid",
     gap: tokens.space2,
-    gridTemplateColumns: "18px minmax(0, 1fr)",
+    gridTemplateColumns: "minmax(0, 1fr)",
     minHeight: 58,
     paddingInlineStart: tokens.space2,
   },
+  taskRowBulkMode: { gridTemplateColumns: "18px minmax(0, 1fr)" },
   taskRowBulkSelected: { backgroundColor: tokens.surfaceMuted, borderColor: tokens.border },
   taskRowSelected: { backgroundColor: tokens.surface, borderColor: tokens.accent },
   taskDetailButton: {
@@ -1822,6 +1183,19 @@ const styles = stylex.create({
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
+  },
+  bulkCheckbox: {
+    accentColor: tokens.accent,
+    cursor: "pointer",
+    height: 18,
+    margin: 0,
+    width: 18,
+    ":focus-visible": {
+      outlineColor: tokens.accent,
+      outlineOffset: 2,
+      outlineStyle: "solid",
+      outlineWidth: 2,
+    },
   },
   claimSummary: {
     alignItems: "center",
@@ -1882,193 +1256,31 @@ const styles = stylex.create({
     minHeight: 420,
     textAlign: "center",
   },
-  form: { display: "grid", gap: tokens.space5, margin: "0 auto", maxWidth: 760 },
-  claimCard: {
-    backgroundColor: tokens.surfaceMuted,
-    borderColor: tokens.border,
-    borderRadius: tokens.radius2,
-    borderStyle: "solid",
-    borderWidth: 1,
-    display: "grid",
-    gap: tokens.space4,
-    padding: tokens.space4,
-  },
-  claimActions: {
-    borderBlockStartColor: tokens.border,
-    borderBlockStartStyle: "solid",
-    borderBlockStartWidth: 1,
-    borderWidth: 0,
-    display: "grid",
-    gap: tokens.space2,
-    margin: 0,
-    minWidth: 0,
-    padding: 0,
-    paddingBlockStart: tokens.space3,
-  },
-  claimReasonLabel: { fontSize: 12, fontWeight: 650 },
-  claimActionButtons: {
-    display: "flex",
-    flexWrap: "wrap",
-    gap: tokens.space2,
-  },
-  taskActions: {
-    borderWidth: 0,
-    display: "grid",
-    gap: tokens.space3,
-    margin: 0,
-    minWidth: 0,
-    padding: 0,
-  },
-  readOnlyGroup: { opacity: 0.68 },
-  editableFields: {
-    borderWidth: 0,
-    display: "grid",
-    gap: tokens.space4,
-    minWidth: 0,
-    padding: 0,
-  },
-  detailHeader: {
-    alignItems: "center",
-    borderBlockEndColor: tokens.border,
-    borderBlockEndStyle: "solid",
-    borderBlockEndWidth: 1,
-    display: "flex",
-    justifyContent: "space-between",
-    paddingBlockEnd: tokens.space4,
-  },
-  headerActions: { display: "flex", flexWrap: "wrap", gap: tokens.space2, justifyContent: "end" },
-  version: { color: tokens.foregroundMuted, fontSize: 12, marginBlock: tokens.space1 },
-  relations: {
-    borderBlockEndColor: tokens.border,
-    borderBlockEndStyle: "solid",
-    borderBlockEndWidth: 1,
-    display: "grid",
-    gap: tokens.space3,
-    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-    paddingBlockEnd: tokens.space4,
-    "@media (max-width: 820px)": { gridTemplateColumns: "1fr" },
-  },
-  policyCard: {
-    alignItems: "start",
-    backgroundColor: tokens.surfaceMuted,
-    borderColor: tokens.border,
-    borderRadius: tokens.radius2,
-    borderStyle: "solid",
-    borderWidth: 1,
-    display: "grid",
-    gap: tokens.space2,
-    gridTemplateColumns: "minmax(150px, auto) minmax(0, 1fr)",
-    padding: tokens.space3,
-    "@media (max-width: 560px)": { gridTemplateColumns: "1fr" },
-  },
-  relationList: {
-    color: tokens.foregroundMuted,
-    display: "grid",
-    fontSize: 12,
-    gap: tokens.space1,
-    margin: 0,
-    paddingInlineStart: tokens.space4,
-  },
-  inlineForm: {
-    alignItems: "center",
-    display: "grid",
-    gap: tokens.space2,
-    gridTemplateColumns: "minmax(0, 1fr) auto",
-    "@media (max-width: 640px)": { gridTemplateColumns: "1fr" },
-  },
-  field: { display: "grid", gap: tokens.space2 },
-  fieldLabel: { fontSize: 13, fontWeight: 700 },
-  planningGrid: {
-    display: "grid",
-    gap: tokens.space3,
-    gridTemplateColumns: "repeat(5, minmax(112px, 1fr))",
-    "@media (max-width: 980px)": { gridTemplateColumns: "repeat(2, minmax(0, 1fr))" },
-    "@media (max-width: 560px)": { gridTemplateColumns: "1fr" },
-  },
-  customFields: {
-    borderBlockColor: tokens.border,
-    borderBlockStyle: "solid",
-    borderBlockWidth: 1,
-    display: "grid",
-    gap: tokens.space3,
-    paddingBlock: tokens.space4,
-  },
-  customFieldInput: {
-    alignItems: "center",
-    display: "grid",
-    gap: tokens.space2,
-    gridTemplateColumns: "minmax(0, 1fr) auto",
-  },
-  reviewPolicyCommand: { display: "grid", gap: tokens.space2 },
-  readOnlyValue: {
-    backgroundColor: tokens.surfaceMuted,
-    borderColor: tokens.border,
-    borderRadius: tokens.radius2,
-    borderStyle: "solid",
-    borderWidth: 1,
-    color: tokens.foregroundMuted,
-    minHeight: 40,
-    padding: tokens.space3,
-  },
-  tagEditor: {
-    borderWidth: 0,
-    display: "grid",
-    gap: tokens.space2,
-    margin: 0,
-    minWidth: 0,
-    padding: 0,
-  },
-  tagRow: {
-    alignItems: "center",
-    display: "grid",
-    gap: tokens.space2,
-    gridTemplateColumns: "minmax(120px, 0.8fr) minmax(160px, 1.4fr) 44px minmax(120px, 0.8fr) auto",
-    "@media (max-width: 900px)": { gridTemplateColumns: "1fr 1fr auto" },
-    "@media (max-width: 560px)": { gridTemplateColumns: "1fr" },
-  },
-  colorInput: {
+  readingSummary: {
     backgroundColor: tokens.background,
     borderColor: tokens.border,
-    borderRadius: tokens.radius2,
+    borderRadius: tokens.radius3,
     borderStyle: "solid",
     borderWidth: 1,
-    height: 40,
-    padding: 4,
-    width: 44,
+    display: "grid",
+    gap: tokens.space4,
+    padding: tokens.space5,
   },
-  required: {
+  readingSummaryHeader: {
+    alignItems: "start",
+    display: "flex",
+    gap: tokens.space4,
+    justifyContent: "space-between",
+  },
+  readingSummaryTitle: { fontSize: 26, letterSpacing: "-0.035em", marginBlock: tokens.space1 },
+  readingSummaryMeta: {
     color: tokens.foregroundMuted,
-    fontSize: 10,
-    fontWeight: 600,
-    marginInlineStart: tokens.space2,
+    fontSize: 11,
     textTransform: "uppercase",
   },
-  textarea: {
-    backgroundColor: tokens.background,
-    borderColor: tokens.border,
-    borderRadius: tokens.radius2,
-    borderStyle: "solid",
-    borderWidth: 1,
-    color: tokens.foreground,
-    lineHeight: 1.5,
-    padding: tokens.space3,
-    resize: "vertical",
-    width: "100%",
-    ":focus": { borderColor: tokens.accent, outline: "none" },
-  },
-  hint: { color: tokens.foregroundMuted, fontSize: 11 },
+  readingFieldTitle: { fontSize: 13, marginBlock: 0 },
+  readingText: { lineHeight: 1.55, marginBlock: tokens.space1 },
+  readingChecklist: { marginBlock: tokens.space1, paddingInlineStart: tokens.space5 },
   error: { color: tokens.danger, fontSize: 13, margin: 0 },
-  formFooter: {
-    alignItems: "center",
-    borderBlockStartColor: tokens.border,
-    borderBlockStartStyle: "solid",
-    borderBlockStartWidth: 1,
-    color: tokens.foregroundMuted,
-    display: "flex",
-    fontSize: 12,
-    justifyContent: "space-between",
-    paddingBlockStart: tokens.space4,
-  },
-  footerActions: { display: "flex", flexWrap: "wrap", gap: tokens.space2, justifyContent: "end" },
   srOnly: { height: 1, margin: -1, overflow: "hidden", position: "absolute", width: 1 },
 });

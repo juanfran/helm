@@ -1,4 +1,5 @@
-import { projectEventSchema, type ProjectEvent } from "../../domain/activity";
+import type { ProjectEvent } from "../../domain/activity";
+import { parseProjectEventWire } from "./project-event-wire";
 
 export type EventSourceLike = {
   addEventListener(type: string, listener: EventListener): void;
@@ -94,12 +95,11 @@ export function subscribeToProjectEvents({
         reportError(new Error("Helm received a malformed project event."));
         return;
       }
-      const parsed = projectEventSchema.safeParse(candidate);
-      if (!parsed.success) {
+      const event = parseProjectEventWire(candidate);
+      if (!event) {
         reportError(new Error("Helm received an invalid project event."));
         return;
       }
-      const event = parsed.data;
       if (projectId !== null && event.projectId !== projectId) {
         reportError(new Error("Helm received a project event for the wrong project."));
         return;

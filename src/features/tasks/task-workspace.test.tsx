@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ProjectEvent } from "../../domain/activity";
 import type { Project } from "../../domain/projects";
-import { emptyRichTextDocument, type Task } from "../../domain/tasks";
+import { compareTaskOrder, emptyRichTextDocument, type Task } from "../../domain/tasks";
+import { createRetryableLazyModuleLoader } from "../../components/retryable-lazy-module";
 import { TaskWorkspace } from "./task-workspace";
 
 const project: Project = {
@@ -56,6 +57,80 @@ const backlog: Task = {
   updatedAt: "2026-09-03T10:10:00.000Z",
 };
 
+function TestDescriptionEditor() {
+  return (
+    <div>
+      <div aria-label="Description formatting">Editor formatting</div>
+      <textarea aria-label="Recovered description editor" />
+    </div>
+  );
+}
+
+function TestDashboard({
+  tasks,
+  onSelectTask,
+}: {
+  tasks: readonly Task[];
+  onSelectTask: (taskId: string) => void;
+}) {
+  return (
+    <section>
+      <h2>Awaiting review</h2>
+      {tasks
+        .filter((task) => task.lifecycle === "review")
+        .map((task) => (
+          <button key={task.id} type="button" onClick={() => onSelectTask(task.id)}>
+            {task.title}
+          </button>
+        ))}
+    </section>
+  );
+}
+
+function TestProjectActivity({ events }: { events: readonly ProjectEvent[] }) {
+  return (
+    <section>
+      <h2>Project activity</h2>
+      {events.map((event) => (
+        <article key={event.id}>
+          <p>{typeof event.payload.reason === "string" ? event.payload.reason : ""}</p>
+          <p>{event.importance}</p>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function TestTaskDetail({ task }: { task: Task }) {
+  return <section aria-label={`Loaded task #${task.sequence}`}>Loaded task details</section>;
+}
+
+function TestNotifications() {
+  return <section aria-label="Loaded notifications">Notification controls</section>;
+}
+
+function TestAppearance() {
+  return <section aria-label="Loaded appearance">Appearance controls</section>;
+}
+
+function TestBulkControls() {
+  return <section aria-label="Loaded bulk actions">Bulk controls</section>;
+}
+
+function TestCollaboration() {
+  return <section aria-label="Loaded collaboration">Collaboration controls</section>;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -102,6 +177,10 @@ function props(tasks: readonly Task[] = [backlog]) {
     activityEntries: [],
     manualBlockers: [],
     projectEvents: [],
+    initialSelectedTaskId: tasks.toSorted(compareTaskOrder)[0]?.id ?? null,
+    taskDetailModuleLoader: createRetryableLazyModuleLoader(() =>
+      import("./task-detail-panel").then(({ TaskDetailPanel }) => ({ default: TaskDetailPanel })),
+    ),
     liveStatus: "live" as const,
     onCreateTask: vi.fn(),
     onPrepareTask: vi.fn(),
@@ -131,7 +210,257 @@ function useNarrowViewport() {
   window.dispatchEvent(new Event("resize"));
 }
 
+function waitForTaskDetail() {
+  return screen.findByRole("form", { name: "Prepare task" });
+}
+
 describe("task workspace", () => {
+  it("keeps the task route useful without loading interaction-only modules", () => {
+    const { initialSelectedTaskId: _initialSelectedTaskId, ...workspace } = props();
+    const loadTaskDetail = vi.fn(async () => ({ default: TestTaskDetail }));
+    const loadDashboard = vi.fn(async () => ({ default: TestDashboard }));
+    const loadActivity = vi.fn(async () => ({ default: TestProjectActivity }));
+    const loadEditor = vi.fn(async () => ({ default: TestDescriptionEditor }));
+    render(
+      <TaskWorkspace
+        {...workspace}
+        taskDetailModuleLoader={createRetryableLazyModuleLoader(loadTaskDetail)}
+        dashboardModuleLoader={createRetryableLazyModuleLoader(loadDashboard)}
+        activityModuleLoader={createRetryableLazyModuleLoader(loadActivity)}
+        richTextEditorModuleLoader={createRetryableLazyModuleLoader(loadEditor)}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Tasks" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Select a task" })).toBeTruthy();
+    expect(screen.getByLabelText("Task title")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open task #1: Captured task" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Bulk actions" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Appearance" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Notifications, none unread" })).toBeTruthy();
+    expect(screen.queryByRole("status", { name: /Loading/ })).toBeNull();
+    expect(loadTaskDetail).not.toHaveBeenCalled();
+    expect(loadEditor).not.toHaveBeenCalled();
+    expect(loadDashboard).not.toHaveBeenCalled();
+    expect(loadActivity).not.toHaveBeenCalled();
+  });
+
+  it("keeps workspace launch controls focused through lazy failure, loading, and readiness", async () => {
+    const notificationGate = deferred<{ default: typeof TestNotifications }>();
+    const appearanceGate = deferred<{ default: typeof TestAppearance }>();
+    const bulkGate = deferred<{ default: typeof TestBulkControls }>();
+    const loadNotifications = vi
+      .fn<() => Promise<{ default: typeof TestNotifications }>>()
+      .mockRejectedValueOnce(new Error("Notifications chunk unavailable"))
+      .mockImplementationOnce(() => notificationGate.promise);
+    const loadAppearance = vi.fn(() => appearanceGate.promise);
+    const loadBulk = vi.fn(() => bulkGate.promise);
+    render(
+      <TaskWorkspace
+        {...props([])}
+        notificationsModuleLoader={createRetryableLazyModuleLoader(loadNotifications)}
+        appearanceModuleLoader={createRetryableLazyModuleLoader(loadAppearance)}
+        bulkModuleLoader={createRetryableLazyModuleLoader(loadBulk)}
+      />,
+    );
+
+    const notifications = screen.getByRole("button", {
+      name: "Notifications, none unread",
+    });
+    notifications.focus();
+    fireEvent.click(notifications);
+    expect(await screen.findByRole("alert", { name: "notifications unavailable" })).toBeTruthy();
+    expect(document.activeElement).toBe(notifications);
+    fireEvent.click(notifications);
+    expect(screen.getByRole("status", { name: "Loading notifications" })).toBeTruthy();
+    expect(document.activeElement).toBe(notifications);
+    notificationGate.resolve({ default: TestNotifications });
+    expect(await screen.findByRole("region", { name: "Loaded notifications" })).toBeTruthy();
+    expect(notifications.getAttribute("aria-disabled")).toBe("true");
+    expect(notifications.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(notifications);
+
+    const appearance = screen.getByRole("button", { name: "Appearance" });
+    appearance.focus();
+    await waitFor(() => expect(loadAppearance).toHaveBeenCalledTimes(1));
+    fireEvent.click(appearance);
+    expect(screen.getByRole("status", { name: "Loading appearance control" })).toBeTruthy();
+    expect(document.activeElement).toBe(appearance);
+    appearanceGate.resolve({ default: TestAppearance });
+    expect(await screen.findByRole("region", { name: "Loaded appearance" })).toBeTruthy();
+    expect(document.activeElement).toBe(appearance);
+
+    const bulk = screen.getByRole("button", { name: "Bulk actions" });
+    bulk.focus();
+    await waitFor(() => expect(loadBulk).toHaveBeenCalledTimes(1));
+    fireEvent.click(bulk);
+    expect(screen.getByRole("status", { name: "Loading bulk controls" })).toBeTruthy();
+    expect(document.activeElement).toBe(bulk);
+    bulkGate.resolve({ default: TestBulkControls });
+    expect(await screen.findByRole("region", { name: "Loaded bulk actions" })).toBeTruthy();
+    expect(document.activeElement).toBe(bulk);
+  });
+
+  it("preloads task details on intent and keeps the selected summary and trigger usable", async () => {
+    const detailedTask = {
+      ...backlog,
+      descriptionText: "A readable summary remains while task controls load.",
+      expectedOutcome: "The detail boundary does not blank the workspace.",
+      acceptanceCriteria: "Keyboard focus stays on the selected task.",
+      checklist: [{ id: "check-1", text: "Verify the loading summary", checked: false }],
+    };
+    const detailGate = deferred<{ default: typeof TestTaskDetail }>();
+    const loadTaskDetail = vi.fn(() => detailGate.promise);
+    const {
+      initialSelectedTaskId: _initialSelectedTaskId,
+      taskDetailModuleLoader: _taskDetailModuleLoader,
+      ...workspace
+    } = props([detailedTask]);
+    render(
+      <TaskWorkspace
+        {...workspace}
+        taskDetailModuleLoader={createRetryableLazyModuleLoader(loadTaskDetail)}
+      />,
+    );
+
+    const taskTrigger = screen.getByRole("button", { name: "Open task #1: Captured task" });
+    taskTrigger.focus();
+    await waitFor(() => expect(loadTaskDetail).toHaveBeenCalledTimes(1));
+    expect(taskTrigger.getAttribute("aria-current")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Select a task" })).toBeTruthy();
+
+    fireEvent.click(taskTrigger);
+    expect(document.activeElement).toBe(taskTrigger);
+    expect(taskTrigger.getAttribute("aria-current")).toBe("true");
+    expect(screen.getByRole("article", { name: "Task #1 summary" }).textContent).toContain(
+      detailedTask.descriptionText,
+    );
+    expect(screen.getByText(detailedTask.expectedOutcome)).toBeTruthy();
+    expect(screen.getByText(detailedTask.acceptanceCriteria)).toBeTruthy();
+    expect(screen.getByText("Verify the loading summary")).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Loading task details" })).toBeTruthy();
+
+    detailGate.resolve({ default: TestTaskDetail });
+    expect(await screen.findByRole("region", { name: "Loaded task #1" })).toBeTruthy();
+    expect(document.activeElement).toBe(taskTrigger);
+  });
+
+  it("preserves the readable task summary when detail loading fails and retries", async () => {
+    const failedTask = {
+      ...backlog,
+      descriptionText: "The task remains readable after a chunk failure.",
+      expectedOutcome: "Recovery does not require reselecting the task.",
+    };
+    const loadTaskDetail = vi
+      .fn<() => Promise<{ default: typeof TestTaskDetail }>>()
+      .mockRejectedValueOnce(new Error("Task detail chunk unavailable"))
+      .mockResolvedValueOnce({ default: TestTaskDetail });
+    const {
+      initialSelectedTaskId: _initialSelectedTaskId,
+      taskDetailModuleLoader: _taskDetailModuleLoader,
+      ...workspace
+    } = props([failedTask]);
+    render(
+      <TaskWorkspace
+        {...workspace}
+        taskDetailModuleLoader={createRetryableLazyModuleLoader(loadTaskDetail)}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Open task #1: Captured task" }));
+    const failure = await screen.findByRole("alert", { name: "task details unavailable" });
+    expect(screen.getByLabelText("Task description")).toHaveProperty(
+      "textContent",
+      failedTask.descriptionText,
+    );
+    expect(screen.getByText(failedTask.expectedOutcome)).toBeTruthy();
+
+    fireEvent.click(within(failure).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("region", { name: "Loaded task #1" })).toBeTruthy();
+    expect(loadTaskDetail).toHaveBeenCalledTimes(2);
+  });
+
+  it("preloads the task editor on intent and reveals it only after activation", async () => {
+    const editorGate = deferred<{ default: typeof TestDescriptionEditor }>();
+    const loadEditor = vi.fn(() => editorGate.promise);
+    const editorModule = createRetryableLazyModuleLoader(loadEditor);
+    const describedTask = {
+      ...backlog,
+      descriptionText: "The route must remain readable before editing begins.",
+    };
+    render(<TaskWorkspace {...props([describedTask])} richTextEditorModuleLoader={editorModule} />);
+
+    expect(await screen.findByLabelText("Task description")).toHaveProperty(
+      "textContent",
+      describedTask.descriptionText,
+    );
+    expect(screen.queryByRole("status", { name: "Loading task editor" })).toBeNull();
+    expect(screen.queryByLabelText("Description formatting")).toBeNull();
+    const editButton = await screen.findByRole("button", { name: "Edit description" });
+    editButton.focus();
+    await waitFor(() => expect(loadEditor).toHaveBeenCalledTimes(1));
+    expect(screen.queryByLabelText("Description formatting")).toBeNull();
+
+    fireEvent.click(editButton);
+    expect(screen.getByRole("status", { name: "Loading task editor" })).toBeTruthy();
+    expect(document.activeElement).toBe(editButton);
+    editorGate.resolve({ default: TestDescriptionEditor });
+    expect(await screen.findByLabelText("Description formatting")).toBeTruthy();
+    expect(document.activeElement).toBe(editButton);
+  });
+
+  it("keeps editor failure recovery outside disabled task fields", async () => {
+    const loadEditor = vi
+      .fn<() => Promise<{ default: typeof TestDescriptionEditor }>>()
+      .mockRejectedValueOnce(new Error("Editor chunk unavailable"))
+      .mockResolvedValueOnce({ default: TestDescriptionEditor });
+    const editorModule = createRetryableLazyModuleLoader(loadEditor);
+    render(<TaskWorkspace {...props()} richTextEditorModuleLoader={editorModule} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit description" }));
+    const failure = await screen.findByRole("alert", { name: "task editor unavailable" });
+    const retry = within(failure).getByRole("button", { name: "Retry" });
+    expect(retry.matches(":disabled")).toBe(false);
+
+    fireEvent.click(retry);
+    expect(
+      await screen.findByRole("textbox", { name: "Recovered description editor" }),
+    ).toBeTruthy();
+    expect(loadEditor).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the collaboration trigger focused through failure, retry, and readiness", async () => {
+    const collaborationGate = deferred<{ default: typeof TestCollaboration }>();
+    const loadCollaboration = vi
+      .fn<() => Promise<{ default: typeof TestCollaboration }>>()
+      .mockRejectedValueOnce(new Error("Collaboration chunk unavailable"))
+      .mockImplementationOnce(() => collaborationGate.promise);
+    render(
+      <TaskWorkspace
+        {...props()}
+        collaborationModuleLoader={createRetryableLazyModuleLoader(loadCollaboration)}
+      />,
+    );
+
+    await waitForTaskDetail();
+    const trigger = screen.getByRole("button", { name: "Open collaboration" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    expect(
+      await screen.findByRole("alert", { name: "collaboration controls unavailable" }),
+    ).toBeTruthy();
+    expect(document.activeElement).toBe(trigger);
+
+    fireEvent.click(trigger);
+    expect(screen.getByRole("status", { name: "Loading collaboration controls" })).toBeTruthy();
+    expect(document.activeElement).toBe(trigger);
+    collaborationGate.resolve({ default: TestCollaboration });
+    expect(await screen.findByRole("region", { name: "Loaded collaboration" })).toBeTruthy();
+    expect(trigger.getAttribute("aria-disabled")).toBe("true");
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it("makes project data management available from Settings", async () => {
     const user = userEvent.setup();
     render(
@@ -145,6 +474,30 @@ describe("task workspace", () => {
 
     await user.click(screen.getByRole("button", { name: "Settings" }));
     expect(screen.getByRole("region", { name: "Project portability" })).toBeTruthy();
+  });
+
+  it("preloads the project switcher while keeping its trigger focused through activation", () => {
+    const preload = vi.fn();
+    render(
+      <TaskWorkspace
+        {...props([])}
+        projectSwitcher={{
+          preload,
+          surface: <section aria-label="Project switcher">Switcher controls</section>,
+        }}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Switch project" });
+    trigger.focus();
+    expect(preload).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("region", { name: "Project switcher" })).toBeNull();
+
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute("aria-disabled")).toBe("true");
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(trigger);
+    expect(screen.getByRole("region", { name: "Project switcher" })).toBeTruthy();
   });
 
   it("drills from the live dashboard into narrow-screen review and comment actions", async () => {
@@ -165,20 +518,40 @@ describe("task workspace", () => {
         blockingTaskIds: [],
       },
     };
+    const dashboardGate = deferred<{ default: typeof TestDashboard }>();
+    const loadDashboard = vi.fn(() => dashboardGate.promise);
     const workspace = props([reviewTask]);
     workspace.onApproveTaskReview.mockResolvedValue({ ok: true, result: {} });
     workspace.onCreateActivityEntry.mockResolvedValue({ ok: true, result: {} });
-    render(<TaskWorkspace {...workspace} />);
+    render(
+      <TaskWorkspace
+        {...workspace}
+        dashboardModuleLoader={createRetryableLazyModuleLoader(loadDashboard)}
+      />,
+    );
 
-    expect(screen.getByRole("combobox", { name: "Appearance" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Appearance" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Notifications, none unread" })).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Dashboard" }));
-    const reviewPanel = screen.getByRole("heading", { name: "Awaiting review" }).closest("section");
+    const dashboardButton = screen.getByRole("button", { name: "Dashboard" });
+    expect(loadDashboard).not.toHaveBeenCalled();
+    dashboardButton.focus();
+    await waitFor(() => expect(loadDashboard).toHaveBeenCalledTimes(1));
+    expect(dashboardButton.getAttribute("aria-pressed")).toBe("false");
+
+    await user.click(dashboardButton);
+    const dashboardFallback = screen.getByRole("status", { name: "Loading dashboard" });
+    expect(dashboardFallback.getAttribute("aria-live")).toBe("polite");
+    dashboardGate.resolve({ default: TestDashboard });
+
+    const reviewPanel = (await screen.findByRole("heading", { name: "Awaiting review" })).closest(
+      "section",
+    );
     await user.click(within(reviewPanel!).getByRole("button", { name: /Review agent delivery/ }));
 
-    expect(screen.getByRole("form", { name: "Approve task review" })).toBeTruthy();
+    expect(await screen.findByRole("form", { name: "Approve task review" })).toBeTruthy();
     expect(screen.getByRole("form", { name: "Request task changes" })).toBeTruthy();
-    expect(screen.getByRole("region", { name: "Collaboration" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Open collaboration" }));
+    expect(await screen.findByRole("region", { name: "Collaboration" })).toBeTruthy();
 
     const approveForm = screen.getByRole("form", { name: "Approve task review" });
     await user.type(
@@ -221,11 +594,28 @@ describe("task workspace", () => {
       },
       occurredAt: "2026-09-04T10:15:00.000Z",
     };
-    render(<TaskWorkspace {...props()} projectEvents={[activityEvent]} />);
+    const activityGate = deferred<{ default: typeof TestProjectActivity }>();
+    const loadActivity = vi.fn(() => activityGate.promise);
+    render(
+      <TaskWorkspace
+        {...props()}
+        projectEvents={[activityEvent]}
+        activityModuleLoader={createRetryableLazyModuleLoader(loadActivity)}
+      />,
+    );
 
-    await user.click(screen.getByRole("button", { name: "Activity" }));
+    const activityButton = screen.getByRole("button", { name: "Activity" });
+    expect(loadActivity).not.toHaveBeenCalled();
+    activityButton.focus();
+    await waitFor(() => expect(loadActivity).toHaveBeenCalledTimes(1));
+    expect(activityButton.getAttribute("aria-pressed")).toBe("false");
 
-    expect(screen.getByRole("heading", { name: "Project activity" })).toBeTruthy();
+    await user.click(activityButton);
+
+    const activityFallback = screen.getByRole("status", { name: "Loading project activity" });
+    expect(activityFallback.getAttribute("aria-live")).toBe("polite");
+    activityGate.resolve({ default: TestProjectActivity });
+    expect(await screen.findByRole("heading", { name: "Project activity" })).toBeTruthy();
     expect(screen.getByText("Needs approval")).toBeTruthy();
     expect(screen.getByText("attention")).toBeTruthy();
   });
@@ -278,6 +668,7 @@ describe("task workspace", () => {
     };
     render(<TaskWorkspace {...props([backlog, secondTask])} />);
 
+    await user.click(screen.getByRole("button", { name: "Bulk actions" }));
     const checkbox = screen.getByRole("checkbox", {
       name: "Select task #2: Second task",
     });
@@ -289,7 +680,9 @@ describe("task workspace", () => {
         .getByRole("button", { name: "Open task #1: Captured task" })
         .getAttribute("aria-current"),
     ).toBe("true");
-    expect(screen.getByRole("button", { name: "Bulk edit" }).matches(":disabled")).toBe(false);
+    expect((await screen.findByRole("button", { name: "Bulk edit" })).matches(":disabled")).toBe(
+      false,
+    );
     expect(
       screen.getByRole("button", { name: "Open task #2: Second task" }).contains(checkbox),
     ).toBe(false);
@@ -337,6 +730,8 @@ describe("task workspace", () => {
     });
     render(<TaskWorkspace {...workspace} />);
 
+    await waitForTaskDetail();
+
     expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
 
     await user.type(screen.getByLabelText(/Expected outcome/), "The task is complete.");
@@ -377,6 +772,8 @@ describe("task workspace", () => {
     });
     render(<TaskWorkspace {...workspace} />);
 
+    await waitForTaskDetail();
+
     await user.selectOptions(screen.getByLabelText("Priority"), "urgent");
     await user.clear(screen.getByLabelText("Position"));
     await user.type(screen.getByLabelText("Position"), "4");
@@ -415,6 +812,8 @@ describe("task workspace", () => {
     const workspace = { ...props(), tagDefinitions: [canonicalTag] };
     workspace.onUpdateTaskPlanning.mockResolvedValue({ ok: true, task: backlog });
     render(<TaskWorkspace {...workspace} />);
+
+    await waitForTaskDetail();
 
     await user.click(screen.getByRole("button", { name: "Add tag" }));
     await user.type(screen.getByLabelText("Tag 1 name"), "frontend");
@@ -472,6 +871,8 @@ describe("task workspace", () => {
     });
     render(<TaskWorkspace {...workspace} />);
 
+    await waitForTaskDetail();
+
     expect(screen.getByText(/Children:/).textContent).toContain("#2 Dependent task");
     expect(screen.getByText(/blocks to #2 Dependent task/)).toBeTruthy();
 
@@ -522,6 +923,8 @@ describe("task workspace", () => {
     });
     render(<TaskWorkspace {...workspace} />);
 
+    await waitForTaskDetail();
+
     await user.click(screen.getByRole("button", { name: "Move to ready" }));
     expect(screen.getByRole("alert").textContent).toContain("expected 1, current 2");
 
@@ -545,6 +948,8 @@ describe("task workspace", () => {
     });
     render(<TaskWorkspace {...workspace} />);
 
+    await waitForTaskDetail();
+
     expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Save planning" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Move to ready" })).toBeNull();
@@ -555,7 +960,7 @@ describe("task workspace", () => {
     );
     expect(screen.getByLabelText("Child task title").matches(":disabled")).toBe(false);
     expect(screen.getByLabelText("Relation type").matches(":disabled")).toBe(false);
-    const reopenForm = screen.getByRole("form", { name: "Reopen completed task" });
+    const reopenForm = await screen.findByRole("form", { name: "Reopen completed task" });
     await user.selectOptions(within(reopenForm).getByLabelText("Destination"), "backlog");
     await user.type(
       within(reopenForm).getByLabelText("Reopen reason"),
@@ -572,10 +977,12 @@ describe("task workspace", () => {
     });
   });
 
-  it("shows active work and exposes only safe claim ownership and expiry details", () => {
+  it("shows active work and exposes only safe claim ownership and expiry details", async () => {
     const activeTask = claimedTask();
 
     render(<TaskWorkspace {...props([activeTask])} />);
+
+    await waitForTaskDetail();
 
     expect(screen.getByRole("region", { name: "Task counts" }).textContent).toContain("1 active");
     const taskButton = within(screen.getByRole("list", { name: "Tasks" })).getByRole("button", {
@@ -624,6 +1031,8 @@ describe("task workspace", () => {
       );
       const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
       render(<TaskWorkspace {...workspace} />);
+
+      await waitForTaskDetail();
 
       const claimRegion = screen.getByRole("region", { name: "Current claim" });
       const action = within(claimRegion).getByRole("button", { name: buttonName });
@@ -675,6 +1084,8 @@ describe("task workspace", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<TaskWorkspace {...workspace} />);
 
+    await waitForTaskDetail();
+
     await user.type(screen.getByRole("textbox", { name: "Reason" }), "The owner changed.");
     await user.click(screen.getByRole("button", { name: "Stop claim" }));
 
@@ -725,6 +1136,8 @@ describe("task workspace", () => {
     });
     render(<TaskWorkspace {...workspace} />);
 
+    await waitForTaskDetail();
+
     expect(screen.getByRole("region", { name: "Effective review policy" })).toHaveProperty(
       "textContent",
       expect.stringContaining("Project policy requires human review"),
@@ -755,14 +1168,35 @@ describe("task workspace", () => {
     );
   });
 
+  it("keeps a read-only task description available without loading the editor", async () => {
+    const loadEditor = vi.fn(async () => ({ default: TestDescriptionEditor }));
+    const editorModule = createRetryableLazyModuleLoader(loadEditor);
+    const task = {
+      ...claimedTask(),
+      descriptionText: "The agent is executing the documented migration steps.",
+    };
+
+    render(<TaskWorkspace {...props([task])} richTextEditorModuleLoader={editorModule} />);
+
+    await waitForTaskDetail();
+
+    const description = screen.getByLabelText("Task description");
+    expect(description).toHaveProperty("textContent", task.descriptionText);
+    expect(description.closest("fieldset")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit description" })).toBeNull();
+    expect(loadEditor).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["in_progress", "Agent execution is active"],
     ["review", "This task is awaiting review"],
     ["cancelled", "Cancelled tasks are read-only"],
-  ] as const)("keeps %s task mutations read-only", (lifecycle, explanation) => {
+  ] as const)("keeps %s task mutations read-only", async (lifecycle, explanation) => {
     const task: Task = { ...backlog, lifecycle };
 
     render(<TaskWorkspace {...props([task])} />);
+
+    await waitForTaskDetail();
 
     expect(screen.getByText(new RegExp(explanation))).toBeTruthy();
     expect(screen.getByRole("group", { name: "Editable task details" })).toHaveProperty(

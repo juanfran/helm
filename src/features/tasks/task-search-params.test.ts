@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   emptyTaskSearchParams,
+  parseTaskSearchRouteParams,
   taskFilterFromSearchParams,
   taskSearchInputFromParams,
-  taskSearchParamsSchema,
   taskSearchResultFields,
 } from "./task-search-params";
 
@@ -30,7 +30,7 @@ describe("task search route parameters", () => {
   });
 
   it("compiles route controls into the shared structured filter", () => {
-    const search = taskSearchParamsSchema.parse({
+    const search = parseTaskSearchRouteParams({
       q: " review evidence ",
       mode: "phrase",
       lifecycle: "review",
@@ -54,7 +54,7 @@ describe("task search route parameters", () => {
   });
 
   it("recovers malformed URL values and includes archived work only when selected", () => {
-    const search = taskSearchParamsSchema.parse({
+    const search = parseTaskSearchRouteParams({
       mode: "broken",
       lifecycle: "unknown",
       eligibility: "archived",

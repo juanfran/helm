@@ -1,5 +1,3 @@
-import { z } from "zod";
-
 import {
   canonicalizeTaskFilter,
   canonicalizeTaskSearchOrder,
@@ -8,63 +6,18 @@ import {
   type TaskFilterV1,
   type TaskSearchField,
 } from "../../domain/task-filters";
-import { capabilityNameSchema, taskLifecycleSchema, taskPrioritySchema } from "../../domain/tasks";
+import type { TaskSearchQueryParams } from "./task-search-route-params";
 
-function trimToNullable(value: unknown) {
-  if (typeof value !== "string") return value === undefined ? null : value;
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
-const optionalTagId = z.preprocess(
-  trimToNullable,
-  z.string().min(1).max(200).nullable().catch(null),
-);
-const optionalCapability = z.preprocess(
-  trimToNullable,
-  capabilityNameSchema.nullable().catch(null),
-);
-export const taskSearchCursorParamSchema = z.preprocess(
-  trimToNullable,
-  z.string().max(4_000).nullable().catch(null),
-);
-
-export const taskSearchParamsSchema = z.object({
-  q: z.string().max(500).catch(""),
-  mode: z.enum(["all", "any", "phrase"]).catch("all"),
-  lifecycle: z.preprocess(
-    (value) => (value === "" || value === undefined ? null : value),
-    taskLifecycleSchema.nullable().catch(null),
-  ),
-  eligibility: z.preprocess(
-    (value) => (value === "" || value === undefined ? null : value),
-    z
-      .enum([
-        "not_ready",
-        "scheduled",
-        "blocked",
-        "capability_mismatch",
-        "claimable",
-        "claimed",
-        "complete",
-        "archived",
-      ])
-      .nullable()
-      .catch(null),
-  ),
-  priority: z.preprocess(
-    (value) => (value === "" || value === undefined ? null : value),
-    taskPrioritySchema.nullable().catch(null),
-  ),
-  tag: optionalTagId,
-  capability: optionalCapability,
-  presentation: z.enum(["list", "board"]).catch("list"),
-  cursor: taskSearchCursorParamSchema,
-});
-export type TaskSearchParams = z.infer<typeof taskSearchParamsSchema>;
-export type TaskSearchQueryParams = Omit<TaskSearchParams, "presentation">;
-
-export const emptyTaskSearchParams: TaskSearchParams = taskSearchParamsSchema.parse({});
+export {
+  emptyTaskSearchParams,
+  parseSavedViewSearchRouteParams,
+  parseTaskSearchRouteParams,
+} from "./task-search-route-params";
+export type {
+  SavedViewSearchParams,
+  TaskSearchParams,
+  TaskSearchQueryParams,
+} from "./task-search-route-params";
 
 /** Optional candidate data rendered by both human search-result routes. */
 export const taskSearchResultFields = ["timestamps"] as const satisfies readonly TaskSearchField[];

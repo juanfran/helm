@@ -9,7 +9,6 @@ import type {
 import type { TaskSearchItem } from "../../domain/task-filters";
 import type { TaskLifecycle } from "../../domain/tasks";
 import { tokens } from "../../styles/tokens.stylex";
-import { Checkbox } from "../../components/ui/checkbox";
 
 const lifecycleOrder = [
   "backlog",
@@ -47,15 +46,15 @@ export type TaskSearchResultsProps = {
   presentation?: SavedViewPresentation;
   grouping?: SavedViewGrouping;
   visibleFields: readonly SavedViewVisibleField[];
-  selectedTaskIds: ReadonlySet<string>;
-  onTaskSelected: (taskId: string, selected: boolean) => void;
+  selectedTaskIds?: ReadonlySet<string>;
+  onTaskSelected?: (taskId: string, selected: boolean) => void;
 };
 
 type ResolvedTaskSearchResultsProps = {
   items: readonly TaskSearchItem[];
   visibleFields: readonly SavedViewVisibleField[];
-  selectedTaskIds: ReadonlySet<string>;
-  onTaskSelected: (taskId: string, selected: boolean) => void;
+  selectedTaskIds?: ReadonlySet<string>;
+  onTaskSelected?: (taskId: string, selected: boolean) => void;
 };
 
 export function TaskSearchResults({
@@ -111,7 +110,7 @@ function TaskList({
           <TaskResultRow
             item={item}
             visibleFields={visibleFields}
-            selected={selectedTaskIds.has(item.task.id)}
+            selected={selectedTaskIds?.has(item.task.id) ?? false}
             onSelectedChange={onTaskSelected}
             layout="list"
           />
@@ -195,7 +194,7 @@ function TaskBoard({
                   <TaskResultRow
                     item={item}
                     visibleFields={visibleFields}
-                    selected={selectedTaskIds.has(item.task.id)}
+                    selected={selectedTaskIds?.has(item.task.id) ?? false}
                     onSelectedChange={onTaskSelected}
                     layout="board"
                   />
@@ -281,43 +280,67 @@ function TaskResultRow({
   item: TaskSearchItem;
   visibleFields: readonly SavedViewVisibleField[];
   selected: boolean;
-  onSelectedChange: (taskId: string, selected: boolean) => void;
+  onSelectedChange?: (taskId: string, selected: boolean) => void;
   layout: SavedViewPresentation;
 }) {
   const checkboxId = useId();
+  const selectable = Boolean(onSelectedChange);
+  const fields = (
+    <>
+      <span aria-hidden={selectable || undefined} {...stylex.props(styles.reference)}>
+        #{item.task.sequence}
+      </span>
+      <span aria-hidden={selectable || undefined} {...stylex.props(styles.fields)}>
+        {visibleFields.map((field) => (
+          <TaskResultField key={field} item={item} field={field} />
+        ))}
+      </span>
+    </>
+  );
   return (
     <div
       {...stylex.props(
         styles.taskRow,
+        selectable && styles.selectableRow,
         layout === "list" ? styles.listRow : styles.boardRow,
         selected && styles.selected,
       )}
     >
-      <Checkbox
-        id={checkboxId}
-        aria-label={`Select task #${item.task.sequence}: ${item.task.title}`}
-        checked={selected}
-        onCheckedChange={(checked) => onSelectedChange(item.task.id, checked)}
-      />
-      <label
-        htmlFor={checkboxId}
-        {...stylex.props(
-          styles.taskLabel,
-          layout === "list" ? styles.listLabel : styles.boardLabel,
-        )}
-      >
-        <span {...stylex.props(styles.srOnly)}>
-          Select task #{item.task.sequence}: {item.task.title}
-        </span>
-        <span aria-hidden="true" {...stylex.props(styles.reference)}>
-          #{item.task.sequence}
-        </span>
-        <span aria-hidden="true" {...stylex.props(styles.fields)}>
-          {visibleFields.map((field) => (
-            <TaskResultField key={field} item={item} field={field} />
-          ))}
-        </span>
-      </label>
+      {onSelectedChange ? (
+        <>
+          <input
+            id={checkboxId}
+            type="checkbox"
+            aria-label={`Select task #${item.task.sequence}: ${item.task.title}`}
+            aria-checked={selected}
+            checked={selected}
+            onChange={(event) => onSelectedChange(item.task.id, event.currentTarget.checked)}
+            {...stylex.props(styles.checkbox)}
+          />
+          <label
+            htmlFor={checkboxId}
+            {...stylex.props(
+              styles.taskLabel,
+              styles.selectableLabel,
+              layout === "list" ? styles.listLabel : styles.boardLabel,
+            )}
+          >
+            <span {...stylex.props(styles.srOnly)}>
+              Select task #{item.task.sequence}: {item.task.title}
+            </span>
+            {fields}
+          </label>
+        </>
+      ) : (
+        <div
+          {...stylex.props(
+            styles.taskLabel,
+            layout === "list" ? styles.listLabel : styles.boardLabel,
+          )}
+        >
+          {fields}
+        </div>
+      )}
     </div>
   );
 }
@@ -405,12 +428,13 @@ const styles = stylex.create({
     color: tokens.foreground,
     display: "grid",
     gap: tokens.space3,
-    gridTemplateColumns: "18px minmax(0, 1fr)",
+    gridTemplateColumns: "minmax(0, 1fr)",
     width: "100%",
     ":hover": {
       borderColor: tokens.accent,
     },
   },
+  selectableRow: { gridTemplateColumns: "18px minmax(0, 1fr)" },
   listRow: {
     minHeight: 50,
     paddingInlineStart: tokens.space3,
@@ -425,10 +449,16 @@ const styles = stylex.create({
     backgroundColor: tokens.surfaceMuted,
   },
   taskLabel: {
-    cursor: "pointer",
     font: "inherit",
     minWidth: 0,
     textAlign: "start",
+  },
+  selectableLabel: { cursor: "pointer" },
+  checkbox: {
+    accentColor: tokens.accent,
+    height: 16,
+    margin: 0,
+    width: 16,
   },
   listLabel: {
     alignItems: "center",
