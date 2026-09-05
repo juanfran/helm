@@ -10,6 +10,19 @@ Work from an approved GitHub issue and keep the slice demonstrable end to end.
 
 For startup, environment, or database-tooling changes, also run `pnpm smoke:operational`.
 
+Verify the complete human–agent loop against a real production server with:
+
+```sh
+pnpm build
+pnpm exec playwright install chromium
+pnpm smoke:workflow
+```
+
+On Linux, use `pnpm exec playwright install --with-deps chromium` if browser system libraries are
+missing. The workflow smoke test creates its own temporary repository and database, drives Chromium
+through the human interface, and connects independent MCP clients to the same server. It checks the
+handoff, live updates, review, reopening, and route loading. It never uses your configured database.
+
 Use English for code, documentation, issues, and commit messages. Use Helm terminology and neutral names for external systems and agents.
 
 Local configuration follows process environment, `.env.local`, then `.env` precedence. Never commit
@@ -19,5 +32,5 @@ temporary directory so they cannot read or modify a developer's Helm database.
 
 GitHub Actions repeats the repository-local checks on pull requests and pushes to `main`, builds the
 production application as the canonical TanStack Start route generator, verifies Drizzle's committed
-migration artifacts, runs the operational smoke test, and rejects any tracked or nonignored files left
-dirty by those gates.
+migration artifacts, runs the operational and browser/MCP workflow smoke tests, and rejects any tracked
+or nonignored files left dirty by those gates.

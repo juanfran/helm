@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -8,6 +17,7 @@ import { computeBuildFingerprint, productionBuildStatus } from "./build-state.mj
 import {
   databaseFilePath,
   ensureDatabaseParent,
+  HELM_PROJECT_ROOT,
   loadHelmEnvironment,
   resolveHelmEnvironment,
   serverHostFromEnvironment,
@@ -24,6 +34,38 @@ function temporaryDirectory(prefix: string) {
 function write(path: string, content: string) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, content);
+}
+
+function productionLauncherFixture() {
+  const root = temporaryDirectory("helm-startup-boundary-");
+  for (const script of [
+    "start.mjs",
+    "environment.mjs",
+    "build-state.mjs",
+    "client-bundle-budget.mjs",
+  ]) {
+    write(
+      join(root, "scripts", script),
+      readFileSync(join(HELM_PROJECT_ROOT, "scripts", script), "utf8"),
+    );
+  }
+  symlinkSync(join(HELM_PROJECT_ROOT, "node_modules"), join(root, "node_modules"), "dir");
+  // Exercise the real launcher through its final dynamic import. The entry reports Nitro's
+  // effective listener configuration without ever opening a network listener.
+  write(
+    join(root, ".output", "server", "index.mjs"),
+    `const parsedPort = Number.parseInt(process.env.NITRO_PORT ?? process.env.PORT ?? "");
+process.stdout.write(JSON.stringify({
+  host: process.env.NITRO_HOST || process.env.HOST,
+  port: Number.isNaN(parsedPort) ? 3000 : parsedPort,
+  databaseUrl: process.env.DATABASE_URL,
+}));\n`,
+  );
+  write(
+    join(root, ".output", "helm-build.json"),
+    `${JSON.stringify({ version: 1, fingerprint: computeBuildFingerprint(root) })}\n`,
+  );
+  return root;
 }
 
 afterEach(() => {
@@ -84,6 +126,52 @@ describe("Helm operational configuration", () => {
     expect(existsSync(dirname(expectedPath))).toBe(true);
     expect(ensureDatabaseParent(":memory:", root)).toBeNull();
   });
+
+  it.each([
+    {
+      name: "configured host and port",
+      settings: { HOST: " 127.0.0.1 ", PORT: "43123" },
+      port: 43123,
+      fromFiles: false,
+    },
+    { name: "default host and port", settings: {}, port: 3000, fromFiles: false },
+    { name: ".env.local host and port", settings: {}, port: 43124, fromFiles: true },
+  ])(
+    "keeps $name authoritative at the production startup boundary",
+    ({ settings, port, fromFiles }) => {
+      const root = productionLauncherFixture();
+      const environment = { ...process.env };
+      delete environment.HOST;
+      delete environment.PORT;
+      delete environment.NITRO_HOST;
+      delete environment.NITRO_PORT;
+      const runtimeAliases = "NITRO_HOST=0.0.0.0\nNITRO_PORT=0\n";
+      if (fromFiles) {
+        write(join(root, ".env.local"), `HOST=127.0.0.1\nPORT=43124\n${runtimeAliases}`);
+        write(join(root, ".env"), "HOST=localhost\nPORT=43125\n");
+      } else {
+        environment.NITRO_HOST = "0.0.0.0";
+        environment.NITRO_PORT = "0";
+      }
+      Object.assign(environment, settings, {
+        DATABASE_URL: join(root, "data", "helm.db"),
+        HELM_UNSAFE_ALLOW_REMOTE: "0",
+      });
+
+      const output = execFileSync(process.execPath, [join(root, "scripts", "start.mjs")], {
+        cwd: tmpdir(),
+        env: environment,
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+
+      expect(JSON.parse(output)).toEqual({
+        host: "127.0.0.1",
+        port,
+        databaseUrl: join(root, "data", "helm.db"),
+      });
+    },
+  );
 
   it("invalidates a production build manifest when an input changes", () => {
     const root = temporaryDirectory("helm-build-state-");

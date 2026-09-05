@@ -4,6 +4,7 @@ import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sd
 import { Effect, Either } from "effect";
 import { z } from "zod";
 
+import packageMetadata from "../../package.json" with { type: "json" };
 import {
   listActivityEntries,
   readActivityEvents,
@@ -419,7 +420,7 @@ export function createHelmMcpServer(
   bulkTaskServices: BulkTaskServices,
   client: McpClientIdentity = { clientName: null, clientVersion: null },
 ) {
-  const server = new McpServer({ name: "helm", version: "0.1.0" });
+  const server = new McpServer({ name: packageMetadata.name, version: packageMetadata.version });
 
   server.registerTool(
     "register_agent_run",

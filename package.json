@@ -1,6 +1,6 @@
 {
   "name": "helm",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "imports": {
@@ -19,6 +19,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts --passWithNoTests",
     "smoke:operational": "node scripts/operational-smoke.mjs",
+    "smoke:workflow": "node scripts/workflow-smoke.mjs",
     "backup:restore": "tsx scripts/restore-backup.ts",
     "db:generate": "node scripts/database-command.mjs generate",
     "db:migrate": "node scripts/database-command.mjs migrate",
@@ -55,6 +56,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@stylexjs/rollup-plugin": "^0.19.0",
     "@tanstack/devtools-vite": "^0.8.5",
     "@testing-library/react": "^16.3.3",

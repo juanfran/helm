@@ -8,6 +8,7 @@ import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import packageMetadata from "../../package.json" with { type: "json" };
 import { createProject, getAppState } from "../application/projects";
 import { reconcileActiveAgentRuns } from "../application/agents";
 import type { BulkTaskStore } from "../application/bulk-tasks";
@@ -323,6 +324,13 @@ function schemaRootPropertyNames(schema: unknown): string[] {
 }
 
 describe("MCP project contract", () => {
+  it("advertises the installed package identity during MCP initialization", () => {
+    expect(client.getServerVersion()).toEqual({
+      name: packageMetadata.name,
+      version: packageMetadata.version,
+    });
+  });
+
   it("persists MCP task mutations at the injected service-clock time", async () => {
     await client.callTool({
       name: "register_agent_run",

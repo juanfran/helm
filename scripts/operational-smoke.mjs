@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import Database from "better-sqlite3";
 
+import packageMetadata from "../package.json" with { type: "json" };
 import { productionBuildStatus } from "./build-state.mjs";
 import { HELM_PROJECT_ROOT } from "./environment.mjs";
 
@@ -387,8 +388,13 @@ async function initializeMcp(origin, expectedCatalog) {
       () => void transport.close(),
     );
     const serverVersion = client.getServerVersion();
-    if (serverVersion?.name !== "helm" || typeof serverVersion.version !== "string") {
-      throw new Error("The MCP initialize result did not identify the Helm server.");
+    if (
+      serverVersion?.name !== packageMetadata.name ||
+      serverVersion.version !== packageMetadata.version
+    ) {
+      throw new Error(
+        `The MCP initialize result did not match the installed package identity: expected ${packageMetadata.name}@${packageMetadata.version}, received ${serverVersion?.name ?? "unknown"}@${serverVersion?.version ?? "unknown"}.`,
+      );
     }
     if (!client.getServerCapabilities()?.tools) {
       throw new Error("The MCP initialize result did not advertise Helm's tool capability.");
@@ -494,6 +500,10 @@ const environment = {
   DATABASE_URL: databasePath,
   HELM_UNSAFE_ALLOW_REMOTE: "0",
   HOST: "127.0.0.1",
+  // These conflicting aliases must never redirect the validated listener. Even before a regression
+  // is fixed, this probe can only request an ephemeral loopback listener, never a public binding.
+  NITRO_HOST: "::1",
+  NITRO_PORT: "0",
   NODE_ENV: "production",
 };
 let helmProcess;
@@ -530,7 +540,7 @@ try {
     await assertRemoteBindingRejected(environment, temporaryRoot);
   });
 
-  await runStep("shell launcher and browser readiness", async () => {
+  await runStep("shell launcher, documented listener settings, and browser readiness", async () => {
     helmProcess = startHelm(environment, {
       cwd: temporaryRoot,
       label: "shell-launched production server",

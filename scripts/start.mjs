@@ -15,6 +15,9 @@ const environment = resolveHelmEnvironment();
 ensureDatabaseParent(environment.databaseUrl, HELM_PROJECT_ROOT);
 process.env.DATABASE_URL = environment.databaseUrl;
 process.env.HOST = environment.host;
+// Nitro prefers its runtime aliases. Only Helm's documented HOST and PORT may select the listener.
+delete process.env.NITRO_HOST;
+delete process.env.NITRO_PORT;
 
 await ensureProductionBuild();
 await import(pathToFileURL(join(HELM_PROJECT_ROOT, ".output/server/index.mjs")).href);
