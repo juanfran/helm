@@ -8,6 +8,8 @@ import { Worker } from "node:worker_threads";
 import { Effect, Either } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { workerOutcome } from "../test-support/worker-outcome";
+
 import { registerAgentRun } from "./agents";
 import { createProject, setProjectReviewMode } from "./projects";
 import {
@@ -409,16 +411,7 @@ async function runContendingTaskOperations(
       }),
   );
   const outcomesPromise = Promise.all(
-    workers.map(
-      (worker) =>
-        new Promise<ConcurrentTaskOutcome>((settle, reject) => {
-          worker.once("message", settle);
-          worker.once("error", reject);
-          worker.once("exit", (code) => {
-            if (code !== 0) reject(new Error(`Task-command worker exited with code ${code}.`));
-          });
-        }),
-    ),
+    workers.map((worker) => workerOutcome<ConcurrentTaskOutcome>(worker)),
   );
   // Observe startup failures immediately; awaiting the same promise below still propagates them.
   void outcomesPromise.catch(() => undefined);
@@ -442,7 +435,11 @@ async function runContendingTaskOperations(
     if (blockingTransaction) projectStore.database.exec("rollback");
     Atomics.store(barrier, 1, 1);
     Atomics.notify(barrier, 1, workers.length);
-    await Promise.allSettled(workers.map((worker) => worker.terminate()));
+    // Successful outcomes already include normal worker exit. Termination is only
+    // a fallback for startup, command, or cleanup failures, never the success path.
+    await Promise.allSettled(
+      workers.filter((worker) => worker.threadId !== -1).map((worker) => worker.terminate()),
+    );
   }
 }
 
