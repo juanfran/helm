@@ -2,7 +2,7 @@ import { getRouteApi, useRouter } from "@tanstack/react-router";
 
 import { RouteErrorState } from "../../components/route-state";
 
-const routeApi = getRouteApi("/search");
+const routeApi = getRouteApi("/$projectId/search");
 
 export function SearchRouteError({ error }: { error: Error }) {
   const router = useRouter();

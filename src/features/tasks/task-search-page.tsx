@@ -3,13 +3,9 @@ import { Link, getRouteApi, useRouter } from "@tanstack/react-router";
 import { useLiveSuspenseQuery } from "@tanstack/react-db";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import * as stylex from "@stylexjs/stylex";
-import { LayoutGrid, List } from "lucide-react";
 
 import { AppHeader, ProjectNavigation } from "../../components/app-header";
 import { ActionButton as Button } from "../../components/ui/action-button";
-import type { AppState } from "../../domain/projects";
-import type { SavedViewVisibleField } from "../../domain/saved-views";
-import { canonicalizeTaskSearchOrder } from "../../domain/task-filters";
 import { importantProjectEventQueryKey } from "../activity/important-project-event-query";
 import { subscribeToProjectEvents } from "../activity/project-event-subscription";
 import { DeferredTaskRouteResults } from "./deferred-task-route-results";
@@ -17,12 +13,11 @@ import { getTaskSearchCollection, taskSearchPageQueryOptions } from "./task-sear
 import { SearchFilterControls } from "./task-route-controls";
 import { TaskRouteUtilities } from "./task-route-utilities";
 import { TaskRoutePageToolsLauncher } from "./task-route-page-tools-launcher";
-import { createHumanSavedView, readSavedViews } from "../../server/task-query-functions";
+import { readSavedViews } from "../../server/task-query-functions";
 import { tokens } from "../../styles/tokens.stylex";
 
-const routeApi = getRouteApi("/search");
-
-const visibleFields: SavedViewVisibleField[] = [
+const routeApi = getRouteApi("/$projectId/search");
+const visibleFields = [
   "title",
   "lifecycle",
   "eligibility",
@@ -30,7 +25,7 @@ const visibleFields: SavedViewVisibleField[] = [
   "tags",
   "capabilities",
   "due_at",
-];
+] as const;
 
 function savedViewsQueryOptions(projectId: string) {
   return {
@@ -39,18 +34,12 @@ function savedViewsQueryOptions(projectId: string) {
   };
 }
 
-function activeProjectFromState(state: AppState) {
-  if (!state.activeProject) throw new Error("An active project is required for task search.");
-  return state.activeProject;
-}
-
 export function SearchPage() {
-  const { state, projects, input, eventCursor } = routeApi.useLoaderData();
+  const { state, project, projects, input, eventCursor } = routeApi.useLoaderData();
   const search = routeApi.useSearch();
   const router = useRouter();
   const navigate = routeApi.useNavigate();
   const queryClient = useQueryClient();
-  const project = activeProjectFromState(state);
   const projectId = project.id;
   const collection = getTaskSearchCollection(queryClient, input);
   const { data: items } = useLiveSuspenseQuery({
@@ -108,33 +97,17 @@ export function SearchPage() {
     setSaving(true);
     setSaveError(null);
     try {
-      const response = await createHumanSavedView({
-        data: {
-          projectId,
-          name: viewName.trim(),
-          definition: {
-            schemaVersion: 1,
-            filter: input.filter,
-            order: canonicalizeTaskSearchOrder(input.order, input.filter),
-            grouping:
-              search.presentation === "board"
-                ? { type: "lifecycle" as const }
-                : { type: "none" as const },
-            visibleFields,
-            presentation: search.presentation,
-          },
-          idempotencyKey: crypto.randomUUID(),
-        },
-      });
+      const { saveSearchView } = await import("./save-search-view");
+      const response = await saveSearchView(projectId, viewName, input, search.presentation);
       if (!response.ok) {
         setSaveError(response.error.message);
         return;
       }
       await queryClient.invalidateQueries({ queryKey: ["saved-views", projectId] });
       await navigate({
-        to: "/views/$viewId",
-        params: { viewId: response.view.id },
-        search: { cursor: null, project: projectId },
+        to: "/$projectId/views/$viewId",
+        params: { projectId, viewId: response.view.id },
+        search: { cursor: null },
       });
     } catch {
       setSaveError("Helm could not save this view.");
@@ -186,9 +159,7 @@ export function SearchPage() {
           <SearchFilterControls
             projectId={projectId}
             search={search}
-            onApply={(nextSearch) =>
-              void navigate({ search: { ...nextSearch, project: projectId } })
-            }
+            onApply={(nextSearch) => void navigate({ search: nextSearch })}
           />
 
           <div {...stylex.props(styles.resultToolbar)}>
@@ -221,32 +192,22 @@ export function SearchPage() {
                 </Button>
               </div>
               <fieldset aria-label="Presentation" {...stylex.props(styles.presentationGroup)}>
-                <button
-                  type="button"
-                  aria-pressed={search.presentation === "list"}
-                  onClick={() =>
-                    navigate({ search: (previous) => ({ ...previous, presentation: "list" }) })
-                  }
-                  {...stylex.props(
-                    styles.iconButton,
-                    search.presentation === "list" && styles.iconButtonActive,
-                  )}
-                >
-                  <List size={15} aria-hidden="true" /> List
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={search.presentation === "board"}
-                  onClick={() =>
-                    navigate({ search: (previous) => ({ ...previous, presentation: "board" }) })
-                  }
-                  {...stylex.props(
-                    styles.iconButton,
-                    search.presentation === "board" && styles.iconButtonActive,
-                  )}
-                >
-                  <LayoutGrid size={15} aria-hidden="true" /> Board
-                </button>
+                {(["list", "board"] as const).map((presentation) => (
+                  <button
+                    key={presentation}
+                    type="button"
+                    aria-pressed={search.presentation === presentation}
+                    onClick={() =>
+                      navigate({ search: (previous) => ({ ...previous, presentation }) })
+                    }
+                    {...stylex.props(
+                      styles.iconButton,
+                      search.presentation === presentation && styles.iconButtonActive,
+                    )}
+                  >
+                    {presentation === "list" ? "List" : "Board"}
+                  </button>
+                ))}
               </fieldset>
             </div>
           </div>
@@ -295,9 +256,9 @@ export function SearchPage() {
                 {savedViews.map((view) => (
                   <Link
                     key={view.id}
-                    to="/views/$viewId"
-                    params={{ viewId: view.id }}
-                    search={{ cursor: null, project: projectId }}
+                    to="/$projectId/views/$viewId"
+                    params={{ projectId, viewId: view.id }}
+                    search={{ cursor: null }}
                     {...stylex.props(styles.viewLink)}
                   >
                     <span>{view.name}</span>
@@ -326,26 +287,11 @@ const styles = stylex.create({
     fontSize: 12,
   },
   hero: { marginBlock: tokens.space5, paddingInline: tokens.space5, maxWidth: 760 },
-  eyebrow: {
-    color: tokens.accent,
-    fontSize: 11,
-    fontWeight: 800,
-    letterSpacing: "0.12em",
-    margin: 0,
-    textTransform: "uppercase",
-  },
   title: {
     fontSize: 28,
     letterSpacing: "-0.055em",
     lineHeight: 0.98,
     marginBlock: tokens.space3,
-  },
-  subtitle: {
-    color: tokens.foregroundMuted,
-    fontSize: 16,
-    lineHeight: 1.6,
-    margin: 0,
-    maxWidth: 660,
   },
   layout: {
     paddingInline: tokens.space5,
@@ -412,7 +358,6 @@ const styles = stylex.create({
     borderWidth: 1,
     padding: tokens.space4,
   },
-  cardHeading: { alignItems: "center", display: "flex", gap: tokens.space2 },
   sideTitle: { fontSize: 15, marginBlockStart: 0 },
   cardCopy: { color: tokens.foregroundMuted, fontSize: 13, lineHeight: 1.5 },
   saveForm: { display: "grid", gap: tokens.space2 },

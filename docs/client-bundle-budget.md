@@ -8,15 +8,19 @@ All limits use decimal bytes (1 kB = 1,000 bytes). Gzip measurements compress ea
 independently with Node.js `gzipSync` at level 9 and `mtime: 0`, matching the bytes transferred for
 separate HTTP assets while keeping results deterministic.
 
-| Measurement                                     | Raw limit | Gzip limit |
-| ----------------------------------------------- | --------: | ---------: |
-| Initial client shell                            |    500 kB |     150 kB |
-| Any individual JavaScript asset                 |    450 kB |     140 kB |
-| Any dynamic-entry increment                     |    500 kB |     160 kB |
-| `/` navigation                                  |    900 kB |     280 kB |
-| `/search` navigation                            |    850 kB |     260 kB |
-| `/views/$viewId` navigation                     |    850 kB |     260 kB |
-| `/projects/$projectId/tasks/$taskId` navigation |  1,050 kB |     330 kB |
+| Measurement                            | Raw limit | Gzip limit |
+| -------------------------------------- | --------: | ---------: |
+| Initial client shell                   |    500 kB |     150 kB |
+| Any individual JavaScript asset        |    450 kB |     140 kB |
+| Any dynamic-entry increment            |    500 kB |     160 kB |
+| `/` navigation                         |    900 kB |     280 kB |
+| `/$projectId/tasks` navigation         |    900 kB |     280 kB |
+| `/$projectId/dashboard` navigation     |    900 kB |     280 kB |
+| `/$projectId/activity` navigation      |    900 kB |     280 kB |
+| `/$projectId/settings` navigation      |    900 kB |     280 kB |
+| `/$projectId/search` navigation        |    850 kB |     260 kB |
+| `/$projectId/views/$viewId` navigation |    850 kB |     260 kB |
+| `/$projectId/tasks/$taskId` navigation |  1,050 kB |     330 kB |
 
 The limits were fixed from the Node.js 22.13.0 production graph on 2026-09-04. That baseline measured
 369,866 raw / 120,145 gzip bytes for the client shell, 871,529 / 263,442 for `/`, 837,132 /
@@ -30,7 +34,12 @@ Issue [#23](https://github.com/juanfran/helm/issues/23) adds addressable task de
 985,204 raw / 300,919 gzip bytes during implementation). Existing route, shell, asset, and
 dynamic-entry limits are unchanged.
 
-The route split increments at that baseline were:
+Issue [#24](https://github.com/juanfran/helm/issues/24) moves navigation into file-based project paths.
+The four workspace pages retain the 900/280 workspace ceiling. Their automatically loaded page
+modules count toward each direct navigation; only the dashboard route may automatically load the
+dashboard module. Search/view/detail routes keep their prior ceilings under their new paths.
+
+The route split increments at the original baseline (using the former URLs) were:
 
 | Lazy route entry                 | Raw bytes | Gzip bytes | Applied increment budget |
 | -------------------------------- | --------: | ---------: | -----------------------: |
@@ -66,12 +75,16 @@ The measurements are defined as follows:
 The checker also requires separate dynamic manifest entries for each route property below. This makes a
 route regression fail even when minification happens to keep its combined chunk below the byte limit.
 
-| Route                                | Required split entries             |
-| ------------------------------------ | ---------------------------------- |
-| `/`                                  | loader, component, error component |
-| `/search`                            | loader, component, error component |
-| `/views/$viewId`                     | loader, component, error component |
-| `/projects/$projectId/tasks/$taskId` | loader, component, error component |
+| Route                       | Required split entries             |
+| --------------------------- | ---------------------------------- |
+| `/`                         | loader, component, error component |
+| `/$projectId/tasks`         | loader, component, error component |
+| `/$projectId/dashboard`     | loader, component, error component |
+| `/$projectId/activity`      | loader, component, error component |
+| `/$projectId/settings`      | loader, component, error component |
+| `/$projectId/search`        | loader, component, error component |
+| `/$projectId/views/$viewId` | loader, component, error component |
+| `/$projectId/tasks/$taskId` | loader, component, error component |
 
 `CLIENT_NAVIGATION_CRITICAL_SOURCES` in `scripts/client-bundle-budget.mjs` is the source-based contract
 for dynamic modules requested automatically while a route renders. Each configured source must resolve
@@ -80,23 +93,27 @@ split graph. Missing, non-dynamic, ambiguous, and unreachable declarations fail 
 diagnostics. A dynamic import triggered only after focus, pointer intent, or activation does not belong
 in this map; it remains an interaction increment instead.
 
-| Navigation                           | Automatically requested dynamic source                            |
-| ------------------------------------ | ----------------------------------------------------------------- |
-| `/`                                  | `src/features/projects/project-landing.tsx` (first-project setup) |
-| `/search`                            | None                                                              |
-| `/views/$viewId`                     | None                                                              |
-| `/projects/$projectId/tasks/$taskId` | `src/features/tasks/task-detail-panel.tsx`                        |
+| Navigation                  | Automatically requested dynamic source                            |
+| --------------------------- | ----------------------------------------------------------------- |
+| `/`                         | `src/features/projects/project-landing.tsx` (first-project setup) |
+| `/$projectId/tasks`         | None                                                              |
+| `/$projectId/dashboard`     | `src/features/dashboard/operational-dashboard.tsx`                |
+| `/$projectId/activity`      | `src/features/activity/project-activity-feed.tsx`                 |
+| `/$projectId/settings`      | `src/features/projects/project-review-mode-control.tsx`           |
+| `/$projectId/search`        | None                                                              |
+| `/$projectId/views/$viewId` | None                                                              |
+| `/$projectId/tasks/$taskId` | `src/features/tasks/task-detail-panel.tsx`                        |
 
 The workspace, search page, and saved-view page are static dependencies of their route component
 splits, so their bytes already belong to those route closures. Their optional dynamic descendants are
 activated only by explicit user intent and therefore stay outside the navigation map, except the
-first-project setup and direct task detail listed above. The home budget conservatively includes
+first-project setup, direct workspace pages, and task detail listed above. The home budget conservatively includes
 setup even when an existing project makes that download unnecessary.
 
 `src/features/dashboard/operational-dashboard.tsx` and
 `src/features/tasks/rich-text-editor.tsx` must also remain dynamic entries. They are interaction-heavy
 surfaces and must not silently rejoin a route's initial closure. Their emitted files must be absent from
-every normal route navigation closure. The emitted files for every required route and feature entry must
+every route navigation closure except the dashboard module on `/$projectId/dashboard` itself. The emitted files for every required route and feature entry must
 also be absent from the client shell's static closure, even when Vite still marks the corresponding
 manifest record as dynamic.
 

@@ -116,10 +116,12 @@ type ProjectDataManagementControlModuleLoader = RetryableLazyModuleLoader<{
 export function WorkspacePage({
   state,
   search,
+  view = "tasks",
   selectedTaskId = null,
 }: {
   state: WorkspacePageState;
   search: WorkspaceSearch;
+  view?: import("./workspace-search").WorkspaceView;
   selectedTaskId?: string | null;
 }) {
   const router = useRouter();
@@ -130,6 +132,7 @@ export function WorkspacePage({
         key={state.activeProject.id}
         state={state}
         search={search}
+        view={view}
         selectedTaskId={selectedTaskId}
         project={state.activeProject}
         projects={state.projects}
@@ -216,6 +219,7 @@ export function ProjectLandingDataManagementIntent({
 function ActiveProjectHome({
   state,
   search,
+  view,
   selectedTaskId,
   project,
   projects,
@@ -224,6 +228,7 @@ function ActiveProjectHome({
 }: {
   state: WorkspacePageState;
   search: WorkspaceSearch;
+  view: import("./workspace-search").WorkspaceView;
   selectedTaskId: string | null;
   project: Project;
   projects: readonly Project[];
@@ -575,12 +580,12 @@ function ActiveProjectHome({
       project={project}
       savedViews={savedViews}
       navigation={{
-        view: search.view ?? "tasks",
+        view,
         selectedTaskId,
         filter: search.filter,
         renderTaskLink: (task, props, children) => (
           <Link
-            to="/projects/$projectId/tasks/$taskId"
+            to="/$projectId/tasks/$taskId"
             params={{ projectId: project.id, taskId: task.id }}
             search={{ filter: search.filter }}
             {...props}
@@ -589,18 +594,28 @@ function ActiveProjectHome({
           </Link>
         ),
         renderBackLink: (props) => (
-          <Link to="/" search={{ project: project.id, filter: search.filter }} {...props}>
+          <Link
+            to="/$projectId/tasks"
+            params={{ projectId: project.id }}
+            search={{ filter: search.filter }}
+            {...props}
+          >
             Back to tasks
           </Link>
         ),
         renderFilterLink: (filter, props, children) => (
-          <Link to="/" search={{ project: project.id, filter }} {...props}>
+          <Link
+            to="/$projectId/tasks"
+            params={{ projectId: project.id }}
+            search={{ filter }}
+            {...props}
+          >
             {children}
           </Link>
         ),
         onTaskCreated: (taskId) => {
           void router.navigate({
-            to: "/projects/$projectId/tasks/$taskId",
+            to: "/$projectId/tasks/$taskId",
             params: { projectId: project.id, taskId },
             search: { filter: search.filter },
           });

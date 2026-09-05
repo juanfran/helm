@@ -119,7 +119,7 @@ function RouteNotificationCenter({
       tasks={tasks}
       defaultOpen={defaultOpen}
       onSelectTask={(taskId) => {
-        void navigate({ to: "/projects/$projectId/tasks/$taskId", params: { projectId, taskId } });
+        void navigate({ to: "/$projectId/tasks/$taskId", params: { projectId, taskId } });
       }}
     />
   );

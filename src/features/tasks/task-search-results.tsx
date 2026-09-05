@@ -289,7 +289,7 @@ function TaskResultRow({
   const fields = (
     <>
       <Link
-        to="/projects/$projectId/tasks/$taskId"
+        to="/$projectId/tasks/$taskId"
         params={{ projectId: item.task.projectId, taskId: item.task.id }}
         aria-label={`Task #${item.task.sequence}`}
         {...stylex.props(styles.reference, styles.taskLink)}
@@ -355,7 +355,7 @@ function TaskResultField({ item, field }: { item: TaskSearchItem; field: SavedVi
   if (field === "title")
     return (
       <Link
-        to="/projects/$projectId/tasks/$taskId"
+        to="/$projectId/tasks/$taskId"
         params={{ projectId: item.task.projectId, taskId: item.task.id }}
         aria-label={`Open task #${item.task.sequence}: ${item.task.title}`}
         {...stylex.props(styles.field, styles.title, styles.taskLink)}

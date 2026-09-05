@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { Route as SearchRoute } from "../../routes/search";
-import { Route as SavedViewRoute } from "../../routes/views.$viewId";
+import { Route as SearchRoute } from "../../routes/$projectId.search";
+import { Route as SavedViewRoute } from "../../routes/$projectId.views.$viewId";
 import { SavedViewPage } from "./saved-view-page";
 import { SearchPage } from "./task-search-page";
 

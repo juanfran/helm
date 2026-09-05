@@ -1,4 +1,4 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
+import { createFileRoute, stripSearchParams } from "@tanstack/react-router";
 
 import { RoutePendingState } from "../components/route-state";
 import { searchTasksInputSchema } from "../domain/task-filters";
@@ -12,20 +12,18 @@ import { readProjectEvents } from "../server/activity-functions";
 import { readAppState, readProjects } from "../server/project-functions";
 import { readSavedView } from "../server/task-query-functions";
 
-export const Route = createFileRoute("/views/$viewId")({
+export const Route = createFileRoute("/$projectId/views/$viewId")({
   ssr: false,
   codeSplitGroupings: [["loader"], ["component"], ["errorComponent"]],
   validateSearch: parseSavedViewSearchRouteParams,
+  search: { middlewares: [stripSearchParams({ cursor: null })] },
   loaderDeps: ({ search }) => search,
   loader: async ({ context, deps, params }) => {
     const [state, projects] = await Promise.all([readAppState(), readProjects()]);
-    if (deps.project) {
-      const project = projects.find((item) => item.id === deps.project);
-      if (!project) throw new Error("This project could not be found.");
-      state.activeProject = project;
-    }
-    if (!state.activeProject) throw redirect({ to: "/" });
-    const projectId = state.activeProject.id;
+    const project = projects.find((item) => item.id === params.projectId);
+    if (!project) throw new Error("This project could not be found.");
+    state.activeProject = project;
+    const projectId = project.id;
     const eventPage = await readProjectEvents({
       data: {
         projectId,

@@ -1,30 +1,31 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
+import { createFileRoute, stripSearchParams } from "@tanstack/react-router";
 
 import { RoutePendingState } from "../components/route-state";
 import { SearchPage } from "../features/tasks/task-search-page";
 import { getTaskSearchCollection } from "../features/tasks/task-search-collection";
 import { taskSearchInputFromParams } from "../features/tasks/task-search-params";
 import { SearchRouteError } from "../features/tasks/task-search-route-error";
-import { parseTaskSearchRouteParams } from "../features/tasks/task-search-route-params";
+import {
+  emptyTaskSearchParams,
+  parseTaskSearchRouteParams,
+} from "../features/tasks/task-search-route-params";
 import { taskTagsQueryOptions } from "../features/tasks/task-tags-query";
 import { readProjectEvents } from "../server/activity-functions";
 import { readAppState, readProjects } from "../server/project-functions";
 import { readSavedViews } from "../server/task-query-functions";
 
-export const Route = createFileRoute("/search")({
+export const Route = createFileRoute("/$projectId/search")({
   ssr: false,
   codeSplitGroupings: [["loader"], ["component"], ["errorComponent"]],
   validateSearch: parseTaskSearchRouteParams,
+  search: { middlewares: [stripSearchParams(emptyTaskSearchParams)] },
   loaderDeps: ({ search: { presentation: _presentation, ...query } }) => query,
-  loader: async ({ context, deps }) => {
+  loader: async ({ context, deps, params }) => {
     const [state, projects] = await Promise.all([readAppState(), readProjects()]);
-    if (deps.project) {
-      const project = projects.find((item) => item.id === deps.project);
-      if (!project) throw new Error("This project could not be found.");
-      state.activeProject = project;
-    }
-    if (!state.activeProject) throw redirect({ to: "/" });
-    const projectId = state.activeProject.id;
+    const project = projects.find((item) => item.id === params.projectId);
+    if (!project) throw new Error("This project could not be found.");
+    state.activeProject = project;
+    const projectId = project.id;
     const eventPage = await readProjectEvents({
       data: {
         projectId,
@@ -48,6 +49,7 @@ export const Route = createFileRoute("/search")({
     ]);
     return {
       state,
+      project,
       projects: [...projects],
       input,
       eventCursor: eventPage.latestCursor,

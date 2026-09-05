@@ -3,6 +3,13 @@
 Tracking: [#23](https://github.com/juanfran/helm/issues/23). The issue contains the original
 2026-09-05 audit and reproduction steps.
 
+Follow-up [#24](https://github.com/juanfran/helm/issues/24) replaces project/view query navigation
+with concrete project-scoped file routes. Task URLs are now `/<projectId>/tasks/<taskId>` and
+workspace pages use `/<projectId>/tasks`, `/dashboard`, `/activity`, and `/settings`. Search and
+saved views are project-scoped too; only actual search/filter/pagination values use query strings.
+There are no legacy compatibility redirects. Route tests cover default stripping and path identity;
+the browser smoke covers direct visits, refresh/back, new tabs, and missing/old URLs.
+
 ## Interaction contract
 
 | Original finding                                 | Implemented behavior                                                                                                                           |

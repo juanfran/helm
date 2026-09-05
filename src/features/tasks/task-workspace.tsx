@@ -583,9 +583,9 @@ export function TaskWorkspace({
                 {savedViews.map((view) => (
                   <Link
                     key={view.id}
-                    to="/views/$viewId"
-                    params={{ viewId: view.id }}
-                    search={{ cursor: null, project: project.id }}
+                    to="/$projectId/views/$viewId"
+                    params={{ projectId: project.id, viewId: view.id }}
+                    search={{ cursor: null }}
                     {...stylex.props(styles.viewButton)}
                   >
                     {view.name}
@@ -999,41 +999,6 @@ const styles = stylex.create({
   reviewPolicyFallback: { minHeight: 84 },
   taskDetailFallback: { minHeight: 160 },
   utilityFallback: { minHeight: 36, minWidth: 112, padding: tokens.space2, width: "auto" },
-  header: {
-    alignItems: "center",
-    borderBlockEndColor: tokens.border,
-    borderBlockEndStyle: "solid",
-    borderBlockEndWidth: 1,
-    display: "flex",
-    justifyContent: "space-between",
-    minHeight: 64,
-    paddingInline: tokens.space6,
-    "@media (max-width: 900px)": {
-      flexWrap: "wrap",
-      gap: tokens.space3,
-      paddingBlock: tokens.space3,
-    },
-  },
-  projectToolbar: {
-    borderBlockEndColor: tokens.border,
-    borderBlockEndStyle: "solid",
-    borderBlockEndWidth: 1,
-    paddingBlock: tokens.space3,
-    paddingInline: tokens.space6,
-    "@media (max-width: 600px)": { paddingInline: tokens.space4 },
-  },
-  brand: { alignItems: "center", display: "flex", gap: tokens.space3 },
-  mark: {
-    alignItems: "center",
-    backgroundColor: tokens.foreground,
-    borderRadius: 7,
-    color: tokens.background,
-    display: "inline-flex",
-    height: 30,
-    justifyContent: "center",
-    width: 30,
-  },
-  projectName: { color: tokens.foregroundMuted, fontSize: 12, marginInlineStart: tokens.space2 },
   viewNavigation: {
     backgroundColor: tokens.surfaceMuted,
     borderRadius: tokens.radius2,

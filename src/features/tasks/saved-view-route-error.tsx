@@ -2,7 +2,7 @@ import { getRouteApi, useRouter } from "@tanstack/react-router";
 
 import { RouteErrorState } from "../../components/route-state";
 
-const routeApi = getRouteApi("/views/$viewId");
+const routeApi = getRouteApi("/$projectId/views/$viewId");
 
 export function ViewRouteError({ error }: { error: Error }) {
   const router = useRouter();

@@ -54,9 +54,25 @@ On ready tasks, **Save changes** saves content and planning together. Cancellati
 
 ### Navigate without losing your work
 
-Every task has its own `/projects/<projectId>/tasks/<taskId>` URL. Open tasks from the queue,
+Every task has its own `/<projectId>/tasks/<taskId>` URL. Open tasks from the queue,
 Search, or a saved view; copy the browser address to return directly to that task. Browser Back
 restores the previous page. On a narrow screen, **Back to tasks** returns to the queue.
+
+Project pages use concrete file-based routes:
+
+| Page       | Path                          |
+| ---------- | ----------------------------- |
+| Tasks      | `/<projectId>/tasks`          |
+| Dashboard  | `/<projectId>/dashboard`      |
+| Activity   | `/<projectId>/activity`       |
+| Settings   | `/<projectId>/settings`       |
+| Search     | `/<projectId>/search`         |
+| Saved view | `/<projectId>/views/<viewId>` |
+
+Project and page identity never come from query parameters. Search adds only actual filter values
+(for example, `/<projectId>/search?q=review`); empty/default values are omitted. `/` is the app entry:
+it opens the selected project's task queue, or setup when no project is selected. Old URLs are not
+supported or redirected for compatibility.
 
 Unfinished edits are kept in the current browser tab across navigation and reloads, but they are
 not shared with agents until you save. If browser storage is unavailable, Helm warns you and keeps

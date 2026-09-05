@@ -233,7 +233,7 @@ try {
       ![...requestedScripts].some((url) => url.includes("rich-text-editor")),
       "The editor loaded before its interaction.",
     );
-    assert.match(new URL(page.url()).pathname, /^\/projects\/[^/]+\/tasks\/[^/]+$/);
+    assert.match(new URL(page.url()).pathname, /^\/[^/]+\/tasks\/[^/]+$/);
     const directUrl = page.url();
     await page.getByLabel("Expected outcome", { exact: true }).fill("Partial instructions");
     await page.getByRole("button", { name: "Save draft", exact: true }).click();
@@ -455,6 +455,7 @@ try {
   });
 
   await step("intent-preloaded search and direct saved-view navigation", async () => {
+    const beforePreload = page.url();
     const searchLink = page.getByRole("link", { name: "Search", exact: true });
     const preload = page.waitForResponse(
       (response) =>
@@ -462,7 +463,7 @@ try {
     );
     await searchLink.hover();
     await preload;
-    assert.equal(new URL(page.url()).pathname, "/");
+    assert.equal(page.url(), beforePreload);
     await searchLink.click();
     await expect(page.getByRole("heading", { name: "Search tasks" })).toBeVisible();
     await page.reload();
@@ -472,7 +473,7 @@ try {
     await expect(
       page.getByRole("heading", { name: "Workflow review queue", exact: true }),
     ).toBeVisible();
-    assert.match(new URL(page.url()).pathname, /^\/views\//);
+    assert.match(new URL(page.url()).pathname, /^\/[^/]+\/views\//);
     await page.reload();
     await expect(
       page.getByRole("heading", { name: "Workflow review queue", exact: true }),
@@ -549,6 +550,50 @@ try {
 
   assert.deepEqual(browserErrors, [], "Unexpected browser console or hydration errors.");
 
+  await step("project paths, clean search URLs, and direct workspace navigation", async () => {
+    for (const [label, path] of [
+      ["Settings", "settings"],
+      ["Activity", "activity"],
+      ["Dashboard", "dashboard"],
+      ["Tasks", "tasks"],
+    ]) {
+      // oxlint-disable-next-line no-await-in-loop -- Exercise successive browser history entries.
+      await page.getByRole("link", { name: label, exact: true }).click();
+      // oxlint-disable-next-line no-await-in-loop
+      await expect(page).toHaveURL(`${origin}/${projectId}/${path}`);
+      // oxlint-disable-next-line no-await-in-loop
+      await page.reload();
+      // oxlint-disable-next-line no-await-in-loop
+      await expect(page.getByRole("link", { name: label, exact: true })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+    }
+    await page.getByRole("link", { name: "Search", exact: true }).click();
+    await expect(page).toHaveURL(`${origin}/${projectId}/search`);
+    await page.getByLabel("Search text", { exact: true }).fill("workflow");
+    await page.getByRole("button", { name: "Apply query", exact: true }).click();
+    await expect(page).toHaveURL(`${origin}/${projectId}/search?q=workflow`);
+    await page.reload();
+    await expect(page.getByLabel("Search text", { exact: true })).toHaveValue("workflow");
+    await page.goBack();
+    await expect(page).toHaveURL(`${origin}/${projectId}/search`);
+    const direct = await browser.newPage();
+    try {
+      await direct.goto(`${origin}/${projectId}/tasks/${taskId}`);
+      await expect(direct.getByLabel("Title", { exact: true })).toHaveValue(title);
+      await direct.goto(`${origin}/missing-project/settings`);
+      await expect(
+        direct.getByRole("heading", { name: "Workspace could not be loaded" }),
+      ).toBeVisible();
+      await direct.goto(`${origin}/projects/${projectId}/tasks/${taskId}`);
+      assert.equal(new URL(direct.url()).pathname, `/projects/${projectId}/tasks/${taskId}`);
+      await expect(direct.getByLabel("Title", { exact: true })).not.toBeVisible();
+    } finally {
+      await direct.close();
+    }
+  });
+
   await step("visible slow route loading and recoverable request failure", async () => {
     const probe = await browser.newPage();
     probe.setDefaultTimeout(timeout);
@@ -569,7 +614,7 @@ try {
       await route.continue();
     });
     try {
-      await probe.goto(`${origin}/search`);
+      await probe.goto(`${origin}/${projectId}/search`);
       await expect.poll(() => held, { timeout }).toBeGreaterThan(0);
       await expect(
         probe.getByText("Loading this view…", { exact: true }).filter({ visible: true }).first(),
@@ -609,6 +654,42 @@ try {
       await probe.close();
     }
   });
+  await step(
+    "project switching and path-scoped links independent of the active preference",
+    async () => {
+      const secondRepository = join(temporaryRoot, "second-repository");
+      mkdirSync(join(secondRepository, ".git"), { recursive: true });
+      await page.getByRole("button", { name: "Switch project", exact: true }).click();
+      await page.getByRole("button", { name: "Add project", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Add local project", exact: true });
+      await dialog.getByLabel("Repository root", { exact: true }).fill(secondRepository);
+      await dialog.getByRole("button", { name: "Create and switch", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
+      const secondProjectId = new URL(page.url()).pathname.split("/")[1];
+      assert(secondProjectId && secondProjectId !== projectId);
+      await expect(page).toHaveURL(`${origin}/${secondProjectId}/tasks`);
+      await page.getByRole("link", { name: "Settings", exact: true }).click();
+      await expect(page).toHaveURL(`${origin}/${secondProjectId}/settings`);
+      await page.goto(`${origin}/${projectId}/tasks/${taskId}`);
+      await expect(page.getByLabel("Title", { exact: true })).toHaveValue(title);
+      await page.getByRole("link", { name: "Search", exact: true }).click();
+      await expect(page).toHaveURL(`${origin}/${projectId}/search`);
+      await expect(page.getByRole("region", { name: "Task search results" })).toContainText(title);
+      await page.getByLabel("Search text", { exact: true }).fill("workflow");
+      await page.getByRole("button", { name: "Apply query", exact: true }).click();
+      await expect(page).toHaveURL(`${origin}/${projectId}/search?q=workflow`);
+      await page.getByRole("link", { name: /Workflow review queue/ }).click();
+      assert(new URL(page.url()).pathname.startsWith(`/${projectId}/views/`));
+      await page.reload();
+      await expect(page.getByRole("region", { name: "Task search results" })).toContainText(title);
+      const catalog = await call(agent.client, "list_projects");
+      assert.equal(
+        catalog.activeProjectId,
+        secondProjectId,
+        "Opening a scoped URL must not change global project selection.",
+      );
+    },
+  );
 } catch (error) {
   failure = error;
   if (page && !page.isClosed()) {

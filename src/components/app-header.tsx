@@ -6,6 +6,14 @@ import { tokens } from "../styles/tokens.stylex";
 import { emptyTaskSearchParams } from "../features/tasks/task-search-params";
 import type { WorkspaceView } from "../features/projects/workspace-search";
 
+const workspacePaths = {
+  tasks: "/$projectId/tasks",
+  dashboard: "/$projectId/dashboard",
+  activity: "/$projectId/activity",
+  settings: "/$projectId/settings",
+  search: "/$projectId/search",
+} as const;
+
 export function ProjectNavigation({
   projectId,
   current,
@@ -15,25 +23,18 @@ export function ProjectNavigation({
 }) {
   return (
     <nav aria-label="Project navigation" {...stylex.props(styles.navigation)}>
-      {(["dashboard", "tasks", "activity", "settings"] as const).map((view) => (
+      {(["dashboard", "tasks", "activity", "settings", "search"] as const).map((view) => (
         <Link
           key={view}
-          to="/"
-          search={{ project: projectId, view }}
+          to={workspacePaths[view]}
+          params={{ projectId }}
+          search={view === "search" ? emptyTaskSearchParams : {}}
           aria-current={current === view ? "page" : undefined}
           {...stylex.props(styles.navItem, current === view && styles.active)}
         >
           {view.charAt(0).toUpperCase() + view.slice(1)}
         </Link>
       ))}
-      <Link
-        to="/search"
-        search={{ ...emptyTaskSearchParams, project: projectId }}
-        aria-current={current === "search" ? "page" : undefined}
-        {...stylex.props(styles.navItem, current === "search" && styles.active)}
-      >
-        Search
-      </Link>
     </nav>
   );
 }

@@ -18,7 +18,7 @@ import { TaskRoutePageToolsLauncher } from "./task-route-page-tools-launcher";
 import { archiveHumanSavedView } from "../../server/task-query-functions";
 import { tokens } from "../../styles/tokens.stylex";
 
-const routeApi = getRouteApi("/views/$viewId");
+const routeApi = getRouteApi("/$projectId/views/$viewId");
 
 function activeProjectFromState(state: AppState) {
   if (!state.activeProject) throw new Error("An active project is required for saved views.");
@@ -55,7 +55,7 @@ export function SavedViewPage() {
             });
           }
           if (input.cursor) {
-            await navigate({ search: { cursor: null, project: projectId }, replace: true });
+            await navigate({ search: { cursor: null }, replace: true });
             return;
           }
           if (event.changes.scopes.includes("projects")) {
@@ -99,7 +99,11 @@ export function SavedViewPage() {
         return;
       }
       await queryClient.invalidateQueries({ queryKey: ["saved-views", projectId] });
-      await navigate({ to: "/search", search: { ...emptyTaskSearchParams, project: projectId } });
+      await navigate({
+        to: "/$projectId/search",
+        params: { projectId },
+        search: emptyTaskSearchParams,
+      });
     } catch {
       setArchiveError("Helm could not archive this view.");
     } finally {
@@ -174,7 +178,7 @@ export function SavedViewPage() {
               variant="quiet"
               type="button"
               disabled={!input.cursor}
-              onClick={() => navigate({ search: { cursor: null, project: projectId } })}
+              onClick={() => navigate({ search: { cursor: null } })}
             >
               First page
             </Button>
@@ -182,7 +186,7 @@ export function SavedViewPage() {
               variant="quiet"
               type="button"
               disabled={!page.nextCursor}
-              onClick={() => navigate({ search: { cursor: page.nextCursor, project: projectId } })}
+              onClick={() => navigate({ search: { cursor: page.nextCursor } })}
             >
               Next page
             </Button>

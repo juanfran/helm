@@ -10,21 +10,40 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as SearchRouteImport } from './routes/search'
+import { Route as ProjectIdActivityRouteImport } from './routes/$projectId.activity'
+import { Route as ProjectIdDashboardRouteImport } from './routes/$projectId.dashboard'
+import { Route as ProjectIdSearchRouteImport } from './routes/$projectId.search'
+import { Route as ProjectIdSettingsRouteImport } from './routes/$projectId.settings'
 import { Route as ApiEventsRouteImport } from './routes/api/events'
 import { Route as ApiMcpRouteImport } from './routes/api/mcp'
 import { Route as ApiPortabilityRouteImport } from './routes/api/portability'
-import { Route as ViewsViewIdRouteImport } from './routes/views.$viewId'
-import { Route as ProjectsProjectIdTasksTaskIdRouteImport } from './routes/projects.$projectId.tasks.$taskId'
+import { Route as ProjectIdTasksIndexRouteImport } from './routes/$projectId.tasks.index'
+import { Route as ProjectIdTasksTaskIdRouteImport } from './routes/$projectId.tasks.$taskId'
+import { Route as ProjectIdViewsViewIdRouteImport } from './routes/$projectId.views.$viewId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SearchRoute = SearchRouteImport.update({
-  id: '/search',
-  path: '/search',
+const ProjectIdActivityRoute = ProjectIdActivityRouteImport.update({
+  id: '/$projectId/activity',
+  path: '/$projectId/activity',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProjectIdDashboardRoute = ProjectIdDashboardRouteImport.update({
+  id: '/$projectId/dashboard',
+  path: '/$projectId/dashboard',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProjectIdSearchRoute = ProjectIdSearchRouteImport.update({
+  id: '/$projectId/search',
+  path: '/$projectId/search',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProjectIdSettingsRoute = ProjectIdSettingsRouteImport.update({
+  id: '/$projectId/settings',
+  path: '/$projectId/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiEventsRoute = ApiEventsRouteImport.update({
@@ -42,84 +61,116 @@ const ApiPortabilityRoute = ApiPortabilityRouteImport.update({
   path: '/api/portability',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ViewsViewIdRoute = ViewsViewIdRouteImport.update({
-  id: '/views/$viewId',
-  path: '/views/$viewId',
+const ProjectIdTasksIndexRoute = ProjectIdTasksIndexRouteImport.update({
+  id: '/$projectId/tasks/',
+  path: '/$projectId/tasks/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ProjectsProjectIdTasksTaskIdRoute =
-  ProjectsProjectIdTasksTaskIdRouteImport.update({
-    id: '/projects/$projectId/tasks/$taskId',
-    path: '/projects/$projectId/tasks/$taskId',
-    getParentRoute: () => rootRouteImport,
-  } as any)
+const ProjectIdTasksTaskIdRoute = ProjectIdTasksTaskIdRouteImport.update({
+  id: '/$projectId/tasks/$taskId',
+  path: '/$projectId/tasks/$taskId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProjectIdViewsViewIdRoute = ProjectIdViewsViewIdRouteImport.update({
+  id: '/$projectId/views/$viewId',
+  path: '/$projectId/views/$viewId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/search': typeof SearchRoute
+  '/$projectId/activity': typeof ProjectIdActivityRoute
+  '/$projectId/dashboard': typeof ProjectIdDashboardRoute
+  '/$projectId/search': typeof ProjectIdSearchRoute
+  '/$projectId/settings': typeof ProjectIdSettingsRoute
   '/api/events': typeof ApiEventsRoute
   '/api/mcp': typeof ApiMcpRoute
   '/api/portability': typeof ApiPortabilityRoute
-  '/views/$viewId': typeof ViewsViewIdRoute
-  '/projects/$projectId/tasks/$taskId': typeof ProjectsProjectIdTasksTaskIdRoute
+  '/$projectId/tasks/$taskId': typeof ProjectIdTasksTaskIdRoute
+  '/$projectId/views/$viewId': typeof ProjectIdViewsViewIdRoute
+  '/$projectId/tasks/': typeof ProjectIdTasksIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/search': typeof SearchRoute
+  '/$projectId/activity': typeof ProjectIdActivityRoute
+  '/$projectId/dashboard': typeof ProjectIdDashboardRoute
+  '/$projectId/search': typeof ProjectIdSearchRoute
+  '/$projectId/settings': typeof ProjectIdSettingsRoute
   '/api/events': typeof ApiEventsRoute
   '/api/mcp': typeof ApiMcpRoute
   '/api/portability': typeof ApiPortabilityRoute
-  '/views/$viewId': typeof ViewsViewIdRoute
-  '/projects/$projectId/tasks/$taskId': typeof ProjectsProjectIdTasksTaskIdRoute
+  '/$projectId/tasks/$taskId': typeof ProjectIdTasksTaskIdRoute
+  '/$projectId/views/$viewId': typeof ProjectIdViewsViewIdRoute
+  '/$projectId/tasks': typeof ProjectIdTasksIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/search': typeof SearchRoute
+  '/$projectId/activity': typeof ProjectIdActivityRoute
+  '/$projectId/dashboard': typeof ProjectIdDashboardRoute
+  '/$projectId/search': typeof ProjectIdSearchRoute
+  '/$projectId/settings': typeof ProjectIdSettingsRoute
   '/api/events': typeof ApiEventsRoute
   '/api/mcp': typeof ApiMcpRoute
   '/api/portability': typeof ApiPortabilityRoute
-  '/views/$viewId': typeof ViewsViewIdRoute
-  '/projects/$projectId/tasks/$taskId': typeof ProjectsProjectIdTasksTaskIdRoute
+  '/$projectId/tasks/$taskId': typeof ProjectIdTasksTaskIdRoute
+  '/$projectId/views/$viewId': typeof ProjectIdViewsViewIdRoute
+  '/$projectId/tasks/': typeof ProjectIdTasksIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/search'
+    | '/$projectId/activity'
+    | '/$projectId/dashboard'
+    | '/$projectId/search'
+    | '/$projectId/settings'
     | '/api/events'
     | '/api/mcp'
     | '/api/portability'
-    | '/views/$viewId'
-    | '/projects/$projectId/tasks/$taskId'
+    | '/$projectId/tasks/$taskId'
+    | '/$projectId/views/$viewId'
+    | '/$projectId/tasks/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/search'
+    | '/$projectId/activity'
+    | '/$projectId/dashboard'
+    | '/$projectId/search'
+    | '/$projectId/settings'
     | '/api/events'
     | '/api/mcp'
     | '/api/portability'
-    | '/views/$viewId'
-    | '/projects/$projectId/tasks/$taskId'
+    | '/$projectId/tasks/$taskId'
+    | '/$projectId/views/$viewId'
+    | '/$projectId/tasks'
   id:
     | '__root__'
     | '/'
-    | '/search'
+    | '/$projectId/activity'
+    | '/$projectId/dashboard'
+    | '/$projectId/search'
+    | '/$projectId/settings'
     | '/api/events'
     | '/api/mcp'
     | '/api/portability'
-    | '/views/$viewId'
-    | '/projects/$projectId/tasks/$taskId'
+    | '/$projectId/tasks/$taskId'
+    | '/$projectId/views/$viewId'
+    | '/$projectId/tasks/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  SearchRoute: typeof SearchRoute
+  ProjectIdActivityRoute: typeof ProjectIdActivityRoute
+  ProjectIdDashboardRoute: typeof ProjectIdDashboardRoute
+  ProjectIdSearchRoute: typeof ProjectIdSearchRoute
+  ProjectIdSettingsRoute: typeof ProjectIdSettingsRoute
   ApiEventsRoute: typeof ApiEventsRoute
   ApiMcpRoute: typeof ApiMcpRoute
   ApiPortabilityRoute: typeof ApiPortabilityRoute
-  ViewsViewIdRoute: typeof ViewsViewIdRoute
-  ProjectsProjectIdTasksTaskIdRoute: typeof ProjectsProjectIdTasksTaskIdRoute
+  ProjectIdTasksTaskIdRoute: typeof ProjectIdTasksTaskIdRoute
+  ProjectIdViewsViewIdRoute: typeof ProjectIdViewsViewIdRoute
+  ProjectIdTasksIndexRoute: typeof ProjectIdTasksIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -131,11 +182,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/search': {
-      id: '/search'
-      path: '/search'
-      fullPath: '/search'
-      preLoaderRoute: typeof SearchRouteImport
+    '/$projectId/activity': {
+      id: '/$projectId/activity'
+      path: '/$projectId/activity'
+      fullPath: '/$projectId/activity'
+      preLoaderRoute: typeof ProjectIdActivityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$projectId/dashboard': {
+      id: '/$projectId/dashboard'
+      path: '/$projectId/dashboard'
+      fullPath: '/$projectId/dashboard'
+      preLoaderRoute: typeof ProjectIdDashboardRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$projectId/search': {
+      id: '/$projectId/search'
+      path: '/$projectId/search'
+      fullPath: '/$projectId/search'
+      preLoaderRoute: typeof ProjectIdSearchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$projectId/settings': {
+      id: '/$projectId/settings'
+      path: '/$projectId/settings'
+      fullPath: '/$projectId/settings'
+      preLoaderRoute: typeof ProjectIdSettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/events': {
@@ -159,18 +231,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPortabilityRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/views/$viewId': {
-      id: '/views/$viewId'
-      path: '/views/$viewId'
-      fullPath: '/views/$viewId'
-      preLoaderRoute: typeof ViewsViewIdRouteImport
+    '/$projectId/tasks/': {
+      id: '/$projectId/tasks/'
+      path: '/$projectId/tasks'
+      fullPath: '/$projectId/tasks/'
+      preLoaderRoute: typeof ProjectIdTasksIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/projects/$projectId/tasks/$taskId': {
-      id: '/projects/$projectId/tasks/$taskId'
-      path: '/projects/$projectId/tasks/$taskId'
-      fullPath: '/projects/$projectId/tasks/$taskId'
-      preLoaderRoute: typeof ProjectsProjectIdTasksTaskIdRouteImport
+    '/$projectId/tasks/$taskId': {
+      id: '/$projectId/tasks/$taskId'
+      path: '/$projectId/tasks/$taskId'
+      fullPath: '/$projectId/tasks/$taskId'
+      preLoaderRoute: typeof ProjectIdTasksTaskIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$projectId/views/$viewId': {
+      id: '/$projectId/views/$viewId'
+      path: '/$projectId/views/$viewId'
+      fullPath: '/$projectId/views/$viewId'
+      preLoaderRoute: typeof ProjectIdViewsViewIdRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -178,12 +257,16 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  SearchRoute: SearchRoute,
+  ProjectIdActivityRoute: ProjectIdActivityRoute,
+  ProjectIdDashboardRoute: ProjectIdDashboardRoute,
+  ProjectIdSearchRoute: ProjectIdSearchRoute,
+  ProjectIdSettingsRoute: ProjectIdSettingsRoute,
   ApiEventsRoute: ApiEventsRoute,
   ApiMcpRoute: ApiMcpRoute,
   ApiPortabilityRoute: ApiPortabilityRoute,
-  ViewsViewIdRoute: ViewsViewIdRoute,
-  ProjectsProjectIdTasksTaskIdRoute: ProjectsProjectIdTasksTaskIdRoute,
+  ProjectIdTasksTaskIdRoute: ProjectIdTasksTaskIdRoute,
+  ProjectIdViewsViewIdRoute: ProjectIdViewsViewIdRoute,
+  ProjectIdTasksIndexRoute: ProjectIdTasksIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

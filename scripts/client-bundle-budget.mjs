@@ -13,9 +13,13 @@ export const CLIENT_BUNDLE_BUDGETS = Object.freeze({
   dynamicIncrement: Object.freeze({ rawBytes: 500_000, gzipBytes: 160_000 }),
   navigation: Object.freeze({
     "/": Object.freeze({ rawBytes: 900_000, gzipBytes: 280_000 }),
-    "/search": Object.freeze({ rawBytes: 850_000, gzipBytes: 260_000 }),
-    "/views/$viewId": Object.freeze({ rawBytes: 850_000, gzipBytes: 260_000 }),
-    "/projects/$projectId/tasks/$taskId": Object.freeze({
+    "/$projectId/tasks": Object.freeze({ rawBytes: 900_000, gzipBytes: 280_000 }),
+    "/$projectId/dashboard": Object.freeze({ rawBytes: 900_000, gzipBytes: 280_000 }),
+    "/$projectId/activity": Object.freeze({ rawBytes: 900_000, gzipBytes: 280_000 }),
+    "/$projectId/settings": Object.freeze({ rawBytes: 900_000, gzipBytes: 280_000 }),
+    "/$projectId/search": Object.freeze({ rawBytes: 850_000, gzipBytes: 260_000 }),
+    "/$projectId/views/$viewId": Object.freeze({ rawBytes: 850_000, gzipBytes: 260_000 }),
+    "/$projectId/tasks/$taskId": Object.freeze({
       rawBytes: 1_050_000,
       gzipBytes: 330_000,
     }),
@@ -27,16 +31,24 @@ export const CLIENT_BUNDLE_BUDGETS = Object.freeze({
 // becomes a static route dependency; add new automatic dynamic descendants before shipping them.
 export const CLIENT_NAVIGATION_CRITICAL_SOURCES = Object.freeze({
   "/": Object.freeze(["src/features/projects/project-landing.tsx"]),
-  "/search": Object.freeze([]),
-  "/views/$viewId": Object.freeze([]),
-  "/projects/$projectId/tasks/$taskId": Object.freeze(["src/features/tasks/task-detail-panel.tsx"]),
+  "/$projectId/tasks": Object.freeze([]),
+  "/$projectId/dashboard": Object.freeze(["src/features/dashboard/operational-dashboard.tsx"]),
+  "/$projectId/activity": Object.freeze(["src/features/activity/project-activity-feed.tsx"]),
+  "/$projectId/settings": Object.freeze(["src/features/projects/project-review-mode-control.tsx"]),
+  "/$projectId/search": Object.freeze([]),
+  "/$projectId/views/$viewId": Object.freeze([]),
+  "/$projectId/tasks/$taskId": Object.freeze(["src/features/tasks/task-detail-panel.tsx"]),
 });
 
 const routeSources = Object.freeze({
   "/": "src/routes/index.tsx",
-  "/search": "src/routes/search.tsx",
-  "/views/$viewId": "src/routes/views.$viewId.tsx",
-  "/projects/$projectId/tasks/$taskId": "src/routes/projects.$projectId.tasks.$taskId.tsx",
+  "/$projectId/tasks": "src/routes/$projectId.tasks.index.tsx",
+  "/$projectId/dashboard": "src/routes/$projectId.dashboard.tsx",
+  "/$projectId/activity": "src/routes/$projectId.activity.tsx",
+  "/$projectId/settings": "src/routes/$projectId.settings.tsx",
+  "/$projectId/search": "src/routes/$projectId.search.tsx",
+  "/$projectId/views/$viewId": "src/routes/$projectId.views.$viewId.tsx",
+  "/$projectId/tasks/$taskId": "src/routes/$projectId.tasks.$taskId.tsx",
 });
 const routeSplitProperties = Object.freeze(["loader", "component", "errorComponent"]);
 const requiredFeatureSources = Object.freeze([
@@ -527,6 +539,8 @@ export function inspectClientBundle(projectRoot = HELM_PROJECT_ROOT, options = {
     for (const [, entry] of matches) {
       for (const [route, navigation] of Object.entries(navigations)) {
         if (!navigation.files.includes(entry.file)) continue;
+        if (label === "feature operational dashboard" && route === "/$projectId/dashboard")
+          continue;
         violations.push({
           code: "interaction-entry-in-navigation",
           target: `${label} via ${route}`,

@@ -31,15 +31,19 @@ type Manifest = Record<string, ManifestEntry>;
 const temporaryDirectories: string[] = [];
 const routeSources = [
   "src/routes/index.tsx",
-  "src/routes/search.tsx",
-  "src/routes/views.$viewId.tsx",
-  "src/routes/projects.$projectId.tasks.$taskId.tsx",
+  "src/routes/$projectId.tasks.index.tsx",
+  "src/routes/$projectId.dashboard.tsx",
+  "src/routes/$projectId.activity.tsx",
+  "src/routes/$projectId.settings.tsx",
+  "src/routes/$projectId.search.tsx",
+  "src/routes/$projectId.views.$viewId.tsx",
+  "src/routes/$projectId.tasks.$taskId.tsx",
 ] as const;
 const splitProperties = ["loader", "component", "errorComponent"] as const;
 const fixtureNavigationCriticalSources: ClientNavigationCriticalSources = {
   "/": ["src/features/tasks/task-workspace.tsx"],
-  "/search": ["src/features/tasks/task-search-page.tsx"],
-  "/views/$viewId": ["src/features/tasks/saved-view-page.tsx"],
+  "/$projectId/search": ["src/features/tasks/task-search-page.tsx"],
+  "/$projectId/views/$viewId": ["src/features/tasks/saved-view-page.tsx"],
 };
 
 function temporaryDirectory() {
@@ -132,8 +136,8 @@ function writeFixture() {
   const clientEntry = manifest["src/client.tsx"];
   const rootComponent = manifest["src/routes/index.tsx?tsr-split=component"];
   const rootLoader = manifest["src/routes/index.tsx?tsr-split=loader"];
-  const searchComponent = manifest["src/routes/search.tsx?tsr-split=component"];
-  const viewComponent = manifest["src/routes/views.$viewId.tsx?tsr-split=component"];
+  const searchComponent = manifest["src/routes/$projectId.search.tsx?tsr-split=component"];
+  const viewComponent = manifest["src/routes/$projectId.views.$viewId.tsx?tsr-split=component"];
   const workspace = manifest["src/features/tasks/task-workspace.tsx"];
   const dashboard = manifest["src/features/dashboard/operational-dashboard.tsx"];
   if (
@@ -203,16 +207,24 @@ describe("client bundle budgets", () => {
       dynamicIncrement: { rawBytes: 500_000, gzipBytes: 160_000 },
       navigation: {
         "/": { rawBytes: 900_000, gzipBytes: 280_000 },
-        "/search": { rawBytes: 850_000, gzipBytes: 260_000 },
-        "/views/$viewId": { rawBytes: 850_000, gzipBytes: 260_000 },
-        "/projects/$projectId/tasks/$taskId": { rawBytes: 1_050_000, gzipBytes: 330_000 },
+        "/$projectId/tasks": { rawBytes: 900_000, gzipBytes: 280_000 },
+        "/$projectId/dashboard": { rawBytes: 900_000, gzipBytes: 280_000 },
+        "/$projectId/activity": { rawBytes: 900_000, gzipBytes: 280_000 },
+        "/$projectId/settings": { rawBytes: 900_000, gzipBytes: 280_000 },
+        "/$projectId/search": { rawBytes: 850_000, gzipBytes: 260_000 },
+        "/$projectId/views/$viewId": { rawBytes: 850_000, gzipBytes: 260_000 },
+        "/$projectId/tasks/$taskId": { rawBytes: 1_050_000, gzipBytes: 330_000 },
       },
     });
     expect(CLIENT_NAVIGATION_CRITICAL_SOURCES).toEqual({
       "/": ["src/features/projects/project-landing.tsx"],
-      "/search": [],
-      "/views/$viewId": [],
-      "/projects/$projectId/tasks/$taskId": ["src/features/tasks/task-detail-panel.tsx"],
+      "/$projectId/tasks": [],
+      "/$projectId/dashboard": ["src/features/dashboard/operational-dashboard.tsx"],
+      "/$projectId/activity": ["src/features/activity/project-activity-feed.tsx"],
+      "/$projectId/settings": ["src/features/projects/project-review-mode-control.tsx"],
+      "/$projectId/search": [],
+      "/$projectId/views/$viewId": [],
+      "/$projectId/tasks/$taskId": ["src/features/tasks/task-detail-panel.tsx"],
     });
   });
 
@@ -298,8 +310,10 @@ describe("client bundle budgets", () => {
     const sharedDependencyFile = "assets/task-domain-C4o5R6.js";
     const interactionSource = "src/features/tasks/task-route-results.tsx";
     const interactionFile = "assets/task-route-results-D7y8N9.js";
-    const searchComponent = fixture.manifest["src/routes/search.tsx?tsr-split=component"];
-    const viewComponent = fixture.manifest["src/routes/views.$viewId.tsx?tsr-split=component"];
+    const searchComponent =
+      fixture.manifest["src/routes/$projectId.search.tsx?tsr-split=component"];
+    const viewComponent =
+      fixture.manifest["src/routes/$projectId.views.$viewId.tsx?tsr-split=component"];
     if (!searchComponent?.imports || !viewComponent?.imports) {
       throw new Error("The fixture route component entries are incomplete.");
     }
@@ -335,8 +349,8 @@ describe("client bundle budgets", () => {
       files: [interactionFile],
       parents: [sharedOwnerKey],
     });
-    expect(report.navigations["/search"]?.files).toContain(sharedDependencyFile);
-    expect(report.navigations["/views/$viewId"]?.files).toContain(sharedDependencyFile);
+    expect(report.navigations["/$projectId/search"]?.files).toContain(sharedDependencyFile);
+    expect(report.navigations["/$projectId/views/$viewId"]?.files).toContain(sharedDependencyFile);
   });
 
   it("reports a manifest dynamic import whose target entry is missing", () => {
@@ -520,7 +534,7 @@ describe("client bundle budgets", () => {
 
   it("reports every missing required route and feature entry", () => {
     const fixture = writeFixture();
-    delete fixture.manifest["src/routes/search.tsx?tsr-split=loader"];
+    delete fixture.manifest["src/routes/$projectId.search.tsx?tsr-split=loader"];
     delete fixture.manifest["src/features/dashboard/operational-dashboard.tsx"];
     fixture.persist();
 
@@ -529,13 +543,13 @@ describe("client bundle budgets", () => {
     );
     expect(missing.map((violation) => violation.target)).toEqual([
       "feature operational dashboard",
-      "route /search loader",
+      "route /$projectId/search loader",
     ]);
   });
 
   it("finds logical entries independently of hashed filenames and optional src metadata", () => {
     const fixture = writeFixture();
-    const source = "src/routes/views.$viewId.tsx?tsr-split=component";
+    const source = "src/routes/$projectId.views.$viewId.tsx?tsr-split=component";
     const entry = fixture.manifest[source];
     if (!entry) throw new Error("The fixture view component is missing.");
     const originalFile = entry.file;
@@ -584,8 +598,8 @@ describe("client bundle budgets", () => {
       dynamicIncrement: tinyLimit,
       navigation: {
         "/": tinyLimit,
-        "/search": tinyLimit,
-        "/views/$viewId": tinyLimit,
+        "/$projectId/search": tinyLimit,
+        "/$projectId/views/$viewId": tinyLimit,
       },
     };
     const report = inspectFixture(fixture, { budgets });
