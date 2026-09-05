@@ -3,9 +3,10 @@ import { Link, getRouteApi, useRouter } from "@tanstack/react-router";
 import { useLiveSuspenseQuery } from "@tanstack/react-db";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import * as stylex from "@stylexjs/stylex";
-import { LayoutGrid, List, Save, ShipWheel } from "lucide-react";
+import { LayoutGrid, List } from "lucide-react";
 
-import { Button } from "../../components/ui/button";
+import { AppHeader, ProjectNavigation } from "../../components/app-header";
+import { ActionButton as Button } from "../../components/ui/action-button";
 import type { AppState } from "../../domain/projects";
 import type { SavedViewVisibleField } from "../../domain/saved-views";
 import { canonicalizeTaskSearchOrder } from "../../domain/task-filters";
@@ -14,6 +15,7 @@ import { subscribeToProjectEvents } from "../activity/project-event-subscription
 import { DeferredTaskRouteResults } from "./deferred-task-route-results";
 import { getTaskSearchCollection, taskSearchPageQueryOptions } from "./task-search-collection";
 import { SearchFilterControls } from "./task-route-controls";
+import { TaskRouteUtilities } from "./task-route-utilities";
 import { TaskRoutePageToolsLauncher } from "./task-route-page-tools-launcher";
 import { createHumanSavedView, readSavedViews } from "../../server/task-query-functions";
 import { tokens } from "../../styles/tokens.stylex";
@@ -132,7 +134,7 @@ export function SearchPage() {
       await navigate({
         to: "/views/$viewId",
         params: { viewId: response.view.id },
-        search: { cursor: null },
+        search: { cursor: null, project: projectId },
       });
     } catch {
       setSaveError("Helm could not save this view.");
@@ -143,47 +145,40 @@ export function SearchPage() {
 
   return (
     <main {...stylex.props(styles.page)}>
-      <header {...stylex.props(styles.header)}>
-        <Link to="/" {...stylex.props(styles.brand)}>
-          <span {...stylex.props(styles.mark)} aria-hidden="true">
-            <ShipWheel size={16} />
-          </span>
-          <span>Helm</span>
-          <span {...stylex.props(styles.projectName)}>{project.name}</span>
-        </Link>
-        <nav aria-label="Project navigation" {...stylex.props(styles.navigation)}>
-          <Link to="/" {...stylex.props(styles.navLink)}>
-            Workspace
-          </Link>
-          <span {...stylex.props(styles.navLink, styles.navLinkActive)}>Search</span>
-        </nav>
-        <div {...stylex.props(styles.headerUtilities)}>
-          <span aria-live="polite" {...stylex.props(styles.liveStatus)}>
-            {liveStatus === "live"
-              ? "Live"
-              : liveStatus === "retrying"
-                ? "Retrying…"
-                : "Connecting…"}
-          </span>
-        </div>
-      </header>
-
-      <div {...stylex.props(styles.projectToolbar)}>
-        <TaskRoutePageToolsLauncher
-          projects={projects}
-          activeProject={project}
-          activeProjectVersion={state.activeProjectVersion}
-          theme={state.theme}
-          tasks={items.map(({ task }) => task)}
-        />
-      </div>
+      <AppHeader
+        projectName={project.name}
+        navigation={<ProjectNavigation projectId={project.id} current="search" />}
+        projectControl={
+          <TaskRoutePageToolsLauncher
+            projects={projects}
+            activeProject={project}
+            activeProjectVersion={state.activeProjectVersion}
+            theme={state.theme}
+            tasks={items.map(({ task }) => task)}
+          />
+        }
+        utilities={
+          <>
+            <span aria-live="polite" {...stylex.props(styles.liveStatus)}>
+              {liveStatus === "live"
+                ? "Live"
+                : liveStatus === "retrying"
+                  ? "Reconnecting"
+                  : "Connecting"}
+            </span>
+            <TaskRouteUtilities
+              projects={projects}
+              activeProject={project}
+              activeProjectVersion={state.activeProjectVersion}
+              theme={state.theme}
+              tasks={items.map(({ task }) => task)}
+            />
+          </>
+        }
+      />
 
       <section {...stylex.props(styles.hero)}>
-        <p {...stylex.props(styles.eyebrow)}>Shared task query</p>
-        <h1 {...stylex.props(styles.title)}>Find the work behind the work.</h1>
-        <p {...stylex.props(styles.subtitle)}>
-          Task text, acceptance criteria, comments, and execution reports share one durable index.
-        </p>
+        <h1 {...stylex.props(styles.title)}>Search tasks</h1>
       </section>
 
       <div {...stylex.props(styles.layout)}>
@@ -191,7 +186,9 @@ export function SearchPage() {
           <SearchFilterControls
             projectId={projectId}
             search={search}
-            onApply={(nextSearch) => void navigate({ search: nextSearch })}
+            onApply={(nextSearch) =>
+              void navigate({ search: { ...nextSearch, project: projectId } })
+            }
           />
 
           <div {...stylex.props(styles.resultToolbar)}>
@@ -267,13 +264,7 @@ export function SearchPage() {
 
         <aside {...stylex.props(styles.sidebar)}>
           <section {...stylex.props(styles.sideCard)}>
-            <div {...stylex.props(styles.cardHeading)}>
-              <Save size={16} aria-hidden="true" />
-              <h2>Save this view</h2>
-            </div>
-            <p {...stylex.props(styles.cardCopy)}>
-              Keep the exact validated filter, order, fields, grouping, and presentation.
-            </p>
+            <h2 {...stylex.props(styles.sideTitle)}>Save this view</h2>
             <form onSubmit={saveView} {...stylex.props(styles.saveForm)}>
               <input
                 value={viewName}
@@ -306,7 +297,7 @@ export function SearchPage() {
                     key={view.id}
                     to="/views/$viewId"
                     params={{ viewId: view.id }}
-                    search={{ cursor: null }}
+                    search={{ cursor: null, project: projectId }}
                     {...stylex.props(styles.viewLink)}
                   >
                     <span>{view.name}</span>
@@ -327,82 +318,14 @@ const styles = stylex.create({
     margin: "0 auto",
     maxWidth: 1440,
     minHeight: "100vh",
-    padding: tokens.space6,
+    padding: 0,
     width: "100%",
-    "@media (max-width: 700px)": { padding: tokens.space4 },
-  },
-  header: {
-    alignItems: "center",
-    display: "grid",
-    gap: tokens.space4,
-    gridTemplateColumns: "1fr auto 1fr",
-    "@media (max-width: 700px)": { gridTemplateColumns: "minmax(0, 1fr)" },
-  },
-  brand: {
-    alignItems: "center",
-    color: tokens.foreground,
-    display: "flex",
-    fontWeight: 750,
-    gap: tokens.space2,
-    textDecoration: "none",
-  },
-  mark: {
-    alignItems: "center",
-    backgroundColor: tokens.foreground,
-    borderRadius: 6,
-    color: tokens.background,
-    display: "inline-flex",
-    height: 26,
-    justifyContent: "center",
-    width: 26,
-  },
-  projectName: { color: tokens.foregroundMuted, fontWeight: 500 },
-  navigation: {
-    backgroundColor: tokens.surface,
-    borderColor: tokens.border,
-    borderRadius: tokens.radius2,
-    borderStyle: "solid",
-    borderWidth: 1,
-    display: "flex",
-    padding: 3,
-    "@media (max-width: 700px)": {
-      gridColumn: 1,
-      gridRow: 2,
-      justifySelf: "start",
-      maxWidth: "100%",
-      overflowX: "auto",
-    },
-  },
-  navLink: {
-    borderRadius: 6,
-    color: tokens.foregroundMuted,
-    fontSize: 13,
-    fontWeight: 650,
-    paddingBlock: 6,
-    paddingInline: 10,
-    textDecoration: "none",
-  },
-  navLinkActive: { backgroundColor: tokens.surfaceMuted, color: tokens.foreground },
-  headerUtilities: {
-    alignItems: "center",
-    display: "flex",
-    flexWrap: "wrap",
-    gap: tokens.space3,
-    justifySelf: "end",
-    "@media (max-width: 700px)": { justifySelf: "start" },
   },
   liveStatus: {
     color: tokens.foregroundMuted,
     fontSize: 12,
   },
-  projectToolbar: {
-    borderBlockEndColor: tokens.border,
-    borderBlockEndStyle: "solid",
-    borderBlockEndWidth: 1,
-    marginBlockStart: tokens.space4,
-    paddingBlockEnd: tokens.space4,
-  },
-  hero: { marginBlock: tokens.space8, maxWidth: 760 },
+  hero: { marginBlock: tokens.space5, paddingInline: tokens.space5, maxWidth: 760 },
   eyebrow: {
     color: tokens.accent,
     fontSize: 11,
@@ -412,7 +335,7 @@ const styles = stylex.create({
     textTransform: "uppercase",
   },
   title: {
-    fontSize: "clamp(2.2rem, 6vw, 4.75rem)",
+    fontSize: 28,
     letterSpacing: "-0.055em",
     lineHeight: 0.98,
     marginBlock: tokens.space3,
@@ -425,6 +348,8 @@ const styles = stylex.create({
     maxWidth: 660,
   },
   layout: {
+    paddingInline: tokens.space5,
+    paddingBlockEnd: tokens.space5,
     alignItems: "start",
     display: "grid",
     gap: tokens.space6,

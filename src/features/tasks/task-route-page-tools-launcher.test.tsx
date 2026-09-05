@@ -49,18 +49,22 @@ describe("TaskRoutePageToolsLauncher", () => {
 
     expect(loadModule).not.toHaveBeenCalled();
     expect(screen.getByText("Atlas")).toBeTruthy();
-    const activate = screen.getByRole("button", { name: "Open project tools" });
+    const activate = screen.getByRole("button", { name: "Switch project" });
 
     activate.focus();
     await waitFor(() => expect(loadModule).toHaveBeenCalledTimes(1));
     expect(screen.queryByText("Loading project tools…")).toBeNull();
     fireEvent.click(activate);
-    expect(screen.getByText("Loading project tools…")).toBeTruthy();
-    expect(document.activeElement).toBe(activate);
+    expect(await screen.findByText("Loading project tools…")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Switch project" }).getAttribute("aria-expanded"),
+    ).toBe("true");
 
     await act(async () => resolveModule?.({ TaskRoutePageTools: LoadedTools }));
     expect(await screen.findByText("Atlas project tools ready")).toBeTruthy();
-    expect(document.activeElement).toBe(activate);
+    expect(
+      screen.getByRole("button", { name: "Switch project" }).getAttribute("aria-expanded"),
+    ).toBe("true");
   });
 
   it("contains an activated failure and retries with a fresh import", async () => {
@@ -71,7 +75,7 @@ describe("TaskRoutePageToolsLauncher", () => {
     const Launcher = createTaskRoutePageToolsLauncher(loadModule);
     render(<Launcher {...props} />);
 
-    const trigger = screen.getByRole("button", { name: "Open project tools" });
+    const trigger = screen.getByRole("button", { name: "Switch project" });
     trigger.focus();
     fireEvent.click(trigger);
     expect(await screen.findByRole("alert")).toHaveProperty(
@@ -79,12 +83,22 @@ describe("TaskRoutePageToolsLauncher", () => {
       expect.stringContaining("could not be loaded"),
     );
     expect(screen.getByText("Atlas")).toBeTruthy();
-    expect(document.activeElement).toBe(trigger);
+    expect(
+      screen.getByRole("button", { name: "Switch project" }).getAttribute("aria-expanded"),
+    ).toBe("true");
 
     fireEvent.click(screen.getByRole("button", { name: "Try project tools again" }));
     expect(await screen.findByText("Atlas project tools ready")).toBeTruthy();
     expect(loadModule).toHaveBeenCalledTimes(2);
-    expect(document.activeElement).toBe(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Close project switcher" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Switch project" }).getAttribute("aria-expanded"),
+      ).toBe("false"),
+    );
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Switch project" })),
+    );
   });
 
   it("remains activatable after the StrictMode effect cleanup cycle", async () => {
@@ -99,7 +113,7 @@ describe("TaskRoutePageToolsLauncher", () => {
     );
 
     expect(loadModule).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Open project tools" }));
+    fireEvent.click(screen.getByRole("button", { name: "Switch project" }));
 
     expect(await screen.findByText("Atlas project tools ready")).toBeTruthy();
     expect(loadModule).toHaveBeenCalledTimes(1);

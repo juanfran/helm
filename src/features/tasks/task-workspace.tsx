@@ -1,23 +1,20 @@
 import {
   useEffect,
+  useRef,
   useMemo,
   useState,
+  type AnchorHTMLAttributes,
   type ComponentType,
   type CSSProperties,
   type FormEvent,
   type ReactNode,
 } from "react";
+import { AppHeader, ProjectNavigation } from "../../components/app-header";
+import { ProjectMenu } from "../../components/project-menu";
+import { Link } from "@tanstack/react-router";
+import type { WorkspaceView } from "../projects/workspace-search";
 import * as stylex from "@stylexjs/stylex";
-import {
-  Activity,
-  Bot,
-  CheckCircle2,
-  Clock3,
-  Inbox,
-  Plus,
-  ShipWheel,
-  SlidersHorizontal,
-} from "lucide-react";
+import { Bot, Clock3, Inbox, Plus } from "lucide-react";
 
 import type {
   ActivityEntry,
@@ -124,6 +121,24 @@ type TaskWorkspaceProps = {
   importantEvents?: readonly ProjectEvent[];
   activeAgentRuns?: readonly AgentRunSummary[];
   initialSelectedTaskId?: string | null;
+  savedViews?: readonly { id: string; name: string }[];
+  navigation?: {
+    view: WorkspaceView;
+    selectedTaskId: string | null;
+    filter?: "backlog" | "ready" | "in_progress" | "review" | "done" | "claimable";
+    renderTaskLink: (
+      task: Task,
+      props: AnchorHTMLAttributes<HTMLAnchorElement>,
+      children: ReactNode,
+    ) => ReactNode;
+    renderBackLink: (props: AnchorHTMLAttributes<HTMLAnchorElement>) => ReactNode;
+    renderFilterLink: (
+      filter: "backlog" | "ready" | "in_progress" | "review" | "done" | "claimable" | undefined,
+      props: AnchorHTMLAttributes<HTMLAnchorElement>,
+      children: ReactNode,
+    ) => ReactNode;
+    onTaskCreated: (taskId: string) => void;
+  };
   taskDetailModuleLoader?: TaskDetailPanelModuleLoader;
   dashboardModuleLoader?: typeof operationalDashboardModule;
   activityModuleLoader?: typeof projectActivityFeedModule;
@@ -170,6 +185,7 @@ type TaskWorkspaceProps = {
 };
 
 const noActiveAgentRuns: readonly AgentRunSummary[] = [];
+const noSavedViews: readonly { id: string; name: string }[] = [];
 
 export function TaskWorkspace({
   project,
@@ -183,6 +199,8 @@ export function TaskWorkspace({
   importantEvents = projectEvents,
   activeAgentRuns = noActiveAgentRuns,
   initialSelectedTaskId = null,
+  navigation,
+  savedViews = noSavedViews,
   taskDetailModuleLoader = taskDetailPanelModule,
   dashboardModuleLoader = operationalDashboardModule,
   activityModuleLoader = projectActivityFeedModule,
@@ -217,22 +235,37 @@ export function TaskWorkspace({
   onChangeTheme,
   onChangeProjectReviewMode,
 }: TaskWorkspaceProps) {
-  const orderedTasks = useMemo(() => tasks.toSorted(compareTaskOrder), [tasks]);
+  const orderedTasks = useMemo(
+    () => tasks.filter((task) => !task.archivedAt).toSorted(compareTaskOrder),
+    [tasks],
+  );
+  const filteredTasks = orderedTasks.filter(
+    (task) =>
+      !navigation?.filter ||
+      (navigation.filter === "claimable"
+        ? task.eligibility?.claimable
+        : task.lifecycle === navigation.filter),
+  );
   const [captureTitle, setCaptureTitle] = useState("");
-  const [workspaceView, setWorkspaceView] = useState<
+  const [localWorkspaceView, setWorkspaceView] = useState<
     "dashboard" | "tasks" | "activity" | "settings"
   >("tasks");
-  const [selectedId, setSelectedId] = useState<string | null>(() =>
+  const [localSelectedId, setSelectedId] = useState<string | null>(() =>
     orderedTasks.some((task) => task.id === initialSelectedTaskId) ? initialSelectedTaskId : null,
   );
+  const workspaceView = navigation?.view ?? localWorkspaceView;
+  const selectedId = navigation ? navigation.selectedTaskId : localSelectedId;
   const [bulkSelectedTaskIds, setBulkSelectedTaskIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
-  const [projectSwitcherRequested, setProjectSwitcherRequested] = useState(false);
   const [pendingCapture, setPendingCapture] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
-  const selectedTask = orderedTasks.find((task) => task.id === selectedId) ?? null;
-  const visibleTaskIds = useMemo(() => orderedTasks.map((task) => task.id), [orderedTasks]);
+  const detailHeadingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (selectedId) detailHeadingRef.current?.focus({ preventScroll: true });
+  }, [selectedId]);
+  const selectedTask = tasks.find((task) => task.id === selectedId) ?? null;
+  const visibleTaskIds = filteredTasks.map((task) => task.id);
   const bulkSelection = useVisibleTaskSelection({
     visibleTaskIds,
     selectedTaskIds: bulkSelectedTaskIds,
@@ -245,18 +278,22 @@ export function TaskWorkspace({
   const notificationsModule = useExplicitLazyModule(notificationsModuleLoader);
   const appearanceModule = useExplicitLazyModule(appearanceModuleLoader);
   const taskDetailModule = useExplicitLazyModule(taskDetailModuleLoader);
-  const bulkMode = bulkModule.state.status !== "idle";
+  const [bulkMode, setBulkMode] = useState(false);
   const taskDetailStatus = taskDetailModule.state.status;
   const activateTaskDetail = taskDetailModule.activate;
   useEffect(() => {
-    if (
-      initialSelectedTaskId &&
-      selectedId === initialSelectedTaskId &&
-      taskDetailStatus === "idle"
-    ) {
+    if (selectedId && taskDetailStatus === "idle") {
       activateTaskDetail();
     }
-  }, [activateTaskDetail, initialSelectedTaskId, selectedId, taskDetailStatus]);
+  }, [activateTaskDetail, selectedId, taskDetailStatus]);
+  const activateDashboard = dashboardModule.activate;
+  const activateActivity = activityModule.activate;
+  const activateReviewPolicy = reviewPolicyModule.activate;
+  useEffect(() => {
+    if (workspaceView === "dashboard") activateDashboard();
+    if (workspaceView === "activity") activateActivity();
+    if (workspaceView === "settings") activateReviewPolicy();
+  }, [workspaceView, activateDashboard, activateActivity, activateReviewPolicy]);
   const counts = useMemo(
     () => ({
       backlog: tasks.filter((task) => task.lifecycle === "backlog").length,
@@ -273,6 +310,7 @@ export function TaskWorkspace({
     : "Notifications, none unread";
 
   function selectTask(taskId: string) {
+    navigation?.onTaskCreated(taskId);
     setSelectedId(taskId);
     setWorkspaceView("tasks");
     if (taskDetailModule.state.status === "idle") taskDetailModule.activate();
@@ -312,179 +350,135 @@ export function TaskWorkspace({
 
   return (
     <main {...stylex.props(styles.page)}>
-      <header {...stylex.props(styles.header)}>
-        <div {...stylex.props(styles.brand)}>
-          <span {...stylex.props(styles.mark)} aria-hidden="true">
-            <ShipWheel size={16} />
-          </span>
-          <div>
-            <strong>Helm</strong>
-            <span {...stylex.props(styles.projectName)}>{project.name}</span>
-          </div>
-        </div>
-        <nav aria-label="Workspace views" {...stylex.props(styles.viewNavigation)}>
-          <button
-            type="button"
-            aria-pressed={workspaceView === "dashboard"}
-            onFocus={dashboardModule.preload}
-            onPointerEnter={dashboardModule.preload}
-            onClick={() => {
-              setWorkspaceView("dashboard");
-              if (dashboardModule.state.status === "idle") dashboardModule.activate();
-            }}
-            {...stylex.props(
-              styles.viewButton,
-              workspaceView === "dashboard" && styles.viewButtonActive,
-            )}
-          >
-            Dashboard
-          </button>
-          <button
-            type="button"
-            aria-pressed={workspaceView === "tasks"}
-            onClick={() => setWorkspaceView("tasks")}
-            {...stylex.props(
-              styles.viewButton,
-              workspaceView === "tasks" && styles.viewButtonActive,
-            )}
-          >
-            Tasks
-          </button>
-          <button
-            type="button"
-            aria-pressed={workspaceView === "activity"}
-            onFocus={activityModule.preload}
-            onPointerEnter={activityModule.preload}
-            onClick={() => {
-              setWorkspaceView("activity");
-              if (activityModule.state.status === "idle") activityModule.activate();
-            }}
-            {...stylex.props(
-              styles.viewButton,
-              workspaceView === "activity" && styles.viewButtonActive,
-            )}
-          >
-            Activity
-          </button>
-          {customizationControl || portabilityControl ? (
-            <button
-              type="button"
-              aria-pressed={workspaceView === "settings"}
-              onFocus={reviewPolicyModule.preload}
-              onPointerEnter={reviewPolicyModule.preload}
-              onClick={() => {
-                setWorkspaceView("settings");
-                if (reviewPolicyModule.state.status === "idle") reviewPolicyModule.activate();
-              }}
-              {...stylex.props(
-                styles.viewButton,
-                workspaceView === "settings" && styles.viewButtonActive,
-              )}
+      <AppHeader
+        projectName={project.name}
+        projectControl={
+          projectSwitcher ? (
+            <ProjectMenu name={project.name} preload={projectSwitcher.preload}>
+              {projectSwitcher.surface}
+            </ProjectMenu>
+          ) : undefined
+        }
+        navigation={
+          navigation ? (
+            <ProjectNavigation projectId={project.id} current={workspaceView} />
+          ) : (
+            <nav aria-label="Workspace views" {...stylex.props(styles.viewNavigation)}>
+              {(["dashboard", "tasks", "activity", "settings"] as const)
+                .filter((view) => view !== "settings" || customizationControl || portabilityControl)
+                .map((view) => (
+                  <button
+                    key={view}
+                    type="button"
+                    aria-pressed={workspaceView === view}
+                    onFocus={
+                      view === "dashboard"
+                        ? dashboardModule.preload
+                        : view === "activity"
+                          ? activityModule.preload
+                          : undefined
+                    }
+                    onPointerEnter={
+                      view === "dashboard"
+                        ? dashboardModule.preload
+                        : view === "activity"
+                          ? activityModule.preload
+                          : undefined
+                    }
+                    onClick={() => setWorkspaceView(view)}
+                    {...stylex.props(
+                      styles.viewButton,
+                      workspaceView === view && styles.viewButtonActive,
+                    )}
+                  >
+                    {view.charAt(0).toUpperCase() + view.slice(1)}
+                  </button>
+                ))}
+              {renderSearchLink?.(stylex.props(styles.viewButton, styles.viewLink))}
+            </nav>
+          )
+        }
+        utilities={
+          <div {...stylex.props(styles.headerUtilities)}>
+            <span
+              aria-live="polite"
+              {...stylex.props(styles.liveStatus, liveStatus === "live" && styles.liveStatusReady)}
             >
-              Settings
-            </button>
-          ) : null}
-          {renderSearchLink?.(stylex.props(styles.viewButton, styles.viewLink))}
-        </nav>
-        <div {...stylex.props(styles.headerUtilities)}>
-          <span
-            aria-live="polite"
-            {...stylex.props(styles.liveStatus, liveStatus === "live" && styles.liveStatusReady)}
-          >
-            <span {...stylex.props(styles.liveDot)} aria-hidden="true" />
-            {liveStatus === "live"
-              ? "Live"
-              : liveStatus === "retrying"
-                ? "Reconnecting"
-                : "Connecting"}
-          </span>
-          <button
-            type="button"
-            aria-controls="workspace-notifications"
-            aria-disabled={
-              notificationsModule.state.status === "loading" ||
-              notificationsModule.state.status === "ready"
-            }
-            aria-expanded={notificationsModule.state.status === "ready"}
-            aria-label={notificationIntentLabel}
-            onFocus={notificationsModule.preload}
-            onPointerEnter={notificationsModule.preload}
-            onClick={() => {
-              if (notificationsModule.state.status === "idle") notificationsModule.activate();
-              if (notificationsModule.state.status === "error") notificationsModule.retry();
-            }}
-            {...stylex.props(styles.utilityButton)}
-          >
-            Notifications
-          </button>
-          <div id="workspace-notifications">
-            {notificationsModule.state.status === "ready" ? (
-              <notificationsModule.state.module.default
-                projectId={project.id}
-                events={importantEvents}
-                tasks={orderedTasks}
-                onSelectTask={selectTask}
-              />
-            ) : notificationsModule.state.status === "error" ? (
-              <LazyWorkspaceFailure surface="notifications" onRetry={notificationsModule.retry} />
-            ) : notificationsModule.state.status === "loading" ? (
-              <LazyWorkspaceFallback surface="notifications" />
+              <span {...stylex.props(styles.liveDot)} aria-hidden="true" />
+              {liveStatus === "live"
+                ? "Live"
+                : liveStatus === "retrying"
+                  ? "Reconnecting"
+                  : "Connecting"}
+            </span>
+            {notificationsModule.state.status !== "ready" ? (
+              <button
+                type="button"
+                aria-controls="workspace-notifications"
+                aria-disabled={notificationsModule.state.status === "loading"}
+                aria-expanded={false}
+                aria-label={notificationIntentLabel}
+                onFocus={notificationsModule.preload}
+                onPointerEnter={notificationsModule.preload}
+                onClick={() => {
+                  if (notificationsModule.state.status === "idle") notificationsModule.activate();
+                  if (notificationsModule.state.status === "error") notificationsModule.retry();
+                }}
+                {...stylex.props(styles.utilityButton)}
+              >
+                Notifications
+              </button>
             ) : null}
-          </div>
-          <button
-            type="button"
-            aria-controls="workspace-appearance"
-            aria-disabled={
-              appearanceModule.state.status === "loading" ||
-              appearanceModule.state.status === "ready"
-            }
-            aria-expanded={appearanceModule.state.status === "ready"}
-            onFocus={appearanceModule.preload}
-            onPointerEnter={appearanceModule.preload}
-            onClick={() => {
-              if (appearanceModule.state.status === "idle") appearanceModule.activate();
-              if (appearanceModule.state.status === "error") appearanceModule.retry();
-            }}
-            {...stylex.props(styles.utilityButton)}
-          >
-            Appearance
-          </button>
-          <div id="workspace-appearance">
-            {appearanceModule.state.status === "ready" ? (
-              <appearanceModule.state.module.default theme={theme} onChange={onChangeTheme} />
-            ) : appearanceModule.state.status === "error" ? (
-              <LazyWorkspaceFailure surface="appearance" onRetry={appearanceModule.retry} />
-            ) : appearanceModule.state.status === "loading" ? (
-              <LazyWorkspaceFallback surface="appearance" />
+            <div id="workspace-notifications">
+              {notificationsModule.state.status === "ready" ? (
+                <notificationsModule.state.module.default
+                  defaultOpen
+                  projectId={project.id}
+                  events={importantEvents}
+                  tasks={orderedTasks}
+                  onSelectTask={selectTask}
+                />
+              ) : notificationsModule.state.status === "error" ? (
+                <LazyWorkspaceFailure surface="notifications" onRetry={notificationsModule.retry} />
+              ) : notificationsModule.state.status === "loading" ? (
+                <LazyWorkspaceFallback surface="notifications" />
+              ) : null}
+            </div>
+            {appearanceModule.state.status !== "ready" ? (
+              <button
+                type="button"
+                aria-controls="workspace-appearance"
+                aria-disabled={appearanceModule.state.status === "loading"}
+                aria-expanded={false}
+                onFocus={appearanceModule.preload}
+                onPointerEnter={appearanceModule.preload}
+                onClick={() => {
+                  if (appearanceModule.state.status === "idle") appearanceModule.activate();
+                  if (appearanceModule.state.status === "error") appearanceModule.retry();
+                }}
+                {...stylex.props(styles.utilityButton)}
+              >
+                Appearance
+              </button>
             ) : null}
+            <div id="workspace-appearance">
+              {appearanceModule.state.status === "ready" ? (
+                <appearanceModule.state.module.default theme={theme} onChange={onChangeTheme} />
+              ) : appearanceModule.state.status === "error" ? (
+                <LazyWorkspaceFailure surface="appearance" onRetry={appearanceModule.retry} />
+              ) : appearanceModule.state.status === "loading" ? (
+                <LazyWorkspaceFallback surface="appearance" />
+              ) : null}
+            </div>
           </div>
-        </div>
-      </header>
-
-      {projectSwitcher ? (
-        <div {...stylex.props(styles.projectToolbar)}>
-          <button
-            type="button"
-            aria-disabled={projectSwitcherRequested}
-            aria-expanded={projectSwitcherRequested}
-            onFocus={projectSwitcher.preload}
-            onPointerEnter={projectSwitcher.preload}
-            onClick={() => {
-              if (!projectSwitcherRequested) setProjectSwitcherRequested(true);
-            }}
-            {...stylex.props(styles.intentButton)}
-          >
-            Switch project
-          </button>
-          {projectSwitcherRequested ? projectSwitcher.surface : null}
-        </div>
-      ) : null}
+        }
+      />
 
       <div
         {...stylex.props(styles.workspace, workspaceView !== "tasks" && styles.workspaceOverview)}
       >
         {workspaceView === "tasks" ? (
-          <aside {...stylex.props(styles.sidebar)}>
+          <aside {...stylex.props(styles.sidebar, selectedTask && styles.hideOnMobile)}>
             <div {...stylex.props(styles.queueHeader)}>
               <div>
                 <p {...stylex.props(styles.eyebrow)}>Work queue</p>
@@ -492,26 +486,40 @@ export function TaskWorkspace({
               </div>
               <span {...stylex.props(styles.total)}>{orderedTasks.length}</span>
             </div>
-            <section aria-label="Task counts" {...stylex.props(styles.counts)}>
-              <span>
-                <Inbox size={14} aria-hidden="true" /> {counts.backlog} backlog
-              </span>
-              <span>
-                <CheckCircle2 size={14} aria-hidden="true" /> {counts.ready} ready
-              </span>
-              <span>
-                <Activity size={14} aria-hidden="true" /> {counts.active} active
-              </span>
-              <span>
-                <Clock3 size={14} aria-hidden="true" /> {counts.review} review
-              </span>
-              <span>
-                <CheckCircle2 size={14} aria-hidden="true" /> {counts.done} done
-              </span>
-              <span>
-                <SlidersHorizontal size={14} aria-hidden="true" /> {counts.claimable} claimable
-              </span>
-            </section>
+            {navigation ? (
+              <section aria-label="Task counts" {...stylex.props(styles.counts)}>
+                {navigation.renderFilterLink(
+                  undefined,
+                  {
+                    ...stylex.props(styles.filterButton),
+                    "aria-current": !navigation.filter ? "true" : undefined,
+                  },
+                  "All",
+                )}
+                {(["backlog", "ready", "in_progress", "review", "done", "claimable"] as const).map(
+                  (filter) => (
+                    <span key={filter}>
+                      {navigation.renderFilterLink(
+                        filter,
+                        {
+                          ...stylex.props(styles.filterButton),
+                          "aria-current": navigation.filter === filter ? "true" : undefined,
+                        },
+                        `${filter === "in_progress" ? counts.active : counts[filter]} ${filter === "in_progress" ? "active" : filter}`,
+                      )}
+                    </span>
+                  ),
+                )}
+              </section>
+            ) : (
+              <section aria-label="Task counts" {...stylex.props(styles.counts)}>
+                {Object.entries(counts).map(([label, count]) => (
+                  <span key={label}>
+                    {count} {label}
+                  </span>
+                ))}
+              </section>
+            )}
             <form onSubmit={capture} {...stylex.props(styles.capture)} aria-label="Quick capture">
               <label htmlFor="capture-title" {...stylex.props(styles.srOnly)}>
                 Task title
@@ -542,22 +550,21 @@ export function TaskWorkspace({
             <button
               type="button"
               aria-controls="workspace-bulk-actions"
-              aria-disabled={
-                bulkModule.state.status === "loading" || bulkModule.state.status === "ready"
-              }
-              aria-expanded={bulkModule.state.status === "ready"}
+              aria-expanded={bulkMode}
               onFocus={bulkModule.preload}
               onPointerEnter={bulkModule.preload}
               onClick={() => {
+                setBulkMode((open) => !open);
+                setBulkSelectedTaskIds(new Set());
                 if (bulkModule.state.status === "idle") bulkModule.activate();
                 if (bulkModule.state.status === "error") bulkModule.retry();
               }}
               {...stylex.props(styles.intentButton)}
             >
-              Bulk actions
+              {bulkMode ? "Finish selecting" : "Bulk actions"}
             </button>
             <div id="workspace-bulk-actions">
-              {bulkModule.state.status === "ready" ? (
+              {bulkMode && bulkModule.state.status === "ready" ? (
                 <bulkModule.state.module.default
                   projectId={project.id}
                   tagDefinitions={tagDefinitions}
@@ -571,8 +578,26 @@ export function TaskWorkspace({
                 <LazyWorkspaceFallback surface="bulk" />
               ) : null}
             </div>
+            {savedViews.length ? (
+              <nav aria-label="Saved views" {...stylex.props(styles.savedViews)}>
+                {savedViews.map((view) => (
+                  <Link
+                    key={view.id}
+                    to="/views/$viewId"
+                    params={{ viewId: view.id }}
+                    search={{ cursor: null, project: project.id }}
+                    {...stylex.props(styles.viewButton)}
+                  >
+                    {view.name}
+                  </Link>
+                ))}
+              </nav>
+            ) : null}
+            {filteredTasks.length === 0 ? (
+              <p {...stylex.props(styles.taskMeta)}>No tasks in this queue.</p>
+            ) : null}
             <ul aria-label="Tasks" {...stylex.props(styles.taskList)}>
-              {orderedTasks.map((task) => (
+              {filteredTasks.map((task) => (
                 <li
                   key={task.id}
                   {...stylex.props(
@@ -594,36 +619,75 @@ export function TaskWorkspace({
                       {...stylex.props(styles.bulkCheckbox)}
                     />
                   ) : null}
-                  <button
-                    type="button"
-                    onFocus={taskDetailModule.preload}
-                    onPointerEnter={taskDetailModule.preload}
-                    onClick={() => selectTask(task.id)}
-                    aria-current={task.id === selectedTask?.id ? "true" : undefined}
-                    aria-label={`Open task #${task.sequence}: ${task.title}`}
-                    {...stylex.props(styles.taskDetailButton)}
-                  >
-                    <span {...stylex.props(styles.taskReference)}>#{task.sequence}</span>
-                    <span {...stylex.props(styles.taskTitleGroup)}>
-                      <span {...stylex.props(styles.taskTitle)}>{task.title}</span>
-                      <span {...stylex.props(styles.taskMeta)}>
-                        {[
-                          task.priority,
-                          task.dueAt ? `due ${task.dueAt}` : null,
-                          task.size ? `size ${task.size}` : null,
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
+                  {navigation ? (
+                    navigation.renderTaskLink(
+                      task,
+                      {
+                        ...stylex.props(styles.taskDetailButton),
+                        onFocus: taskDetailModule.preload,
+                        onPointerEnter: taskDetailModule.preload,
+                        "aria-current": task.id === selectedTask?.id ? "true" : undefined,
+                        "aria-label": `Open task #${task.sequence}: ${task.title}`,
+                      },
+                      <>
+                        <span {...stylex.props(styles.taskReference)}>#{task.sequence}</span>
+                        <span {...stylex.props(styles.taskTitleGroup)}>
+                          <span {...stylex.props(styles.taskTitle)}>{task.title}</span>
+                          <span {...stylex.props(styles.taskMeta)}>
+                            {[
+                              task.priority,
+                              task.dueAt ? `due ${task.dueAt}` : null,
+                              task.size ? `size ${task.size}` : null,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          </span>
+                          {task.claim ? <ClaimLeaseSummary claim={task.claim} compact /> : null}
+                        </span>
+                        <span {...stylex.props(styles[task.lifecycle])}>
+                          {taskLifecycleLabel(task.lifecycle)}
+                        </span>
+                        {task.eligibility ? (
+                          <span {...stylex.props(styles.eligibility)}>
+                            {task.eligibility.status.replaceAll("_", " ")}
+                          </span>
+                        ) : null}
+                      </>,
+                    )
+                  ) : (
+                    <button
+                      type="button"
+                      onFocus={taskDetailModule.preload}
+                      onPointerEnter={taskDetailModule.preload}
+                      onClick={() => selectTask(task.id)}
+                      aria-current={task.id === selectedTask?.id ? "true" : undefined}
+                      aria-label={`Open task #${task.sequence}: ${task.title}`}
+                      {...stylex.props(styles.taskDetailButton)}
+                    >
+                      <span {...stylex.props(styles.taskReference)}>#{task.sequence}</span>
+                      <span {...stylex.props(styles.taskTitleGroup)}>
+                        <span {...stylex.props(styles.taskTitle)}>{task.title}</span>
+                        <span {...stylex.props(styles.taskMeta)}>
+                          {[
+                            task.priority,
+                            task.dueAt ? `due ${task.dueAt}` : null,
+                            task.size ? `size ${task.size}` : null,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </span>
+                        {task.claim ? <ClaimLeaseSummary claim={task.claim} compact /> : null}
                       </span>
-                      {task.claim ? <ClaimLeaseSummary claim={task.claim} compact /> : null}
-                    </span>
-                    <span {...stylex.props(styles[task.lifecycle])}>
-                      {taskLifecycleLabel(task.lifecycle)}
-                    </span>
-                    {task.eligibility ? (
-                      <span {...stylex.props(styles.eligibility)}>{task.eligibility.status}</span>
-                    ) : null}
-                  </button>
+                      <span {...stylex.props(styles[task.lifecycle])}>
+                        {taskLifecycleLabel(task.lifecycle)}
+                      </span>
+                      {task.eligibility ? (
+                        <span {...stylex.props(styles.eligibility)}>
+                          {task.eligibility.status.replaceAll("_", " ")}
+                        </span>
+                      ) : null}
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
@@ -632,8 +696,35 @@ export function TaskWorkspace({
 
         <section
           data-task-detail={workspaceView === "tasks" ? "true" : undefined}
-          {...stylex.props(styles.detail, workspaceView !== "tasks" && styles.overviewDetail)}
+          {...stylex.props(
+            styles.detail,
+            workspaceView !== "tasks" && styles.overviewDetail,
+            workspaceView === "tasks" && !selectedTask && styles.hideOnMobile,
+          )}
         >
+          {workspaceView === "tasks" && selectedTask ? (
+            <div {...stylex.props(styles.taskNavigation)}>
+              {navigation ? (
+                navigation.renderBackLink(stylex.props(styles.viewButton))
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setSelectedId(null)}
+                  {...stylex.props(styles.viewButton)}
+                >
+                  Back to tasks
+                </button>
+              )}
+              <span>
+                #{selectedTask.sequence} · {selectedTask.lifecycle.replaceAll("_", " ")}
+              </span>
+            </div>
+          ) : null}
+          {workspaceView === "tasks" && selectedTask ? (
+            <h2 ref={detailHeadingRef} tabIndex={-1} {...stylex.props(styles.detailTitle)}>
+              {selectedTask.title}
+            </h2>
+          ) : null}
           {workspaceView === "settings" ? (
             <div {...stylex.props(styles.detailStack, styles.settingsStack)}>
               {reviewPolicyModule.state.status === "ready" ? (
@@ -681,7 +772,7 @@ export function TaskWorkspace({
             <div {...stylex.props(styles.detailStack)}>
               {taskDetailModule.state.status === "ready" ? (
                 <taskDetailModule.state.module.default
-                  key={`${selectedTask.id}:${selectedTask.version}`}
+                  key={selectedTask.id}
                   task={selectedTask}
                   tasks={orderedTasks}
                   attempts={attempts}
@@ -741,7 +832,7 @@ function TaskDetailReadingSummary({ task }: { task: Task }) {
       <header {...stylex.props(styles.readingSummaryHeader)}>
         <div>
           <p {...stylex.props(styles.eyebrow)}>Task #{task.sequence}</p>
-          <h2 {...stylex.props(styles.readingSummaryTitle)}>{task.title}</h2>
+          <p {...stylex.props(styles.readingSummaryTitle)}>Task summary</p>
         </div>
         <span {...stylex.props(styles.readingSummaryMeta)}>
           {task.priority} · {taskLifecycleLabel(task.lifecycle)}
@@ -1031,6 +1122,10 @@ const styles = stylex.create({
     },
   },
   viewButton: {
+    alignItems: "center",
+    display: "inline-flex",
+    justifyContent: "center",
+    textDecoration: "none",
     backgroundColor: "transparent",
     borderColor: "transparent",
     borderRadius: 6,
@@ -1087,7 +1182,7 @@ const styles = stylex.create({
       borderBlockStartColor: tokens.border,
       borderBlockStartStyle: "solid",
       borderBlockStartWidth: 1,
-      order: 2,
+      order: 0,
     },
   },
   queueHeader: { alignItems: "end", display: "flex", justifyContent: "space-between" },
@@ -1147,6 +1242,7 @@ const styles = stylex.create({
   taskRowBulkSelected: { backgroundColor: tokens.surfaceMuted, borderColor: tokens.border },
   taskRowSelected: { backgroundColor: tokens.surface, borderColor: tokens.accent },
   taskDetailButton: {
+    textDecoration: "none",
     alignItems: "center",
     backgroundColor: "transparent",
     borderWidth: 0,
@@ -1241,8 +1337,38 @@ const styles = stylex.create({
   detail: {
     backgroundColor: tokens.surface,
     order: 1,
-    padding: "clamp(24px, 5vw, 64px)",
+    minWidth: 0,
+    padding: "clamp(20px, 3vw, 40px)",
     "@media (max-width: 600px)": { padding: tokens.space4 },
+  },
+  detailTitle: {
+    fontSize: 24,
+    lineHeight: 1.25,
+    letterSpacing: "-0.03em",
+    marginBlock: "0 24px",
+    overflowWrap: "anywhere",
+    ":focus": { outline: "none" },
+  },
+  hideOnMobile: { "@media (max-width: 760px)": { display: "none" } },
+  taskNavigation: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: tokens.space3,
+    marginBlockEnd: tokens.space4,
+    color: tokens.foregroundMuted,
+    fontSize: 12,
+  },
+  savedViews: { display: "flex", flexWrap: "wrap", gap: tokens.space1, marginBlock: tokens.space3 },
+  filterButton: {
+    display: "inline-flex",
+    padding: "4px 8px",
+    borderRadius: tokens.radius2,
+    color: tokens.foregroundMuted,
+    textDecoration: "none",
+    ":hover": { backgroundColor: tokens.surface },
+    ":focus-visible": { outline: `2px solid ${tokens.accent}` },
+    "[aria-current=true]": { backgroundColor: tokens.surface, color: tokens.accent },
   },
   overviewDetail: { backgroundColor: tokens.background, padding: 0 },
   detailStack: { marginInline: "auto", maxWidth: 960, width: "100%" },

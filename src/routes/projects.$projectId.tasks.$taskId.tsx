@@ -1,22 +1,27 @@
 import { createFileRoute } from "@tanstack/react-router";
-
 import { RoutePendingState } from "../components/route-state";
 import { loadWorkspacePage } from "../features/projects/workspace-loader";
-import { WorkspacePageError } from "../features/projects/workspace-page-error";
 import { WorkspacePage } from "../features/projects/workspace-page";
+import { WorkspacePageError } from "../features/projects/workspace-page-error";
 import { workspaceSearchSchema } from "../features/projects/workspace-search";
 
-export const Route = createFileRoute("/")({
+export const Route = createFileRoute("/projects/$projectId/tasks/$taskId")({
   ssr: false,
   codeSplitGroupings: [["loader"], ["component"], ["errorComponent"]],
   validateSearch: workspaceSearchSchema,
-  loaderDeps: ({ search }) => ({ project: search.project }),
-  loader: ({ context, deps }) => loadWorkspacePage(context.queryClient, deps.project),
+  loader: ({ context, params }) =>
+    loadWorkspacePage(context.queryClient, params.projectId, params.taskId),
   pendingComponent: RoutePendingState,
   errorComponent: WorkspacePageError,
-  component: HomePage,
+  component: TaskPage,
 });
 
-function HomePage() {
-  return <WorkspacePage state={Route.useLoaderData()} search={Route.useSearch()} />;
+function TaskPage() {
+  return (
+    <WorkspacePage
+      state={Route.useLoaderData()}
+      search={Route.useSearch()}
+      selectedTaskId={Route.useParams().taskId}
+    />
+  );
 }

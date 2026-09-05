@@ -227,12 +227,23 @@ try {
     await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
     await page.getByPlaceholder("Capture a task…").fill(title);
     await page.getByRole("button", { name: "Add backlog task" }).click();
-    await page.getByRole("button", { name: `Open task #1: ${title}` }).click();
+    await page.getByRole("link", { name: `Open task #1: ${title}` }).click();
     await expect(page.getByRole("button", { name: "Edit description", exact: true })).toBeVisible();
     assert(
       ![...requestedScripts].some((url) => url.includes("rich-text-editor")),
       "The editor loaded before its interaction.",
     );
+    assert.match(new URL(page.url()).pathname, /^\/projects\/[^/]+\/tasks\/[^/]+$/);
+    const directUrl = page.url();
+    await page.getByLabel("Expected outcome", { exact: true }).fill("Partial instructions");
+    await page.getByRole("button", { name: "Save draft", exact: true }).click();
+    await expect(page.getByText("All changes saved", { exact: true })).toBeVisible();
+    await page.reload();
+    assert.equal(page.url(), directUrl);
+    await expect(page.getByLabel("Expected outcome", { exact: true })).toHaveValue(
+      "Partial instructions",
+    );
+    await expect(page.getByRole("button", { name: "Move to ready", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Edit description", exact: true }).click();
     await page
       .locator('[contenteditable="true"][aria-label="Description"]')
@@ -244,9 +255,10 @@ try {
     await page
       .getByLabel("Checklist", { exact: true })
       .fill("Verify the completion report\nApprove and reopen the task");
+    await page.locator("summary").filter({ hasText: "Planning and agent instructions" }).click();
     await page.getByLabel("Required capabilities", { exact: true }).fill("typescript");
     await page.getByRole("button", { name: "Move to ready", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Save preparation", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Save changes", exact: true })).toBeVisible();
     await expect(page.getByText("Live", { exact: true })).toBeVisible();
   });
 
@@ -264,7 +276,8 @@ try {
       await route.continue();
     });
     try {
-      await page.getByRole("button", { name: "Dashboard", exact: true }).click();
+      await page.getByLabel("Expected outcome", { exact: true }).fill("Unsaved navigation draft");
+      await page.getByRole("link", { name: "Dashboard", exact: true }).click();
       await expect(page.getByLabel("Loading dashboard", { exact: true })).toBeVisible();
       releaseDashboard();
       await expect(page.getByRole("heading", { name: "What needs attention now" })).toBeVisible();
@@ -272,8 +285,13 @@ try {
       releaseDashboard();
       await page.unrouteAll({ behavior: "wait" });
     }
-    await page.getByRole("button", { name: "Tasks", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Save preparation", exact: true })).toBeVisible();
+    await page.getByRole("link", { name: "Tasks", exact: true }).click();
+    await page.getByRole("link", { name: `Open task #1: ${title}` }).click();
+    await expect(page.getByLabel("Expected outcome", { exact: true })).toHaveValue(
+      "Unsaved navigation draft",
+    );
+    await page.getByLabel("Expected outcome", { exact: true }).fill(outcome);
+    await expect(page.getByRole("button", { name: "Save changes", exact: true })).toBeVisible();
   });
 
   await step("MCP registration, discovery, and context", async () => {
@@ -299,6 +317,9 @@ try {
   });
 
   await step("atomic competing claims, retry safety, and live claim visibility", async () => {
+    await page
+      .getByLabel("Expected outcome", { exact: true })
+      .fill("Human draft during agent work");
     const inputs = [
       { projectId, idempotencyKey: randomUUID() },
       { projectId, idempotencyKey: randomUUID() },
@@ -332,6 +353,10 @@ try {
     assert.deepEqual(replay.grant, grant);
     assert.equal(grant.task.id, taskId);
     assert.equal(grant.task.lifecycle, "in_progress");
+    await expect(page.getByLabel("Expected outcome", { exact: true })).toHaveValue(
+      "Human draft during agent work",
+    );
+    await expect(page.getByText("This task changed while you were editing.")).toBeVisible();
     await expect(page.getByRole("region", { name: "Current claim" })).toContainText(
       agent.registration.profile.displayName,
     );
@@ -373,6 +398,9 @@ try {
       },
     });
     assert.equal(result.task.lifecycle, "review");
+    await expect(page.getByLabel("Expected outcome", { exact: true })).toHaveValue(
+      "Human draft during agent work",
+    );
     await expect(page.getByRole("region", { name: "Review actions" })).toBeVisible();
     await expect(page.getByText(resultSummary, { exact: true })).toBeVisible();
     await page
@@ -384,7 +412,10 @@ try {
       .getByLabel("Reopen reason", { exact: true })
       .fill("Exercise a follow-up without losing the original attempt.");
     await page.getByRole("button", { name: "Reopen", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Save preparation", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Save changes", exact: true })).toBeVisible();
+    page.once("dialog", (dialog) => void dialog.accept());
+    await page.getByRole("button", { name: "Use latest saved task", exact: true }).click();
+    await expect(page.getByLabel("Expected outcome", { exact: true })).toHaveValue(outcome);
   });
 
   await step("durable event replay and preserved attributed attempt history", async () => {
@@ -419,7 +450,7 @@ try {
       afterCursor: payload.nextCursor,
     });
     assert.equal(tail.payload.events.length, 0);
-    await page.getByRole("button", { name: "Activity", exact: true }).click();
+    await page.getByRole("link", { name: "Activity", exact: true }).click();
     await expect(page.getByText(/^task · reopened$/i).first()).toBeVisible();
   });
 
@@ -433,9 +464,7 @@ try {
     await preload;
     assert.equal(new URL(page.url()).pathname, "/");
     await searchLink.click();
-    await expect(
-      page.getByRole("heading", { name: "Find the work behind the work." }),
-    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Search tasks" })).toBeVisible();
     await page.reload();
     await expect(page.getByRole("region", { name: "Task search results" })).toContainText(title);
     await page.getByLabel("Saved view name").fill("Workflow review queue");
@@ -450,6 +479,73 @@ try {
     ).toBeVisible();
     await expect(page.getByRole("region", { name: "Task search results" })).toContainText(title);
   });
+
+  await step(
+    "task links, responsive fields, navigation alignment, and dismissible utilities",
+    async () => {
+      await page.getByRole("link", { name: `Open task #1: ${title}` }).click();
+      await page.getByRole("form", { name: "Prepare task" }).waitFor();
+      const directUrl = page.url();
+      await page.reload();
+      await expect(page.getByLabel("Title", { exact: true })).toHaveValue(title);
+      assert.equal(page.url(), directUrl);
+      await page.locator("summary").filter({ hasText: "Planning and agent instructions" }).click();
+      for (const width of [1440, 1280, 1024, 800, 390]) {
+        // oxlint-disable-next-line no-await-in-loop
+        await page.setViewportSize({ width, height: 900 });
+        // oxlint-disable-next-line no-await-in-loop
+        const boxes = await page
+          .locator('input[type="date"]')
+          .evaluateAll((elements) =>
+            elements.map((element) => element.getBoundingClientRect().toJSON()),
+          );
+        for (let index = 1; index < boxes.length; index++) {
+          const left = boxes[index - 1],
+            right = boxes[index];
+          assert(
+            left.bottom <= right.top || left.right <= right.left || right.bottom <= left.top,
+            `Date fields overlap at ${width}px.`,
+          );
+        }
+        assert.equal(
+          // oxlint-disable-next-line no-await-in-loop -- One browser viewport must be checked before changing it.
+          await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
+          false,
+          `Horizontal overflow at ${width}px.`,
+        );
+      }
+      await page.getByRole("link", { name: "Back to tasks", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
+      await expect(
+        page.getByRole("heading", { name: "Select a task", exact: true }),
+      ).not.toBeVisible();
+      await page.setViewportSize({ width: 1440, height: 900 });
+      const nav = await page
+        .locator('nav[aria-label="Project navigation"] a')
+        .evaluateAll((links) =>
+          links.map((link) => ({
+            y: link.getBoundingClientRect().y,
+            height: link.getBoundingClientRect().height,
+            font: getComputedStyle(link).font,
+          })),
+        );
+      assert(
+        nav.every(
+          (link) =>
+            link.y === nav[0].y && link.height === nav[0].height && link.font === nav[0].font,
+        ),
+      );
+      await page.getByRole("button", { name: "Switch project", exact: true }).click();
+      await expect(page.getByRole("button", { name: "Close project switcher" })).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("button", { name: "Close project switcher" })).not.toBeVisible();
+      await expect(page.getByRole("button", { name: "Switch project", exact: true })).toBeFocused();
+      await page.getByRole("button", { name: /Notifications/ }).click();
+      await expect(page.getByRole("dialog", { name: "Notifications" })).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("dialog", { name: "Notifications" })).not.toBeVisible();
+    },
+  );
 
   assert.deepEqual(browserErrors, [], "Unexpected browser console or hydration errors.");
 
@@ -481,9 +577,7 @@ try {
         timeout,
       });
       releaseRequests();
-      await expect(
-        probe.getByRole("heading", { name: "Find the work behind the work." }),
-      ).toBeVisible({ timeout });
+      await expect(probe.getByRole("heading", { name: "Search tasks" })).toBeVisible({ timeout });
       await probe.unrouteAll({ behavior: "wait" });
       assert.deepEqual(consoleErrors, [], "Slow route loading produced a browser error.");
       await probe.route("**/_serverFn/**", (route) =>
@@ -499,9 +593,7 @@ try {
       });
       await probe.unrouteAll({ behavior: "wait" });
       await probe.getByRole("button", { name: "Try again", exact: true }).click();
-      await expect(
-        probe.getByRole("heading", { name: "Find the work behind the work." }),
-      ).toBeVisible({ timeout });
+      await expect(probe.getByRole("heading", { name: "Search tasks" })).toBeVisible({ timeout });
       await expect(probe.getByRole("region", { name: "Task search results" })).toContainText(title);
       assert.deepEqual(errors, [], "The handled route failure caused an uncaught browser error.");
       assert.deepEqual(

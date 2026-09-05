@@ -1,17 +1,19 @@
 import { useEffect, useState } from "react";
-import { Link, getRouteApi, useRouter } from "@tanstack/react-router";
+import { getRouteApi, useRouter } from "@tanstack/react-router";
 import { useLiveSuspenseQuery } from "@tanstack/react-db";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import * as stylex from "@stylexjs/stylex";
-import { Archive, LayoutGrid, List, ShipWheel } from "lucide-react";
+import { Archive, LayoutGrid, List } from "lucide-react";
 
-import { Button } from "../../components/ui/button";
+import { AppHeader, ProjectNavigation } from "../../components/app-header";
+import { ActionButton as Button } from "../../components/ui/action-button";
 import type { AppState } from "../../domain/projects";
 import { importantProjectEventQueryKey } from "../activity/important-project-event-query";
 import { subscribeToProjectEvents } from "../activity/project-event-subscription";
 import { DeferredTaskRouteResults } from "./deferred-task-route-results";
 import { getTaskSearchCollection, taskSearchPageQueryOptions } from "./task-search-collection";
 import { emptyTaskSearchParams } from "./task-search-route-params";
+import { TaskRouteUtilities } from "./task-route-utilities";
 import { TaskRoutePageToolsLauncher } from "./task-route-page-tools-launcher";
 import { archiveHumanSavedView } from "../../server/task-query-functions";
 import { tokens } from "../../styles/tokens.stylex";
@@ -53,7 +55,7 @@ export function SavedViewPage() {
             });
           }
           if (input.cursor) {
-            await navigate({ search: { cursor: null }, replace: true });
+            await navigate({ search: { cursor: null, project: projectId }, replace: true });
             return;
           }
           if (event.changes.scopes.includes("projects")) {
@@ -97,7 +99,7 @@ export function SavedViewPage() {
         return;
       }
       await queryClient.invalidateQueries({ queryKey: ["saved-views", projectId] });
-      await navigate({ to: "/search", search: emptyTaskSearchParams });
+      await navigate({ to: "/search", search: { ...emptyTaskSearchParams, project: projectId } });
     } catch {
       setArchiveError("Helm could not archive this view.");
     } finally {
@@ -107,43 +109,37 @@ export function SavedViewPage() {
 
   return (
     <main {...stylex.props(styles.page)}>
-      <header {...stylex.props(styles.header)}>
-        <Link to="/" {...stylex.props(styles.brand)}>
-          <span {...stylex.props(styles.mark)} aria-hidden="true">
-            <ShipWheel size={16} />
-          </span>
-          <span>Helm</span>
-          <span {...stylex.props(styles.projectName)}>{project.name}</span>
-        </Link>
-        <nav aria-label="Project navigation" {...stylex.props(styles.navigation)}>
-          <Link to="/" {...stylex.props(styles.navLink)}>
-            Workspace
-          </Link>
-          <Link to="/search" search={emptyTaskSearchParams} {...stylex.props(styles.navLink)}>
-            Search
-          </Link>
-          <span {...stylex.props(styles.navLink, styles.navLinkActive)}>Saved view</span>
-        </nav>
-        <div {...stylex.props(styles.headerUtilities)}>
-          <span aria-live="polite" {...stylex.props(styles.liveStatus)}>
-            {liveStatus === "live"
-              ? "Live"
-              : liveStatus === "retrying"
-                ? "Retrying…"
-                : "Connecting…"}
-          </span>
-        </div>
-      </header>
-
-      <div {...stylex.props(styles.projectToolbar)}>
-        <TaskRoutePageToolsLauncher
-          projects={projects}
-          activeProject={project}
-          activeProjectVersion={state.activeProjectVersion}
-          theme={state.theme}
-          tasks={items.map(({ task }) => task)}
-        />
-      </div>
+      <AppHeader
+        projectName={project.name}
+        navigation={<ProjectNavigation projectId={project.id} current="search" />}
+        projectControl={
+          <TaskRoutePageToolsLauncher
+            projects={projects}
+            activeProject={project}
+            activeProjectVersion={state.activeProjectVersion}
+            theme={state.theme}
+            tasks={items.map(({ task }) => task)}
+          />
+        }
+        utilities={
+          <>
+            <span aria-live="polite" {...stylex.props(styles.liveStatus)}>
+              {liveStatus === "live"
+                ? "Live"
+                : liveStatus === "retrying"
+                  ? "Reconnecting"
+                  : "Connecting"}
+            </span>
+            <TaskRouteUtilities
+              projects={projects}
+              activeProject={project}
+              activeProjectVersion={state.activeProjectVersion}
+              theme={state.theme}
+              tasks={items.map(({ task }) => task)}
+            />
+          </>
+        }
+      />
 
       <section {...stylex.props(styles.hero)}>
         <div>
@@ -163,128 +159,70 @@ export function SavedViewPage() {
           <Archive size={15} aria-hidden="true" /> {archiving ? "Archiving…" : "Archive view"}
         </Button>
       </section>
-      {archiveError ? (
-        <p role="alert" {...stylex.props(styles.error)}>
-          {archiveError}
-        </p>
-      ) : null}
-      <div {...stylex.props(styles.resultMeta)}>
-        <span>
-          {page.total} result{page.total === 1 ? "" : "s"} · {items.length} on this page
-        </span>
-        <div aria-label="Pagination" {...stylex.props(styles.pagination)}>
-          <Button
-            variant="quiet"
-            type="button"
-            disabled={!input.cursor}
-            onClick={() => navigate({ search: { cursor: null } })}
-          >
-            First page
-          </Button>
-          <Button
-            variant="quiet"
-            type="button"
-            disabled={!page.nextCursor}
-            onClick={() => navigate({ search: { cursor: page.nextCursor } })}
-          >
-            Next page
-          </Button>
+      <section {...stylex.props(styles.results)} aria-label="Saved view results">
+        {archiveError ? (
+          <p role="alert" {...stylex.props(styles.error)}>
+            {archiveError}
+          </p>
+        ) : null}
+        <div {...stylex.props(styles.resultMeta)}>
+          <span>
+            {page.total} result{page.total === 1 ? "" : "s"} · {items.length} on this page
+          </span>
+          <div aria-label="Pagination" {...stylex.props(styles.pagination)}>
+            <Button
+              variant="quiet"
+              type="button"
+              disabled={!input.cursor}
+              onClick={() => navigate({ search: { cursor: null, project: projectId } })}
+            >
+              First page
+            </Button>
+            <Button
+              variant="quiet"
+              type="button"
+              disabled={!page.nextCursor}
+              onClick={() => navigate({ search: { cursor: page.nextCursor, project: projectId } })}
+            >
+              Next page
+            </Button>
+          </div>
         </div>
-      </div>
-      <DeferredTaskRouteResults
-        projectId={projectId}
-        items={items}
-        visibleFields={view.definition.visibleFields}
-        presentation={view.definition.presentation}
-        grouping={view.definition.grouping}
-        onExecuted={async () => {
-          await collection.utils.refetch({ throwOnError: true });
-        }}
-      />
+        <DeferredTaskRouteResults
+          projectId={projectId}
+          items={items}
+          visibleFields={view.definition.visibleFields}
+          presentation={view.definition.presentation}
+          grouping={view.definition.grouping}
+          onExecuted={async () => {
+            await collection.utils.refetch({ throwOnError: true });
+          }}
+        />
+      </section>
     </main>
   );
 }
 
 const styles = stylex.create({
+  results: { paddingInline: tokens.space5, paddingBlockEnd: tokens.space5 },
   page: {
     margin: "0 auto",
     maxWidth: 1440,
     minHeight: "100vh",
-    padding: tokens.space6,
+    padding: 0,
     width: "100%",
-    "@media (max-width: 700px)": { padding: tokens.space4 },
-  },
-  header: {
-    alignItems: "center",
-    display: "grid",
-    gap: tokens.space4,
-    gridTemplateColumns: "1fr auto 1fr",
-    "@media (max-width: 760px)": { gridTemplateColumns: "1fr" },
-  },
-  brand: {
-    alignItems: "center",
-    color: tokens.foreground,
-    display: "flex",
-    fontWeight: 750,
-    gap: tokens.space2,
-    textDecoration: "none",
-  },
-  mark: {
-    alignItems: "center",
-    backgroundColor: tokens.foreground,
-    borderRadius: 6,
-    color: tokens.background,
-    display: "inline-flex",
-    height: 26,
-    justifyContent: "center",
-    width: 26,
-  },
-  projectName: { color: tokens.foregroundMuted, fontWeight: 500 },
-  navigation: {
-    backgroundColor: tokens.surface,
-    borderColor: tokens.border,
-    borderRadius: tokens.radius2,
-    borderStyle: "solid",
-    borderWidth: 1,
-    display: "flex",
-    justifySelf: "center",
-    padding: 3,
-    "@media (max-width: 760px)": { justifySelf: "start" },
-  },
-  navLink: {
-    borderRadius: 6,
-    color: tokens.foregroundMuted,
-    fontSize: 13,
-    fontWeight: 650,
-    paddingBlock: 6,
-    paddingInline: 10,
-    textDecoration: "none",
-  },
-  navLinkActive: { backgroundColor: tokens.surfaceMuted, color: tokens.foreground },
-  headerUtilities: {
-    alignItems: "center",
-    display: "flex",
-    gap: tokens.space3,
-    justifySelf: "end",
-    "@media (max-width: 760px)": { justifySelf: "start" },
   },
   liveStatus: {
     color: tokens.foregroundMuted,
     fontSize: 12,
   },
-  projectToolbar: {
-    borderBlockEndColor: tokens.border,
-    borderBlockEndStyle: "solid",
-    borderBlockEndWidth: 1,
-    marginBlockStart: tokens.space4,
-    paddingBlockEnd: tokens.space4,
-  },
   hero: {
+    paddingInline: tokens.space5,
     alignItems: "end",
     display: "flex",
     justifyContent: "space-between",
     gap: tokens.space5,
-    marginBlock: tokens.space8,
+    marginBlock: tokens.space5,
     "@media (max-width: 600px)": { alignItems: "start", flexDirection: "column" },
   },
   eyebrow: {
@@ -296,7 +234,7 @@ const styles = stylex.create({
     textTransform: "uppercase",
   },
   title: {
-    fontSize: "clamp(2.4rem, 6vw, 5rem)",
+    fontSize: 28,
     letterSpacing: "-0.055em",
     lineHeight: 0.98,
     marginBlock: tokens.space2,

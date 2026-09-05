@@ -57,8 +57,8 @@ describe("project switcher", () => {
       expect.stringContaining("helm"),
     );
     expect(screen.getByText("/projects/helm")).toBeTruthy();
-    expect(screen.getByText("Project v4")).toBeTruthy();
-    expect(screen.getByText("Selection v7")).toBeTruthy();
+    expect(screen.queryByText("Project v4")).toBeNull();
+    expect(screen.queryByText("Selection v7")).toBeNull();
 
     await user.click(screen.getByRole("combobox", { name: "Active project" }));
 

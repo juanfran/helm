@@ -41,8 +41,34 @@ Select the task and fill in:
 | Checklist                | Add a regression test for no matches. Then, on a new line: Verify clearing the query restores results.                   |
 | Agent context (optional) | Use the existing components and test runner. Do not add dependencies.                                                    |
 
-Choose **Move to ready**. Readiness requires the title, expected outcome, acceptance criteria,
+Use **Save draft** whenever you want to keep partial instructions. It saves the whole form, including
+planning fields, without making the task available to agents. Pressing Enter in a single-line field
+also saves; it does not move a backlog task to Ready.
+
+Choose **Move to ready** when the instructions are complete. Readiness requires the title, expected outcome, acceptance criteria,
 and at least one checklist item. Description and agent context are optional.
+
+Open **Planning and agent instructions** for priority, dates, tags, capabilities, and agent context.
+On ready tasks, **Save changes** saves content and planning together. Cancellation is a separate
+**Cancel task…** action below the task; it asks for a reason before changing anything.
+
+### Navigate without losing your work
+
+Every task has its own `/projects/<projectId>/tasks/<taskId>` URL. Open tasks from the queue,
+Search, or a saved view; copy the browser address to return directly to that task. Browser Back
+restores the previous page. On a narrow screen, **Back to tasks** returns to the queue.
+
+Unfinished edits are kept in the current browser tab across navigation and reloads, but they are
+not shared with agents until you save. If browser storage is unavailable, Helm warns you and keeps
+edits in memory while the app remains open. Save before closing the tab.
+
+If an agent or another window changes the task while you are editing, Helm keeps your text and
+pauses saving. **Keep my edited fields** applies only your changed fields to the latest version;
+**Use latest saved task** discards your local edits after confirmation. An active or completed task
+stays read-only; retaining a draft does not bypass its lifecycle.
+
+**Switch project** opens a compact menu. Close it with Escape, the close button, or a click outside.
+Dashboard, Tasks, Activity, Settings, and Search use the same navigation throughout the app.
 
 Leave required capabilities empty for this first task. For later work, capability requirements
 must match capabilities advertised by the agent. Priority, manual position, due date, and age

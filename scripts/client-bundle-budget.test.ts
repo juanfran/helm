@@ -33,6 +33,7 @@ const routeSources = [
   "src/routes/index.tsx",
   "src/routes/search.tsx",
   "src/routes/views.$viewId.tsx",
+  "src/routes/projects.$projectId.tasks.$taskId.tsx",
 ] as const;
 const splitProperties = ["loader", "component", "errorComponent"] as const;
 const fixtureNavigationCriticalSources: ClientNavigationCriticalSources = {
@@ -204,12 +205,14 @@ describe("client bundle budgets", () => {
         "/": { rawBytes: 900_000, gzipBytes: 280_000 },
         "/search": { rawBytes: 850_000, gzipBytes: 260_000 },
         "/views/$viewId": { rawBytes: 850_000, gzipBytes: 260_000 },
+        "/projects/$projectId/tasks/$taskId": { rawBytes: 1_050_000, gzipBytes: 330_000 },
       },
     });
     expect(CLIENT_NAVIGATION_CRITICAL_SOURCES).toEqual({
-      "/": [],
+      "/": ["src/features/projects/project-landing.tsx"],
       "/search": [],
       "/views/$viewId": [],
+      "/projects/$projectId/tasks/$taskId": ["src/features/tasks/task-detail-panel.tsx"],
     });
   });
 

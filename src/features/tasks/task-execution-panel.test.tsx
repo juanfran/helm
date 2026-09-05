@@ -210,6 +210,8 @@ describe("task execution panel", () => {
     const panel = props({ task: claimed, attempts: [reviewAttempt] });
     render(<TaskExecutionPanel {...panel} />);
 
+    expect(screen.queryByRole("form", { name: "Cancel task" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Cancel task…" }));
     const cancelForm = screen.getByRole("form", { name: "Cancel task" });
     expect(cancelForm.textContent).toContain("rejects late agent results");
     const cancelButton = within(cancelForm).getByRole("button", { name: "Cancel task" });
@@ -266,6 +268,49 @@ describe("task execution panel", () => {
       reason: "The scope has changed.",
       idempotencyKey: expect.any(String),
     });
+  });
+
+  it("shows cancellation failures inside the dialog and preserves the reason", async () => {
+    const user = userEvent.setup();
+    render(
+      <TaskExecutionPanel
+        {...props({
+          onCancelTask: vi.fn().mockResolvedValue({
+            ok: false,
+            error: { type: "TaskVersionConflictError", message: "Task changed. Try again." },
+          }),
+        })}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Cancel task…" }));
+    const dialog = screen.getByRole("dialog", { name: "Cancel this task?" });
+    await user.type(within(dialog).getByLabelText("Cancellation reason"), "No longer needed");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel task" }));
+    expect(await within(dialog).findByRole("alert")).toHaveProperty(
+      "textContent",
+      "Task changed. Try again.",
+    );
+    expect(within(dialog).getByLabelText("Cancellation reason")).toHaveProperty(
+      "value",
+      "No longer needed",
+    );
+  });
+
+  it("does not offer lifecycle actions on archived tasks", () => {
+    const panel = render(
+      <TaskExecutionPanel
+        {...props({ task: { ...task, lifecycle: "done", archivedAt: task.updatedAt } })}
+      />,
+    );
+    expect(screen.queryByRole("form", { name: "Reopen done task" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reopen task" })).toBeNull();
+    panel.rerender(
+      <TaskExecutionPanel
+        {...props({ task: { ...task, lifecycle: "cancelled", archivedAt: task.updatedAt } })}
+      />,
+    );
+    expect(screen.queryByRole("form", { name: "Restore cancelled task" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel task…" })).toBeNull();
   });
 
   it("keeps a requested-change draft visible after a version conflict", async () => {

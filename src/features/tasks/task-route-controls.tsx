@@ -3,7 +3,7 @@ import { useSuspenseQuery } from "@tanstack/react-query";
 import * as stylex from "@stylexjs/stylex";
 import { Search as SearchIcon } from "lucide-react";
 
-import { Button } from "../../components/ui/button";
+import { ActionButton as Button } from "../../components/ui/action-button";
 import { tokens } from "../../styles/tokens.stylex";
 import { parseTaskSearchRouteParams, type TaskSearchParams } from "./task-search-route-params";
 import { taskTagsQueryOptions } from "./task-tags-query";

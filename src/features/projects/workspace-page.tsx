@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ComponentType } from "react";
 import { useLiveSuspenseQuery } from "@tanstack/react-db";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
-import { Link, getRouteApi, useRouter } from "@tanstack/react-router";
+import { Link, useRouter } from "@tanstack/react-router";
 import * as stylex from "@stylexjs/stylex";
 
 import { RetryableLazySurface } from "../../components/retryable-lazy-surface";
@@ -81,18 +81,20 @@ import {
 import { activeAgentRunsQueryOptions } from "../dashboard/agent-runs-query";
 import { getTaskAttemptCollection } from "../tasks/task-attempt-collection";
 import { getTaskCollection } from "../tasks/task-collection";
-import { emptyTaskSearchParams } from "../tasks/task-search-params";
 import { taskTagsQueryOptions } from "../tasks/task-tags-query";
 import { TaskWorkspace } from "../tasks/task-workspace";
 import type { ProjectDataManagementControlProps } from "./project-data-management-control";
-import { ProjectLanding } from "./project-landing";
+import { projectLandingModule } from "./project-landing-module";
 import {
   projectCustomizationQueryOptions,
   refreshProjectCustomization,
 } from "./project-customization-query";
 import { executeProjectChange } from "./project-navigation";
 
-const homeRouteApi = getRouteApi("/");
+type WorkspacePageState = Awaited<
+  ReturnType<typeof import("./workspace-loader").loadWorkspacePage>
+>;
+type WorkspaceSearch = import("./workspace-search").WorkspaceSearch;
 const projectSwitcherModule = createRetryableLazyModuleLoader(() =>
   import("./project-switcher").then(({ ProjectSwitcher }) => ({ default: ProjectSwitcher })),
 );
@@ -111,14 +113,24 @@ type ProjectDataManagementControlModuleLoader = RetryableLazyModuleLoader<{
   default: ComponentType<ProjectDataManagementControlProps>;
 }>;
 
-export function WorkspacePage() {
-  const state = homeRouteApi.useLoaderData();
+export function WorkspacePage({
+  state,
+  search,
+  selectedTaskId = null,
+}: {
+  state: WorkspacePageState;
+  search: WorkspaceSearch;
+  selectedTaskId?: string | null;
+}) {
   const router = useRouter();
 
   if (state.activeProject) {
     return (
       <ActiveProjectHome
         key={state.activeProject.id}
+        state={state}
+        search={search}
+        selectedTaskId={selectedTaskId}
         project={state.activeProject}
         projects={state.projects}
         activeProjectVersion={state.activeProjectVersion}
@@ -128,21 +140,30 @@ export function WorkspacePage() {
   }
 
   return (
-    <ProjectLanding
-      state={state}
-      portabilityControl={
-        <ProjectLandingDataManagementIntent onComplete={() => router.invalidate({ sync: true })} />
-      }
-      onCreateProject={async (input) => {
-        const response = await createInitialProject({ data: input });
-        if (response.ok) await router.invalidate({ sync: true });
-        return response;
-      }}
-      onChangeTheme={async (input) => {
-        const response = await changeTheme({ data: input });
-        if (response.ok) await router.invalidate({ sync: true });
-        return response;
-      }}
+    <RetryableLazySurface
+      moduleLoader={projectLandingModule}
+      fallback={<WorkspaceModuleFallback label="Loading project setup" />}
+      renderFailure={(retry) => <WorkspaceModuleFailure label="Project setup" onRetry={retry} />}
+      render={(ProjectLanding) => (
+        <ProjectLanding
+          state={state}
+          portabilityControl={
+            <ProjectLandingDataManagementIntent
+              onComplete={() => router.invalidate({ sync: true })}
+            />
+          }
+          onCreateProject={async (input) => {
+            const response = await createInitialProject({ data: input });
+            if (response.ok) await router.invalidate({ sync: true });
+            return response;
+          }}
+          onChangeTheme={async (input) => {
+            const response = await changeTheme({ data: input });
+            if (response.ok) await router.invalidate({ sync: true });
+            return response;
+          }}
+        />
+      )}
     />
   );
 }
@@ -193,17 +214,23 @@ export function ProjectLandingDataManagementIntent({
 }
 
 function ActiveProjectHome({
+  state,
+  search,
+  selectedTaskId,
   project,
   projects,
   activeProjectVersion,
   theme,
 }: {
+  state: WorkspacePageState;
+  search: WorkspaceSearch;
+  selectedTaskId: string | null;
   project: Project;
   projects: readonly Project[];
   activeProjectVersion: number;
   theme: Theme;
 }) {
-  const { eventCursor, savedViews } = homeRouteApi.useLoaderData();
+  const { eventCursor, savedViews } = state;
   const router = useRouter();
   const queryClient = useQueryClient();
   const taskCollection = getTaskCollection(queryClient, project.id);
@@ -546,6 +573,39 @@ function ActiveProjectHome({
   return (
     <TaskWorkspace
       project={project}
+      savedViews={savedViews}
+      navigation={{
+        view: search.view ?? "tasks",
+        selectedTaskId,
+        filter: search.filter,
+        renderTaskLink: (task, props, children) => (
+          <Link
+            to="/projects/$projectId/tasks/$taskId"
+            params={{ projectId: project.id, taskId: task.id }}
+            search={{ filter: search.filter }}
+            {...props}
+          >
+            {children}
+          </Link>
+        ),
+        renderBackLink: (props) => (
+          <Link to="/" search={{ project: project.id, filter: search.filter }} {...props}>
+            Back to tasks
+          </Link>
+        ),
+        renderFilterLink: (filter, props, children) => (
+          <Link to="/" search={{ project: project.id, filter }} {...props}>
+            {children}
+          </Link>
+        ),
+        onTaskCreated: (taskId) => {
+          void router.navigate({
+            to: "/projects/$projectId/tasks/$taskId",
+            params: { projectId: project.id, taskId },
+            search: { filter: search.filter },
+          });
+        },
+      }}
       theme={theme}
       tasks={tasks}
       attempts={attempts}
@@ -632,11 +692,6 @@ function ActiveProjectHome({
           )}
         />
       }
-      renderSearchLink={(props) => (
-        <Link to="/search" search={emptyTaskSearchParams} {...props}>
-          Search
-        </Link>
-      )}
       onCreateTask={(input) => createHumanTask({ data: input }).then(applyTaskResponse)}
       onPrepareTask={(input) => prepareHumanTask({ data: input }).then(applyTaskResponse)}
       onUpdateTaskPlanning={(input) =>

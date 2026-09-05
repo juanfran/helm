@@ -1,4 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react";
+import { Dialog } from "@base-ui/react/dialog";
 import * as stylex from "@stylexjs/stylex";
 import { AlertTriangle, History, RotateCcw, ShieldCheck, XCircle } from "lucide-react";
 
@@ -299,7 +300,8 @@ export function TaskExecutionPanel({
     }
   }
 
-  const cancellable = ["backlog", "ready", "in_progress", "review"].includes(task.lifecycle);
+  const cancellable =
+    !task.archivedAt && ["backlog", "ready", "in_progress", "review"].includes(task.lifecycle);
   const destination = restoreDestination(task);
   const headingId = "execution-heading-" + task.id;
 
@@ -309,7 +311,7 @@ export function TaskExecutionPanel({
         <div>
           <p {...stylex.props(styles.eyebrow)}>Execution record</p>
           <h2 id={headingId} {...stylex.props(styles.heading)}>
-            Attempts and lifecycle
+            {task.lifecycle === "review" ? "Review completed work" : "History and actions"}
           </h2>
         </div>
         <span {...stylex.props(styles.attemptCount)}>
@@ -419,7 +421,7 @@ export function TaskExecutionPanel({
         </section>
       ) : null}
 
-      {task.lifecycle === "cancelled" ? (
+      {task.lifecycle === "cancelled" && !task.archivedAt ? (
         <form
           aria-label="Restore cancelled task"
           onSubmit={restore}
@@ -458,7 +460,7 @@ export function TaskExecutionPanel({
         </form>
       ) : null}
 
-      {task.lifecycle === "done" ? (
+      {task.lifecycle === "done" && !task.archivedAt ? (
         <form
           aria-label="Reopen completed task"
           onSubmit={reopen}
@@ -500,38 +502,54 @@ export function TaskExecutionPanel({
       ) : null}
 
       {cancellable ? (
-        <form aria-label="Cancel task" onSubmit={cancel} {...stylex.props(styles.cancelForm)}>
-          <fieldset disabled={pending} {...stylex.props(styles.fieldset)}>
-            <div>
-              <p {...stylex.props(styles.eyebrow)}>Stop work</p>
-              <h3 {...stylex.props(styles.actionHeading)}>Cancel task</h3>
-            </div>
-            <p id={"cancel-help-" + task.id} {...stylex.props(styles.hint)}>
-              {task.lifecycle === "in_progress" || task.claim
-                ? "Cancellation immediately invalidates the active lease, closes its attempt without success, and rejects late agent results."
-                : "Cancellation preserves the task and its history. A later restore is explicitly attributed."}
-            </p>
-            <label htmlFor={"cancel-reason-" + task.id}>Cancellation reason</label>
-            <textarea
-              id={"cancel-reason-" + task.id}
-              aria-describedby={"cancel-help-" + task.id}
-              value={cancelReason}
-              onChange={(event) => setCancelReason(event.target.value)}
-              rows={3}
-              maxLength={5_000}
-              required
-              {...stylex.props(styles.textarea)}
-            />
-            <Button
-              type="submit"
-              variant="danger"
-              disabled={pending || cancelReason.trim().length === 0}
-            >
-              <XCircle size={15} aria-hidden="true" />
-              {pendingAction === "cancel" ? "Cancelling task…" : "Cancel task"}
-            </Button>
-          </fieldset>
-        </form>
+        <Dialog.Root>
+          <Dialog.Trigger render={<Button variant="quiet" />}>Cancel task…</Dialog.Trigger>
+          <Dialog.Portal>
+            <Dialog.Backdrop {...stylex.props(styles.backdrop)} />
+            <Dialog.Popup {...stylex.props(styles.dialog)}>
+              <Dialog.Title {...stylex.props(styles.actionHeading)}>Cancel this task?</Dialog.Title>
+              <Dialog.Description {...stylex.props(styles.hint)}>
+                Explain why this work should stop. The task and its history will be kept.
+              </Dialog.Description>
+              <form aria-label="Cancel task" onSubmit={cancel} {...stylex.props(styles.cancelForm)}>
+                {error ? (
+                  <p role="alert" {...stylex.props(styles.error)}>
+                    {error}
+                  </p>
+                ) : null}
+                <fieldset disabled={pending} {...stylex.props(styles.fieldset)}>
+                  <div>
+                    <Dialog.Close render={<Button variant="quiet" />}>Keep task</Dialog.Close>
+                  </div>
+                  <p id={"cancel-help-" + task.id} {...stylex.props(styles.hint)}>
+                    {task.lifecycle === "in_progress" || task.claim
+                      ? "Cancellation immediately invalidates the active lease, closes its attempt without success, and rejects late agent results."
+                      : "Cancellation preserves the task and its history. A later restore is explicitly attributed."}
+                  </p>
+                  <label htmlFor={"cancel-reason-" + task.id}>Cancellation reason</label>
+                  <textarea
+                    id={"cancel-reason-" + task.id}
+                    aria-describedby={"cancel-help-" + task.id}
+                    value={cancelReason}
+                    onChange={(event) => setCancelReason(event.target.value)}
+                    rows={3}
+                    maxLength={5_000}
+                    required
+                    {...stylex.props(styles.textarea)}
+                  />
+                  <Button
+                    type="submit"
+                    variant="danger"
+                    disabled={pending || cancelReason.trim().length === 0}
+                  >
+                    <XCircle size={15} aria-hidden="true" />
+                    {pendingAction === "cancel" ? "Cancelling task…" : "Cancel task"}
+                  </Button>
+                </fieldset>
+              </form>
+            </Dialog.Popup>
+          </Dialog.Portal>
+        </Dialog.Root>
       ) : null}
 
       {error ? (
@@ -544,6 +562,22 @@ export function TaskExecutionPanel({
 }
 
 const styles = stylex.create({
+  backdrop: { position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.4)", zIndex: 80 },
+  dialog: {
+    position: "fixed",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+    width: "min(520px, calc(100vw - 32px))",
+    maxHeight: "calc(100vh - 32px)",
+    overflowY: "auto",
+    padding: tokens.space5,
+    borderRadius: tokens.radius3,
+    backgroundColor: tokens.surface,
+    color: tokens.foreground,
+    boxShadow: tokens.shadow,
+    zIndex: 81,
+  },
   root: { display: "grid", gap: tokens.space4, marginBlockEnd: tokens.space6 },
   headingRow: {
     alignItems: "end",

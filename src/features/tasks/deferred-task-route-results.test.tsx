@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as renderComponent,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { TestRouter } from "../../test-router-wrapper";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { taskSearchItemSchema } from "../../domain/task-filters";
@@ -8,6 +16,7 @@ import { createDeferredTaskRouteResults } from "./deferred-task-route-results";
 import type { TaskRouteResultsProps } from "./task-route-results";
 
 afterEach(cleanup);
+const render = (ui: React.ReactNode) => renderComponent(ui, { wrapper: TestRouter });
 
 const item = taskSearchItemSchema.parse({
   task: {
@@ -87,7 +96,10 @@ describe("DeferredTaskRouteResults", () => {
     expect(screen.queryByText("Loading selection and bulk actions…")).toBeNull();
 
     fireEvent.click(activate);
-    expect(screen.getByText("Loading selection and bulk actions…")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Loading bulk actions" })).toHaveProperty(
+      "disabled",
+      true,
+    );
     expect(screen.getByText("Verify route chunks")).toBeTruthy();
     expect(document.activeElement).toBe(activate);
 
@@ -125,7 +137,7 @@ describe("DeferredTaskRouteResults", () => {
     fireEvent.click(trigger);
     expect(await screen.findByRole("alert")).toHaveProperty(
       "textContent",
-      expect.stringContaining("results remain available"),
+      expect.stringContaining("Bulk actions could not load"),
     );
     expect(screen.getByText("Verify route chunks")).toBeTruthy();
     expect(document.activeElement).toBe(trigger);

@@ -18,6 +18,11 @@ export const Route = createFileRoute("/search")({
   loaderDeps: ({ search: { presentation: _presentation, ...query } }) => query,
   loader: async ({ context, deps }) => {
     const [state, projects] = await Promise.all([readAppState(), readProjects()]);
+    if (deps.project) {
+      const project = projects.find((item) => item.id === deps.project);
+      if (!project) throw new Error("This project could not be found.");
+      state.activeProject = project;
+    }
     if (!state.activeProject) throw redirect({ to: "/" });
     const projectId = state.activeProject.id;
     const eventPage = await readProjectEvents({

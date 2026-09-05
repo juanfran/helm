@@ -59,15 +59,13 @@ export function OperationalDashboard({
     <section aria-labelledby="operations-heading" {...stylex.props(styles.root)}>
       <div {...stylex.props(styles.intro)}>
         <div>
-          <p {...stylex.props(styles.eyebrow)}>Operational control plane</p>
+          <p {...stylex.props(styles.eyebrow)}>Dashboard</p>
           <h1 id="operations-heading" {...stylex.props(styles.heading)}>
             What needs attention now
           </h1>
         </div>
         <p {...stylex.props(styles.introCopy)}>
-          Every count comes from the same live task, attempt, and event projections used by the
-          workspace. Capability-routed work keeps the eligibility returned by Helm rather than a
-          client-side guess.
+          Review completed work, unblock tasks, and see what your agents are working on.
         </p>
       </div>
 
@@ -95,7 +93,7 @@ export function OperationalDashboard({
           eyebrow="Work supply"
           title="Claimable now"
           count={dashboard.claimable.length}
-          empty="No work is currently claimable in this eligibility projection."
+          empty="No work is currently claimable in this availability."
         >
           {dashboard.claimable.map((task) => (
             <TaskRow key={task.id} task={task} onSelectTask={onSelectTask}>
@@ -181,7 +179,7 @@ export function OperationalDashboard({
         </DashboardPanel>
 
         <DashboardPanel
-          eyebrow="Durable cursor"
+          eyebrow="Latest update"
           title="Recent activity"
           count={dashboard.recentEvents.length}
           empty="No project activity has been recorded."
@@ -434,7 +432,7 @@ const styles = stylex.create({
     textTransform: "uppercase",
   },
   heading: {
-    fontSize: "clamp(2rem, 5vw, 4rem)",
+    fontSize: 28,
     letterSpacing: "-0.05em",
     lineHeight: 1,
     marginBlock: tokens.space2,

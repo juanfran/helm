@@ -1,4 +1,4 @@
-import type { ComponentType } from "react";
+import { useState, type ComponentType } from "react";
 import * as stylex from "@stylexjs/stylex";
 
 import { createRetryableLazyModuleLoader } from "../../components/retryable-lazy-module";
@@ -28,54 +28,51 @@ export function createDeferredTaskRouteResults(loadModule: () => Promise<TaskRou
   return function DeferredTaskRouteResults(props: TaskRouteResultsProps) {
     const moduleState = useExplicitLazyModule(taskRouteResultsModule);
     const status = moduleState.state.status;
-    const actionable = status === "idle" || status === "error";
-    const action = status === "error" ? moduleState.retry : moduleState.activate;
-    const buttonLabel =
-      status === "idle"
-        ? "Select tasks"
-        : status === "loading"
-          ? "Loading bulk actions"
-          : status === "error"
-            ? "Try bulk actions again"
-            : "Task selection enabled";
+    const [selecting, setSelecting] = useState(false);
 
     return (
       <>
-        {moduleState.state.status === "ready" ? (
+        {selecting && moduleState.state.status === "ready" ? (
           <moduleState.state.module.TaskRouteResults {...props} />
         ) : (
           <CoreTaskResults {...props} />
         )}
         <section aria-label="Bulk task actions" {...stylex.props(styles.activation)}>
-          <div>
-            {status === "idle" ? (
-              <p {...stylex.props(styles.message)}>
-                Need to update several results? Enable task selection and bulk actions.
-              </p>
-            ) : null}
-            {status === "loading" ? (
-              <output {...stylex.props(styles.message)}>Loading selection and bulk actions…</output>
-            ) : null}
-            {status === "error" ? (
-              <p role="alert" {...stylex.props(styles.message)}>
-                Selection and bulk actions could not be loaded. Your results remain available.
-              </p>
-            ) : null}
-            {status === "ready" ? (
-              <p {...stylex.props(styles.message)}>
-                Select tasks in the results above to preview a bulk change.
-              </p>
-            ) : null}
-          </div>
+          {status === "error" ? (
+            <p role="alert" {...stylex.props(styles.message)}>
+              Bulk actions could not load. Try again.
+            </p>
+          ) : (
+            <p {...stylex.props(styles.message)}>
+              {selecting
+                ? "Select tasks to preview a bulk change."
+                : "Update several tasks at once."}
+            </p>
+          )}
           <button
             type="button"
-            aria-disabled={!actionable}
+            disabled={status === "loading"}
+            aria-expanded={selecting}
             onPointerEnter={moduleState.preload}
             onFocus={moduleState.preload}
-            onClick={actionable ? action : undefined}
+            onClick={() => {
+              if (status === "error") {
+                moduleState.retry();
+                setSelecting(true);
+              } else {
+                setSelecting(!selecting);
+                if (status === "idle") moduleState.activate();
+              }
+            }}
             {...stylex.props(styles.button)}
           >
-            {buttonLabel}
+            {status === "loading"
+              ? "Loading bulk actions"
+              : status === "error"
+                ? "Try bulk actions again"
+                : selecting
+                  ? "Finish selecting"
+                  : "Select tasks"}
           </button>
         </section>
       </>

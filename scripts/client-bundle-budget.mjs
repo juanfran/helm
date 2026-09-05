@@ -15,6 +15,10 @@ export const CLIENT_BUNDLE_BUDGETS = Object.freeze({
     "/": Object.freeze({ rawBytes: 900_000, gzipBytes: 280_000 }),
     "/search": Object.freeze({ rawBytes: 850_000, gzipBytes: 260_000 }),
     "/views/$viewId": Object.freeze({ rawBytes: 850_000, gzipBytes: 260_000 }),
+    "/projects/$projectId/tasks/$taskId": Object.freeze({
+      rawBytes: 1_050_000,
+      gzipBytes: 330_000,
+    }),
   }),
 });
 
@@ -22,15 +26,17 @@ export const CLIENT_BUNDLE_BUDGETS = Object.freeze({
 // source's complete static closure to that navigation's cumulative payload. Remove a source when it
 // becomes a static route dependency; add new automatic dynamic descendants before shipping them.
 export const CLIENT_NAVIGATION_CRITICAL_SOURCES = Object.freeze({
-  "/": Object.freeze([]),
+  "/": Object.freeze(["src/features/projects/project-landing.tsx"]),
   "/search": Object.freeze([]),
   "/views/$viewId": Object.freeze([]),
+  "/projects/$projectId/tasks/$taskId": Object.freeze(["src/features/tasks/task-detail-panel.tsx"]),
 });
 
 const routeSources = Object.freeze({
   "/": "src/routes/index.tsx",
   "/search": "src/routes/search.tsx",
   "/views/$viewId": "src/routes/views.$viewId.tsx",
+  "/projects/$projectId/tasks/$taskId": "src/routes/projects.$projectId.tasks.$taskId.tsx",
 });
 const routeSplitProperties = Object.freeze(["loader", "component", "errorComponent"]);
 const requiredFeatureSources = Object.freeze([

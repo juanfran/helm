@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Popover } from "@base-ui/react/popover";
 import * as stylex from "@stylexjs/stylex";
 import { AlertTriangle, Bell, CircleAlert, X } from "lucide-react";
@@ -44,11 +44,13 @@ export function NotificationCenter({
   events,
   tasks,
   onSelectTask,
+  defaultOpen = false,
 }: {
   projectId: string;
   events: readonly ProjectEvent[];
   tasks: readonly { readonly id: string; readonly sequence: number; readonly title: string }[];
   onSelectTask?: (taskId: string) => void;
+  defaultOpen?: boolean;
 }) {
   return (
     <ProjectNotificationCenter
@@ -57,6 +59,7 @@ export function NotificationCenter({
       events={events}
       tasks={tasks}
       onSelectTask={onSelectTask}
+      defaultOpen={defaultOpen}
     />
   );
 }
@@ -66,14 +69,23 @@ function ProjectNotificationCenter({
   events,
   tasks,
   onSelectTask,
+  defaultOpen = false,
 }: {
   projectId: string;
   events: readonly ProjectEvent[];
   tasks: readonly { readonly id: string; readonly sequence: number; readonly title: string }[];
   onSelectTask?: (taskId: string) => void;
+  defaultOpen?: boolean;
 }) {
   const notifications = useMemo(() => selectImportantNotifications(events), [events]);
-  const [watermark, setWatermark] = useState(() => readWatermark(projectId));
+  const [watermark, setWatermark] = useState(() =>
+    defaultOpen
+      ? Math.max(readWatermark(projectId), notifications[0]?.cursor ?? 0)
+      : readWatermark(projectId),
+  );
+  useEffect(() => {
+    writeWatermark(projectId, watermark);
+  }, [projectId, watermark]);
   const taskNames = useMemo(
     () => new Map(tasks.map((task) => [task.id, `#${task.sequence} ${task.title}`])),
     [tasks],
@@ -88,7 +100,7 @@ function ProjectNotificationCenter({
   }
 
   return (
-    <Popover.Root onOpenChange={setOpen}>
+    <Popover.Root defaultOpen={defaultOpen} onOpenChange={setOpen}>
       <Popover.Trigger
         aria-label={
           unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications, none unread"

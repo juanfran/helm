@@ -1,16 +1,16 @@
-import { useMemo, useState, type ComponentType, type FormEvent, type ReactNode } from "react";
-import * as stylex from "@stylexjs/stylex";
 import {
-  Archive,
-  Bot,
-  CheckCircle2,
-  Clock3,
-  GitBranch,
-  Link2,
-  Plus,
-  SlidersHorizontal,
-  X,
-} from "lucide-react";
+  Children,
+  cloneElement,
+  isValidElement,
+  useId,
+  useMemo,
+  useState,
+  type ComponentType,
+  type FormEvent,
+  type ReactNode,
+} from "react";
+import * as stylex from "@stylexjs/stylex";
+import { Archive, Bot, CheckCircle2, Clock3, GitBranch, Link2, Plus, X } from "lucide-react";
 
 import {
   createRetryableLazyModuleLoader,
@@ -61,6 +61,7 @@ import type {
   TaskRelationCommandResponse,
 } from "../../server/task-adapter";
 import { tokens } from "../../styles/tokens.stylex";
+import { reconcileChecklist, useTaskDraft } from "./task-draft";
 import { TaskExecutionPanel, type TaskExecutionPanelProps } from "./task-execution-panel";
 
 const defaultRichTextEditorModule = createRetryableLazyModuleLoader(() =>
@@ -143,18 +144,20 @@ export function TaskDetailPanel({
 }: TaskDetailPanelProps) {
   return (
     <div {...stylex.props(styles.detailStack)}>
-      <TaskExecutionPanel
-        key={task.id}
-        task={task}
-        attempts={attempts}
-        onApproveReview={onApproveReview}
-        onRequestChanges={onRequestChanges}
-        onCancelTask={onCancelTask}
-        onRestoreTask={onRestoreTask}
-        onReopenTask={onReopenTask}
-      />
+      {task.lifecycle === "review" ? (
+        <TaskExecutionPanel
+          key={task.id}
+          task={task}
+          attempts={attempts}
+          onApproveReview={onApproveReview}
+          onRequestChanges={onRequestChanges}
+          onCancelTask={onCancelTask}
+          onRestoreTask={onRestoreTask}
+          onReopenTask={onReopenTask}
+        />
+      ) : null}
       <PreparationPanel
-        key={`${task.id}:${task.version}`}
+        key={`preparation:${task.id}`}
         task={task}
         tasks={tasks}
         tagDefinitions={tagDefinitions}
@@ -174,12 +177,23 @@ export function TaskDetailPanel({
         onCreateManualBlocker={onCreateManualBlocker}
         onResolveManualBlocker={onResolveManualBlocker}
       />
+      {task.lifecycle !== "review" ? (
+        <TaskExecutionPanel
+          key={task.id}
+          task={task}
+          attempts={attempts}
+          onApproveReview={onApproveReview}
+          onRequestChanges={onRequestChanges}
+          onCancelTask={onCancelTask}
+          onRestoreTask={onRestoreTask}
+          onReopenTask={onReopenTask}
+        />
+      ) : null}
     </div>
   );
 }
 
 type LazyDetailSurface = "collaboration" | "editor";
-type TagDraft = TagInput & { draftId: string };
 
 const lazyDetailLabels = {
   collaboration: "Loading collaboration controls",
@@ -240,7 +254,6 @@ function PreparationPanel({
   collaborationModuleLoader,
   onCreateTask,
   onPrepare,
-  onUpdatePlanning,
   onSetReviewModeOverride,
   onCreateRelation,
   onArchive,
@@ -269,48 +282,30 @@ function PreparationPanel({
   onCreateManualBlocker: TaskDetailPanelProps["onCreateManualBlocker"];
   onResolveManualBlocker: TaskDetailPanelProps["onResolveManualBlocker"];
 }) {
-  const [title, setTitle] = useState(task.title);
-  const [description, setDescription] = useState<RichTextDocument>(task.description);
-  const [expectedOutcome, setExpectedOutcome] = useState(task.expectedOutcome);
-  const [acceptanceCriteria, setAcceptanceCriteria] = useState(task.acceptanceCriteria);
-  const [agentContext, setAgentContext] = useState(task.agentContext);
-  const [checklist, setChecklist] = useState(task.checklist.map((item) => item.text).join("\n"));
-  const [priority, setPriority] = useState(task.priority);
-  const [position, setPosition] = useState(String(task.position));
-  const [notBefore, setNotBefore] = useState(task.notBefore ?? "");
-  const [dueAt, setDueAt] = useState(task.dueAt ?? "");
-  const [size, setSize] = useState(task.size ?? "");
+  const draft = useTaskDraft(task);
+  const [title, setTitle] = draft.field("title");
+  const [description, setDescription] = draft.field("description");
+  const [expectedOutcome, setExpectedOutcome] = draft.field("expectedOutcome");
+  const [acceptanceCriteria, setAcceptanceCriteria] = draft.field("acceptanceCriteria");
+  const [agentContext, setAgentContext] = draft.field("agentContext");
+  const [checklist, setChecklist] = draft.field("checklist");
+  const [priority, setPriority] = draft.field("priority");
+  const [position, setPosition] = draft.field("position");
+  const [notBefore, setNotBefore] = draft.field("notBefore");
+  const [dueAt, setDueAt] = draft.field("dueAt");
+  const [size, setSize] = draft.field("size");
+  const [tagInputs, setTagInputs] = draft.field("tagInputs");
+  const [requiredCapabilities, setRequiredCapabilities] = draft.field("requiredCapabilities");
+  const [customFieldValues, setCustomFieldValues] = draft.field("customFieldValues");
   const knownTags = useMemo(
     () => new Map(tagDefinitions.map((tag) => [tag.name, tag])),
     [tagDefinitions],
-  );
-  const [tagInputs, setTagInputs] = useState<TagDraft[]>(
-    task.tags.map(({ id, name, description: tagDescription, color, exclusiveGroup }) => ({
-      draftId: id,
-      name,
-      description: tagDescription,
-      color,
-      exclusiveGroup,
-    })),
-  );
-  const [requiredCapabilities, setRequiredCapabilities] = useState(
-    task.requiredCapabilities.join("\n"),
-  );
-  const [customFieldValues, setCustomFieldValues] = useState<
-    Record<string, CustomFieldValue | null>
-  >(() =>
-    Object.fromEntries(
-      task.customFields.map((assignment) => [
-        assignment.definition.id,
-        assignment.source === "explicit" ? assignment.value : null,
-      ]),
-    ),
   );
   const [reviewModeOverride, setReviewModeOverride] = useState<"required" | "direct" | null>(
     task.reviewModeOverride,
   );
   const [reviewModeReason, setReviewModeReason] = useState("");
-  const [referencedPaths, setReferencedPaths] = useState(task.referencedPaths.join("\n"));
+  const [referencedPaths, setReferencedPaths] = draft.field("referencedPaths");
   const [childTitle, setChildTitle] = useState("");
   const [relationTargetId, setRelationTargetId] = useState(
     tasks.find((candidate) => candidate.id !== task.id)?.id ?? "",
@@ -331,8 +326,9 @@ function PreparationPanel({
     .map((childId) => tasks.find((candidate) => candidate.id === childId))
     .filter((child) => child !== undefined);
   const relationTarget = tasks.find((candidate) => candidate.id === relationTargetId);
-  const editable = task.lifecycle === "backlog" || task.lifecycle === "ready";
+  const editable = !task.archivedAt && (task.lifecycle === "backlog" || task.lifecycle === "ready");
   const executionReadOnly =
+    Boolean(task.archivedAt) ||
     task.lifecycle === "in_progress" ||
     task.lifecycle === "review" ||
     task.lifecycle === "cancelled";
@@ -363,49 +359,33 @@ function PreparationPanel({
 
   async function prepare(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!editable) return;
+    if (task.lifecycle !== "backlog" && !event.currentTarget.reportValidity()) return;
+    await savePreparation(task.lifecycle === "backlog");
+  }
+
+  async function savePreparation(saveAsDraft: boolean) {
+    if (!editable || pending || draft.conflict) return;
     setPending(true);
     setError(null);
     try {
       const response = await onPrepare({
         taskId: task.id,
+        saveAsDraft,
         title,
         description,
         expectedOutcome,
         acceptanceCriteria,
         agentContext,
         referencedPaths: parseLines(referencedPaths),
-        checklist: checklist
-          .split("\n")
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .map((text, index) => ({ id: `item-${index + 1}`, text, checked: false })),
+        checklist: reconcileChecklist(checklist, task.checklist),
         ...currentPlanningFields(),
-        expectedVersion: task.version,
+        expectedVersion: draft.baseVersion,
         idempotencyKey: crypto.randomUUID(),
       });
       if (!response.ok) setError(response.error.message);
+      else draft.accept(response.task);
     } catch {
       setError("Helm could not prepare the task.");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function updatePlanning() {
-    if (!editable) return;
-    setPending(true);
-    setError(null);
-    try {
-      const response = await onUpdatePlanning({
-        taskId: task.id,
-        ...currentPlanningFields(),
-        expectedVersion: task.version,
-        idempotencyKey: crypto.randomUUID(),
-      });
-      if (!response.ok) setError(response.error.message);
-    } catch {
-      setError("Helm could not update task planning.");
     } finally {
       setPending(false);
     }
@@ -437,6 +417,12 @@ function PreparationPanel({
   }
 
   async function archive() {
+    if (
+      !window.confirm(
+        "Archive this task? It will leave the work queue but remain available in archived search.",
+      )
+    )
+      return;
     if (executionReadOnly) return;
     setPending(true);
     setError(null);
@@ -574,23 +560,105 @@ function PreparationPanel({
 
   return (
     <div {...stylex.props(styles.detailStack)}>
-      <form onSubmit={prepare} {...stylex.props(styles.form)} aria-label="Prepare task">
-        <div {...stylex.props(styles.detailHeader)}>
-          <div>
-            <p {...stylex.props(styles.eyebrow)}>Task #{task.sequence}</p>
-            <p {...stylex.props(styles.version)}>Version {task.version}</p>
-          </div>
-          <span {...stylex.props(styles.headerActions)}>
-            <button
-              type="button"
-              disabled={pending || executionReadOnly}
-              onClick={() => void archive()}
-              {...stylex.props(styles.button, styles.buttonQuiet)}
-            >
-              <Archive size={15} aria-hidden="true" /> Archive
-            </button>
-          </span>
-        </div>
+      <form noValidate onSubmit={prepare} {...stylex.props(styles.form)} aria-label="Prepare task">
+        {task.archivedAt ? <p {...stylex.props(styles.hint)}>Archived task</p> : null}
+        <fieldset disabled={!editable || pending} {...stylex.props(styles.editableFields)}>
+          <legend {...stylex.props(styles.srOnly)}>Task summary</legend>
+          <Field label="Title" required>
+            <input
+              aria-label="Title"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              maxLength={300}
+              required
+              {...stylex.props(styles.input)}
+            />
+          </Field>
+          <section aria-labelledby={`task-description-${task.id}`} {...stylex.props(styles.field)}>
+            <div {...stylex.props(styles.descriptionHeader)}>
+              <div>
+                <h3 id={`task-description-${task.id}`} {...stylex.props(styles.fieldLabel)}>
+                  Description
+                </h3>
+                <p {...stylex.props(styles.hint)}>Background and context for this task.</p>
+              </div>
+              {editable ? (
+                <button
+                  type="button"
+                  aria-controls={`task-description-editor-${task.id}`}
+                  aria-disabled={editorModule.state.status === "loading"}
+                  aria-expanded={editorModule.state.status === "ready"}
+                  onFocus={editorModule.preload}
+                  onPointerEnter={editorModule.preload}
+                  onClick={() => {
+                    if (editorModule.state.status === "idle") editorModule.activate();
+                    if (editorModule.state.status === "error") editorModule.retry();
+                  }}
+                  {...stylex.props(styles.button, styles.buttonQuiet)}
+                >
+                  Edit description
+                </button>
+              ) : null}
+            </div>
+            <p aria-label="Task description" {...stylex.props(styles.readableDescription)}>
+              {task.descriptionText || "No description has been added."}
+            </p>
+            <div id={`task-description-editor-${task.id}`}>
+              {editorModule.state.status === "ready" ? (
+                <editorModule.state.module.default
+                  value={description}
+                  onChange={setDescription}
+                  editable={editable}
+                />
+              ) : editorModule.state.status === "error" ? (
+                <LazyDetailFailure surface="editor" onRetry={editorModule.retry} />
+              ) : editorModule.state.status === "loading" ? (
+                <LazyDetailFallback surface="editor" />
+              ) : null}
+            </div>
+          </section>
+        </fieldset>
+        {draft.dirty ? (
+          <output {...stylex.props(styles.draftStatus)}>
+            Unsaved changes ·{" "}
+            {draft.storageAvailable
+              ? "Draft kept in this tab"
+              : "Browser storage unavailable; save before leaving"}
+          </output>
+        ) : (
+          <output {...stylex.props(styles.hint)}>All changes saved</output>
+        )}
+        {draft.conflict ? (
+          <section role="alert" {...stylex.props(styles.conflict)}>
+            <strong>This task changed while you were editing.</strong>
+            <p>
+              Your draft is safe. Review the latest task before saving. Keeping your edits replaces
+              only fields you changed.
+            </p>
+            <div {...stylex.props(styles.footerActions)}>
+              <button
+                type="button"
+                {...stylex.props(styles.button, styles.buttonQuiet)}
+                onClick={() => {
+                  if (window.confirm("Discard your unsaved edits and use the latest saved task?"))
+                    draft.discard();
+                }}
+              >
+                Use latest saved task
+              </button>
+              {editable ? (
+                <button type="button" {...stylex.props(styles.button)} onClick={draft.rebase}>
+                  Keep my edited fields
+                </button>
+              ) : (
+                <span>
+                  This task is {task.lifecycle.replaceAll("_", " ")}. Your draft remains available
+                  here.
+                </span>
+              )}
+            </div>
+          </section>
+        ) : null}
         {task.claim ? (
           <section
             aria-label="Current claim"
@@ -615,8 +683,8 @@ function PreparationPanel({
                 {...stylex.props(styles.textarea)}
               />
               <p id={`claim-warning-${task.id}`} {...stylex.props(styles.hint)}>
-                These claim controls return the task to Ready. Cancelling the task itself uses the
-                separate lifecycle action above.
+                Stopping a claim returns the task to Ready. Use Cancel task below to stop the work
+                entirely.
               </p>
               <div {...stylex.props(styles.claimActionButtons)}>
                 <button
@@ -641,234 +709,105 @@ function PreparationPanel({
             </fieldset>
           </section>
         ) : null}
-        <section {...stylex.props(styles.relations)} aria-label="Task relations">
-          <div>
-            <p {...stylex.props(styles.fieldLabel)}>Hierarchy</p>
-            <p {...stylex.props(styles.hint)}>
-              Parent: {parentTask ? `#${parentTask.sequence} ${parentTask.title}` : "None"}
-            </p>
-            <p {...stylex.props(styles.hint)}>
-              Children:{" "}
-              {childTasks.length > 0
-                ? childTasks.map((child) => `#${child.sequence} ${child.title}`).join(", ")
-                : "None"}
-            </p>
-          </div>
-          <div>
-            <p {...stylex.props(styles.fieldLabel)}>Upstream</p>
-            <RelationList
-              empty="No upstream relations"
-              relations={task.upstreamRelations.map(
-                (relation) =>
-                  `${relation.type} from #${relation.sourceSequence} ${relation.sourceTitle}`,
-              )}
-            />
-          </div>
-          <div>
-            <p {...stylex.props(styles.fieldLabel)}>Downstream</p>
-            <RelationList
-              empty="No downstream relations"
-              relations={task.downstreamRelations.map(
-                (relation) =>
-                  `${relation.type} to #${relation.targetSequence} ${relation.targetTitle}`,
-              )}
-            />
-          </div>
-        </section>
-        {task.reviewPolicy ? (
-          <section aria-label="Effective review policy" {...stylex.props(styles.policyCard)}>
-            <div>
-              <p {...stylex.props(styles.fieldLabel)}>Effective review policy</p>
-              <strong>
-                {task.reviewPolicy.mode === "required" ? "Human review" : "Direct completion"}
-              </strong>
-            </div>
-            <p {...stylex.props(styles.hint)}>{task.reviewPolicy.explanation}</p>
-          </section>
-        ) : null}
-        <section aria-labelledby={`task-description-${task.id}`} {...stylex.props(styles.field)}>
-          <div {...stylex.props(styles.descriptionHeader)}>
-            <div>
-              <h3 id={`task-description-${task.id}`} {...stylex.props(styles.fieldLabel)}>
-                Description
-              </h3>
-              <p {...stylex.props(styles.hint)}>
-                Rich text is saved as a versioned TipTap document.
-              </p>
-            </div>
-            {editable ? (
-              <button
-                type="button"
-                aria-controls={`task-description-editor-${task.id}`}
-                aria-disabled={editorModule.state.status === "loading"}
-                aria-expanded={editorModule.state.status === "ready"}
-                onFocus={editorModule.preload}
-                onPointerEnter={editorModule.preload}
-                onClick={() => {
-                  if (editorModule.state.status === "idle") editorModule.activate();
-                  if (editorModule.state.status === "error") editorModule.retry();
-                }}
-                {...stylex.props(styles.button, styles.buttonQuiet)}
-              >
-                Edit description
-              </button>
-            ) : null}
-          </div>
-          <p aria-label="Task description" {...stylex.props(styles.readableDescription)}>
-            {task.descriptionText || "No description has been added."}
-          </p>
-          <div id={`task-description-editor-${task.id}`}>
-            {editorModule.state.status === "ready" ? (
-              <editorModule.state.module.default
-                value={description}
-                onChange={setDescription}
-                editable={editable}
-              />
-            ) : editorModule.state.status === "error" ? (
-              <LazyDetailFailure surface="editor" onRetry={editorModule.retry} />
-            ) : editorModule.state.status === "loading" ? (
-              <LazyDetailFallback surface="editor" />
-            ) : null}
-          </div>
-        </section>
         <fieldset
-          disabled={executionReadOnly}
-          {...stylex.props(styles.taskActions, executionReadOnly && styles.readOnlyGroup)}
-        >
-          <legend {...stylex.props(styles.srOnly)}>Task structure actions</legend>
-          <div {...stylex.props(styles.inlineForm)}>
-            <input
-              aria-label="Child task title"
-              value={childTitle}
-              onChange={(event) => setChildTitle(event.target.value)}
-              placeholder="Child task title"
-              maxLength={300}
-              {...stylex.props(styles.input)}
-            />
-            <button
-              type="button"
-              disabled={pending || childTitle.trim().length === 0}
-              onClick={() => void createChild()}
-              {...stylex.props(styles.button)}
-            >
-              <GitBranch size={16} aria-hidden="true" />
-              Add child
-            </button>
-          </div>
-          <div {...stylex.props(styles.inlineForm)}>
-            <select
-              aria-label="Relation type"
-              value={relationType}
-              onChange={(event) => setRelationType(event.target.value)}
-              {...stylex.props(styles.select, styles.fullWidth)}
-            >
-              <option value="blocks">Blocks</option>
-              <option value="related_to">Related to</option>
-              <option value="duplicates">Duplicates</option>
-              <option value="discovered_from">Discovered from</option>
-            </select>
-            <select
-              aria-label="Relation target"
-              value={relationTargetId}
-              onChange={(event) => setRelationTargetId(event.target.value)}
-              {...stylex.props(styles.select, styles.fullWidth)}
-            >
-              <option value="">Select target</option>
-              {tasks
-                .filter((candidate) => candidate.id !== task.id)
-                .map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>
-                    #{candidate.sequence} {candidate.title}
-                  </option>
-                ))}
-            </select>
-            <button
-              type="button"
-              disabled={pending || !relationTargetId}
-              onClick={() => void createRelation()}
-              {...stylex.props(styles.button)}
-            >
-              <Link2 size={16} aria-hidden="true" />
-              Add relation
-            </button>
-          </div>
-        </fieldset>
-        <fieldset
-          disabled={!editable}
+          disabled={!editable || pending}
           {...stylex.props(styles.editableFields, !editable && styles.readOnlyGroup)}
         >
           <legend {...stylex.props(styles.srOnly)}>Editable task details</legend>
-          <Field label="Title" required>
-            <input
-              aria-label="Title"
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              maxLength={300}
+          <Field label="Expected outcome" required>
+            <textarea
+              aria-label="Expected outcome"
+              value={expectedOutcome}
+              onChange={(event) => setExpectedOutcome(event.target.value)}
+              rows={3}
               required
-              {...stylex.props(styles.input)}
+              {...stylex.props(styles.textarea)}
             />
           </Field>
-          <div {...stylex.props(styles.planningGrid)}>
-            <Field label="Priority">
-              <select
-                aria-label="Priority"
-                value={priority}
-                onChange={(event) => setPriority(taskPrioritySchema.parse(event.target.value))}
-                {...stylex.props(styles.select, styles.fullWidth)}
-              >
-                <option value="urgent">Urgent</option>
-                <option value="high">High</option>
-                <option value="normal">Normal</option>
-                <option value="low">Low</option>
-              </select>
-            </Field>
-            <Field label="Position">
-              <input
-                aria-label="Position"
-                type="number"
-                min={0}
-                value={position}
-                onChange={(event) => setPosition(event.target.value)}
-                {...stylex.props(styles.input)}
-              />
-            </Field>
-            <Field label="Start date">
-              <input
-                aria-label="Start date"
-                type="date"
-                value={notBefore}
-                onChange={(event) => setNotBefore(event.target.value)}
-                {...stylex.props(styles.input)}
-              />
-            </Field>
-            <Field label="Due date">
-              <input
-                aria-label="Due date"
-                type="date"
-                value={dueAt}
-                onChange={(event) => setDueAt(event.target.value)}
-                {...stylex.props(styles.input)}
-              />
-            </Field>
-            <Field label="Size">
-              <select
-                aria-label="Size"
-                value={size}
-                onChange={(event) => setSize(event.target.value)}
-                {...stylex.props(styles.select, styles.fullWidth)}
-              >
-                <option value="">Unestimated</option>
-                <option value="xs">XS</option>
-                <option value="s">S</option>
-                <option value="m">M</option>
-                <option value="l">L</option>
-                <option value="xl">XL</option>
-              </select>
-            </Field>
-            <Field
-              label="Review policy"
-              hint="Task overrides are applied as a separate, reason-bearing audit command."
-            >
+          <Field label="Acceptance criteria" required>
+            <textarea
+              aria-label="Acceptance criteria"
+              value={acceptanceCriteria}
+              onChange={(event) => setAcceptanceCriteria(event.target.value)}
+              rows={4}
+              required
+              {...stylex.props(styles.textarea)}
+            />
+          </Field>
+          <Field label="Checklist" hint="One required verification step per line." required>
+            <textarea
+              aria-label="Checklist"
+              value={checklist}
+              onChange={(event) => setChecklist(event.target.value)}
+              rows={4}
+              required
+              {...stylex.props(styles.textarea)}
+            />
+          </Field>
+        </fieldset>
+        <details {...stylex.props(styles.disclosure)}>
+          <summary {...stylex.props(styles.summary)}>Planning and agent instructions</summary>
+          <fieldset disabled={!editable || pending} {...stylex.props(styles.editableFields)}>
+            <legend {...stylex.props(styles.srOnly)}>Planning and agent instructions</legend>
+            <div {...stylex.props(styles.planningGrid)}>
+              <Field label="Priority">
+                <select
+                  aria-label="Priority"
+                  value={priority}
+                  onChange={(event) => setPriority(taskPrioritySchema.parse(event.target.value))}
+                  {...stylex.props(styles.select, styles.fullWidth)}
+                >
+                  <option value="urgent">Urgent</option>
+                  <option value="high">High</option>
+                  <option value="normal">Normal</option>
+                  <option value="low">Low</option>
+                </select>
+              </Field>
+              <Field label="Position">
+                <input
+                  aria-label="Position"
+                  type="number"
+                  min={0}
+                  value={position}
+                  onChange={(event) => setPosition(event.target.value)}
+                  {...stylex.props(styles.input)}
+                />
+              </Field>
+              <Field label="Start date">
+                <input
+                  aria-label="Start date"
+                  type="date"
+                  value={notBefore}
+                  onChange={(event) => setNotBefore(event.target.value)}
+                  {...stylex.props(styles.input)}
+                />
+              </Field>
+              <Field label="Due date">
+                <input
+                  aria-label="Due date"
+                  type="date"
+                  value={dueAt}
+                  onChange={(event) => setDueAt(event.target.value)}
+                  {...stylex.props(styles.input)}
+                />
+              </Field>
+              <Field label="Size">
+                <select
+                  aria-label="Size"
+                  value={size}
+                  onChange={(event) => setSize(event.target.value)}
+                  {...stylex.props(styles.select, styles.fullWidth)}
+                >
+                  <option value="">Unestimated</option>
+                  <option value="xs">XS</option>
+                  <option value="s">S</option>
+                  <option value="m">M</option>
+                  <option value="l">L</option>
+                  <option value="xl">XL</option>
+                </select>
+              </Field>
+            </div>
+            <Field label="Review policy" hint="Explain any exception to the project review policy.">
               <div {...stylex.props(styles.reviewPolicyCommand)}>
                 <select
                   aria-label="Task review policy override"
@@ -911,200 +850,291 @@ function PreparationPanel({
                 </button>
               </div>
             </Field>
-          </div>
-          {task.customFields.length > 0 ? (
-            <section aria-label="Custom fields" {...stylex.props(styles.customFields)}>
+            {task.customFields.length > 0 ? (
+              <section aria-label="Custom fields" {...stylex.props(styles.customFields)}>
+                <div>
+                  <p {...stylex.props(styles.fieldLabel)}>Custom fields</p>
+                  <p {...stylex.props(styles.hint)}>
+                    Project-defined typed values are shared with filters, bulk actions, and agents.
+                  </p>
+                </div>
+                <div {...stylex.props(styles.planningGrid)}>
+                  {task.customFields.map((assignment) => (
+                    <CustomFieldControl
+                      key={assignment.definition.id}
+                      assignment={assignment}
+                      explicitValue={customFieldValues[assignment.definition.id] ?? null}
+                      disabled={!editable || assignment.definition.retiredAt !== null}
+                      onChange={(value) =>
+                        setCustomFieldValues((current) => ({
+                          ...current,
+                          [assignment.definition.id]: value,
+                        }))
+                      }
+                    />
+                  ))}
+                </div>
+              </section>
+            ) : null}
+            <Field label="Tags" hint="Use tags to organize related work.">
+              <fieldset {...stylex.props(styles.tagEditor)}>
+                <legend {...stylex.props(styles.srOnly)}>Tags</legend>
+                {tagInputs.map((tag, index) => {
+                  const known = knownTags.has(tag.name);
+                  return (
+                    <div key={tag.draftId} {...stylex.props(styles.tagRow)}>
+                      <input
+                        aria-label={`Tag ${index + 1} name`}
+                        value={tag.name}
+                        onChange={(event) => updateTagName(index, event.target.value)}
+                        placeholder="Tag name"
+                        maxLength={80}
+                        {...stylex.props(styles.input)}
+                      />
+                      <input
+                        aria-label={`Tag ${index + 1} description`}
+                        value={tag.description}
+                        onChange={(event) => updateTag(index, { description: event.target.value })}
+                        placeholder="Description"
+                        maxLength={1_000}
+                        disabled={known}
+                        {...stylex.props(styles.input)}
+                      />
+                      <input
+                        aria-label={`Tag ${index + 1} color`}
+                        type="color"
+                        value={tag.color}
+                        onChange={(event) => updateTag(index, { color: event.target.value })}
+                        disabled={known}
+                        {...stylex.props(styles.colorInput)}
+                      />
+                      <input
+                        aria-label={`Tag ${index + 1} exclusive group`}
+                        value={tag.exclusiveGroup ?? ""}
+                        onChange={(event) =>
+                          updateTag(index, { exclusiveGroup: event.target.value || null })
+                        }
+                        placeholder="Exclusive group"
+                        maxLength={80}
+                        disabled={known}
+                        {...stylex.props(styles.input)}
+                      />
+                      <button
+                        type="button"
+                        aria-label={`Remove tag ${tag.name || index + 1}`}
+                        disabled={pending}
+                        onClick={() =>
+                          setTagInputs((current) =>
+                            current.filter((_, tagIndex) => tagIndex !== index),
+                          )
+                        }
+                        {...stylex.props(styles.button, styles.buttonQuiet, styles.iconButton)}
+                      >
+                        <X size={15} aria-hidden="true" />
+                      </button>
+                    </div>
+                  );
+                })}
+                <button
+                  type="button"
+                  disabled={pending}
+                  onClick={addTag}
+                  {...stylex.props(styles.button, styles.buttonQuiet)}
+                >
+                  <Plus size={15} aria-hidden="true" /> Add tag
+                </button>
+              </fieldset>
+            </Field>
+            <Field label="Required capabilities">
+              <textarea
+                aria-label="Required capabilities"
+                value={requiredCapabilities}
+                onChange={(event) => setRequiredCapabilities(event.target.value)}
+                rows={3}
+                {...stylex.props(styles.textarea)}
+              />
+            </Field>
+            <Field
+              label="Referenced paths"
+              hint="One file or folder path per line, relative to the repository."
+            >
+              <textarea
+                aria-label="Referenced paths"
+                value={referencedPaths}
+                onChange={(event) => setReferencedPaths(event.target.value)}
+                rows={3}
+                placeholder="src/domain/tasks.ts"
+                {...stylex.props(styles.textarea)}
+              />
+            </Field>
+            {task.eligibility ? (
+              <p {...stylex.props(styles.hint)}>
+                {task.eligibility.status}: {task.eligibility.reasons.join(" ")}{" "}
+                {task.eligibility.orderingExplanation}
+              </p>
+            ) : null}
+            <Field
+              label="Agent context"
+              hint="Paths, constraints, and execution-specific guidance."
+            >
+              <textarea
+                aria-label="Agent context"
+                value={agentContext}
+                onChange={(event) => setAgentContext(event.target.value)}
+                rows={3}
+                {...stylex.props(styles.textarea)}
+              />
+            </Field>
+          </fieldset>
+          {task.reviewPolicy ? (
+            <section aria-label="Effective review policy" {...stylex.props(styles.policyCard)}>
               <div>
-                <p {...stylex.props(styles.fieldLabel)}>Custom fields</p>
-                <p {...stylex.props(styles.hint)}>
-                  Project-defined typed values are shared with filters, bulk actions, and agents.
-                </p>
+                <p {...stylex.props(styles.fieldLabel)}>Effective review policy</p>
+                <strong>
+                  {task.reviewPolicy.mode === "required" ? "Human review" : "Direct completion"}
+                </strong>
               </div>
-              <div {...stylex.props(styles.planningGrid)}>
-                {task.customFields.map((assignment) => (
-                  <CustomFieldControl
-                    key={assignment.definition.id}
-                    assignment={assignment}
-                    explicitValue={customFieldValues[assignment.definition.id] ?? null}
-                    disabled={!editable || assignment.definition.retiredAt !== null}
-                    onChange={(value) =>
-                      setCustomFieldValues((current) => ({
-                        ...current,
-                        [assignment.definition.id]: value,
-                      }))
-                    }
-                  />
-                ))}
-              </div>
+              <p {...stylex.props(styles.hint)}>{task.reviewPolicy.explanation}</p>
             </section>
           ) : null}
-          <Field
-            label="Tags"
-            hint="Tag definitions are shared across the project. Existing metadata stays canonical."
+        </details>
+        <details {...stylex.props(styles.disclosure)}>
+          <summary {...stylex.props(styles.summary)}>Subtasks and relationships</summary>
+          <section {...stylex.props(styles.relations)} aria-label="Task relations">
+            <div>
+              <p {...stylex.props(styles.fieldLabel)}>Hierarchy</p>
+              <p {...stylex.props(styles.hint)}>
+                Parent: {parentTask ? `#${parentTask.sequence} ${parentTask.title}` : "None"}
+              </p>
+              <p {...stylex.props(styles.hint)}>
+                Children:{" "}
+                {childTasks.length > 0
+                  ? childTasks.map((child) => `#${child.sequence} ${child.title}`).join(", ")
+                  : "None"}
+              </p>
+            </div>
+            <div>
+              <p {...stylex.props(styles.fieldLabel)}>Upstream</p>
+              <RelationList
+                empty="No upstream relations"
+                relations={task.upstreamRelations.map(
+                  (relation) =>
+                    `${relation.type} from #${relation.sourceSequence} ${relation.sourceTitle}`,
+                )}
+              />
+            </div>
+            <div>
+              <p {...stylex.props(styles.fieldLabel)}>Downstream</p>
+              <RelationList
+                empty="No downstream relations"
+                relations={task.downstreamRelations.map(
+                  (relation) =>
+                    `${relation.type} to #${relation.targetSequence} ${relation.targetTitle}`,
+                )}
+              />
+            </div>
+          </section>
+          <fieldset
+            disabled={executionReadOnly}
+            {...stylex.props(styles.taskActions, executionReadOnly && styles.readOnlyGroup)}
           >
-            <fieldset {...stylex.props(styles.tagEditor)}>
-              <legend {...stylex.props(styles.srOnly)}>Tags</legend>
-              {tagInputs.map((tag, index) => {
-                const known = knownTags.has(tag.name);
-                return (
-                  <div key={tag.draftId} {...stylex.props(styles.tagRow)}>
-                    <input
-                      aria-label={`Tag ${index + 1} name`}
-                      value={tag.name}
-                      onChange={(event) => updateTagName(index, event.target.value)}
-                      placeholder="Tag name"
-                      maxLength={80}
-                      {...stylex.props(styles.input)}
-                    />
-                    <input
-                      aria-label={`Tag ${index + 1} description`}
-                      value={tag.description}
-                      onChange={(event) => updateTag(index, { description: event.target.value })}
-                      placeholder="Description"
-                      maxLength={1_000}
-                      disabled={known}
-                      {...stylex.props(styles.input)}
-                    />
-                    <input
-                      aria-label={`Tag ${index + 1} color`}
-                      type="color"
-                      value={tag.color}
-                      onChange={(event) => updateTag(index, { color: event.target.value })}
-                      disabled={known}
-                      {...stylex.props(styles.colorInput)}
-                    />
-                    <input
-                      aria-label={`Tag ${index + 1} exclusive group`}
-                      value={tag.exclusiveGroup ?? ""}
-                      onChange={(event) =>
-                        updateTag(index, { exclusiveGroup: event.target.value || null })
-                      }
-                      placeholder="Exclusive group"
-                      maxLength={80}
-                      disabled={known}
-                      {...stylex.props(styles.input)}
-                    />
-                    <button
-                      type="button"
-                      aria-label={`Remove tag ${tag.name || index + 1}`}
-                      disabled={pending}
-                      onClick={() =>
-                        setTagInputs((current) =>
-                          current.filter((_, tagIndex) => tagIndex !== index),
-                        )
-                      }
-                      {...stylex.props(styles.button, styles.buttonQuiet, styles.iconButton)}
-                    >
-                      <X size={15} aria-hidden="true" />
-                    </button>
-                  </div>
-                );
-              })}
+            <legend {...stylex.props(styles.srOnly)}>Task structure actions</legend>
+            <div {...stylex.props(styles.inlineForm)}>
+              <input
+                aria-label="Child task title"
+                value={childTitle}
+                onChange={(event) => setChildTitle(event.target.value)}
+                placeholder="Child task title"
+                maxLength={300}
+                {...stylex.props(styles.input)}
+              />
               <button
                 type="button"
-                disabled={pending}
-                onClick={addTag}
-                {...stylex.props(styles.button, styles.buttonQuiet)}
+                disabled={pending || childTitle.trim().length === 0}
+                onClick={() => void createChild()}
+                {...stylex.props(styles.button)}
               >
-                <Plus size={15} aria-hidden="true" /> Add tag
+                <GitBranch size={16} aria-hidden="true" />
+                Add child
               </button>
-            </fieldset>
-          </Field>
-          <Field label="Required capabilities">
-            <textarea
-              aria-label="Required capabilities"
-              value={requiredCapabilities}
-              onChange={(event) => setRequiredCapabilities(event.target.value)}
-              rows={3}
-              {...stylex.props(styles.textarea)}
-            />
-          </Field>
-          <Field
-            label="Referenced paths"
-            hint="One normalized repository-relative file or directory path per line."
-          >
-            <textarea
-              aria-label="Referenced paths"
-              value={referencedPaths}
-              onChange={(event) => setReferencedPaths(event.target.value)}
-              rows={3}
-              placeholder="src/domain/tasks.ts"
-              {...stylex.props(styles.textarea)}
-            />
-          </Field>
-          {task.eligibility ? (
-            <p {...stylex.props(styles.hint)}>
-              {task.eligibility.status}: {task.eligibility.reasons.join(" ")}{" "}
-              {task.eligibility.orderingExplanation}
-            </p>
-          ) : null}
-          <Field label="Expected outcome" required>
-            <textarea
-              aria-label="Expected outcome"
-              value={expectedOutcome}
-              onChange={(event) => setExpectedOutcome(event.target.value)}
-              rows={3}
-              required
-              {...stylex.props(styles.textarea)}
-            />
-          </Field>
-          <Field label="Acceptance criteria" required>
-            <textarea
-              aria-label="Acceptance criteria"
-              value={acceptanceCriteria}
-              onChange={(event) => setAcceptanceCriteria(event.target.value)}
-              rows={4}
-              required
-              {...stylex.props(styles.textarea)}
-            />
-          </Field>
-          <Field label="Agent context" hint="Paths, constraints, and execution-specific guidance.">
-            <textarea
-              aria-label="Agent context"
-              value={agentContext}
-              onChange={(event) => setAgentContext(event.target.value)}
-              rows={3}
-              {...stylex.props(styles.textarea)}
-            />
-          </Field>
-          <Field label="Checklist" hint="One required verification step per line." required>
-            <textarea
-              aria-label="Checklist"
-              value={checklist}
-              onChange={(event) => setChecklist(event.target.value)}
-              rows={4}
-              required
-              {...stylex.props(styles.textarea)}
-            />
-          </Field>
-        </fieldset>
+            </div>
+            <div {...stylex.props(styles.inlineForm)}>
+              <select
+                aria-label="Relation type"
+                value={relationType}
+                onChange={(event) => setRelationType(event.target.value)}
+                {...stylex.props(styles.select, styles.fullWidth)}
+              >
+                <option value="blocks">Blocks</option>
+                <option value="related_to">Related to</option>
+                <option value="duplicates">Duplicates</option>
+                <option value="discovered_from">Discovered from</option>
+              </select>
+              <select
+                aria-label="Relation target"
+                value={relationTargetId}
+                onChange={(event) => setRelationTargetId(event.target.value)}
+                {...stylex.props(styles.select, styles.fullWidth)}
+              >
+                <option value="">Select target</option>
+                {tasks
+                  .filter((candidate) => candidate.id !== task.id)
+                  .map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      #{candidate.sequence} {candidate.title}
+                    </option>
+                  ))}
+              </select>
+              <button
+                type="button"
+                disabled={pending || !relationTargetId}
+                onClick={() => void createRelation()}
+                {...stylex.props(styles.button)}
+              >
+                <Link2 size={16} aria-hidden="true" />
+                Add relation
+              </button>
+            </div>
+          </fieldset>
+        </details>
         {error ? (
           <p role="alert" {...stylex.props(styles.error)}>
             {error}
           </p>
         ) : null}
         <div {...stylex.props(styles.formFooter)}>
-          <p>Ready requires an outcome, acceptance criteria, and at least one checklist item.</p>
+          <p>
+            {task.lifecycle === "backlog"
+              ? "Save a draft now. Mark ready when the instructions are complete."
+              : "Save all changes to this task."}
+          </p>
           <span {...stylex.props(styles.footerActions)}>
             {editable ? (
               <>
                 <button
-                  type="button"
-                  disabled={pending}
-                  onClick={() => void updatePlanning()}
+                  type="submit"
+                  disabled={pending || draft.conflict}
                   {...stylex.props(styles.button, styles.buttonQuiet)}
                 >
-                  <SlidersHorizontal size={16} aria-hidden="true" />
-                  Save planning
-                </button>
-                <button type="submit" disabled={pending} {...stylex.props(styles.button)}>
-                  <CheckCircle2 size={16} aria-hidden="true" />
                   {pending
                     ? "Saving…"
-                    : task.lifecycle === "ready"
-                      ? "Save preparation"
-                      : "Move to ready"}
+                    : task.lifecycle === "backlog"
+                      ? "Save draft"
+                      : "Save changes"}
                 </button>
+                {task.lifecycle === "backlog" ? (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      if (event.currentTarget.form?.reportValidity()) void savePreparation(false);
+                    }}
+                    disabled={pending || draft.conflict}
+                    {...stylex.props(styles.button)}
+                  >
+                    <CheckCircle2 size={16} aria-hidden="true" />
+                    {pending ? "Saving…" : "Move to ready"}
+                  </button>
+                ) : null}
               </>
             ) : (
               <span {...stylex.props(styles.hint)}>{readOnlyExplanation(task.lifecycle)}</span>
@@ -1146,6 +1176,16 @@ function PreparationPanel({
         ) : collaborationModule.state.status === "loading" ? (
           <LazyDetailFallback surface="collaboration" />
         ) : null}
+      </div>
+      <div>
+        <button
+          type="button"
+          disabled={pending || executionReadOnly}
+          onClick={() => void archive()}
+          {...stylex.props(styles.button, styles.buttonQuiet)}
+        >
+          <Archive size={15} aria-hidden="true" /> Archive
+        </button>
       </div>
     </div>
   );
@@ -1377,13 +1417,33 @@ function Field({
   required?: boolean;
   children: React.ReactNode;
 }) {
+  const id = useId();
+  const child =
+    Children.count(children) === 1 &&
+    isValidElement<{ id?: string; "aria-describedby"?: string }>(children)
+      ? children
+      : null;
+  const directControl =
+    child && typeof child.type === "string" && ["input", "select", "textarea"].includes(child.type);
   return (
     <div {...stylex.props(styles.field)}>
-      <span {...stylex.props(styles.fieldLabel)}>
+      <label
+        htmlFor={directControl ? (child.props.id ?? id) : undefined}
+        {...stylex.props(styles.fieldLabel)}
+      >
         {label} {required ? <span {...stylex.props(styles.required)}>Required</span> : null}
-      </span>
-      {children}
-      {hint ? <span {...stylex.props(styles.hint)}>{hint}</span> : null}
+      </label>
+      {directControl
+        ? cloneElement(child, {
+            id: child.props.id ?? id,
+            "aria-describedby": hint ? `${id}-hint` : child.props["aria-describedby"],
+          })
+        : children}
+      {hint ? (
+        <span id={`${id}-hint`} {...stylex.props(styles.hint)}>
+          {hint}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -1433,7 +1493,7 @@ const styles = stylex.create({
     fontWeight: 650,
     gap: tokens.space2,
     justifyContent: "center",
-    minHeight: 36,
+    minHeight: 40,
     paddingInline: tokens.space4,
     ":disabled": { cursor: "not-allowed", opacity: 0.45 },
     ":focus-visible": {
@@ -1472,6 +1532,8 @@ const styles = stylex.create({
     },
   },
   select: {
+    minWidth: 0,
+    width: "100%",
     backgroundColor: tokens.surface,
     borderColor: tokens.border,
     borderRadius: 6,
@@ -1479,15 +1541,8 @@ const styles = stylex.create({
     minHeight: 32,
   },
   fullWidth: { width: "100%" },
-  eyebrow: {
-    color: tokens.accent,
-    fontSize: 11,
-    fontWeight: 750,
-    letterSpacing: "0.09em",
-    margin: 0,
-    textTransform: "uppercase",
-  },
   input: {
+    minWidth: 0,
     backgroundColor: tokens.background,
     borderColor: tokens.border,
     borderRadius: tokens.radius2,
@@ -1518,8 +1573,42 @@ const styles = stylex.create({
     display: "inline-flex",
     gap: tokens.space1,
   },
-  detailStack: { marginInline: "auto", maxWidth: 960, width: "100%" },
-  form: { display: "grid", gap: tokens.space5, margin: "0 auto", maxWidth: 760 },
+  detailStack: {
+    display: "grid",
+    gap: tokens.space5,
+    marginInline: "auto",
+    maxWidth: 960,
+    minWidth: 0,
+    width: "100%",
+  },
+  disclosure: {
+    borderBlockStart: `1px solid ${tokens.border}`,
+    paddingBlockStart: tokens.space3,
+    minWidth: 0,
+  },
+  summary: {
+    cursor: "pointer",
+    fontSize: 14,
+    fontWeight: 650,
+    paddingBlock: tokens.space3,
+    ":focus-visible": { outline: `2px solid ${tokens.accent}`, outlineOffset: 2 },
+  },
+  draftStatus: { color: tokens.accent, fontSize: 12, margin: 0 },
+  conflict: {
+    backgroundColor: tokens.surfaceMuted,
+    border: `1px solid ${tokens.accent}`,
+    borderRadius: tokens.radius2,
+    padding: tokens.space4,
+    fontSize: 13,
+  },
+  form: {
+    display: "grid",
+    gap: tokens.space5,
+    margin: "0 auto",
+    maxWidth: 960,
+    width: "100%",
+    minWidth: 0,
+  },
   claimCard: {
     backgroundColor: tokens.surfaceMuted,
     borderColor: tokens.border,
@@ -1564,15 +1653,6 @@ const styles = stylex.create({
     minWidth: 0,
     padding: 0,
   },
-  detailHeader: {
-    alignItems: "center",
-    borderBlockEndColor: tokens.border,
-    borderBlockEndStyle: "solid",
-    borderBlockEndWidth: 1,
-    display: "flex",
-    justifyContent: "space-between",
-    paddingBlockEnd: tokens.space4,
-  },
   descriptionHeader: {
     alignItems: "start",
     display: "flex",
@@ -1592,8 +1672,6 @@ const styles = stylex.create({
     padding: tokens.space3,
     whiteSpace: "pre-wrap",
   },
-  headerActions: { display: "flex", flexWrap: "wrap", gap: tokens.space2, justifyContent: "end" },
-  version: { color: tokens.foregroundMuted, fontSize: 12, marginBlock: tokens.space1 },
   relations: {
     borderBlockEndColor: tokens.border,
     borderBlockEndStyle: "solid",
@@ -1632,14 +1710,12 @@ const styles = stylex.create({
     gridTemplateColumns: "minmax(0, 1fr) auto",
     "@media (max-width: 640px)": { gridTemplateColumns: "1fr" },
   },
-  field: { display: "grid", gap: tokens.space2 },
+  field: { display: "grid", gap: tokens.space2, minWidth: 0 },
   fieldLabel: { fontSize: 13, fontWeight: 700 },
   planningGrid: {
     display: "grid",
     gap: tokens.space3,
-    gridTemplateColumns: "repeat(5, minmax(112px, 1fr))",
-    "@media (max-width: 980px)": { gridTemplateColumns: "repeat(2, minmax(0, 1fr))" },
-    "@media (max-width: 560px)": { gridTemplateColumns: "1fr" },
+    gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 180px), 1fr))",
   },
   customFields: {
     borderBlockColor: tokens.border,
@@ -1700,6 +1776,7 @@ const styles = stylex.create({
     textTransform: "uppercase",
   },
   textarea: {
+    minWidth: 0,
     backgroundColor: tokens.background,
     borderColor: tokens.border,
     borderRadius: tokens.radius2,
@@ -1715,6 +1792,13 @@ const styles = stylex.create({
   hint: { color: tokens.foregroundMuted, fontSize: 11 },
   error: { color: tokens.danger, fontSize: 13, margin: 0 },
   formFooter: {
+    position: "sticky",
+    bottom: 0,
+    backgroundColor: tokens.surface,
+    paddingBlock: tokens.space3,
+    gap: tokens.space3,
+    flexWrap: "wrap",
+    zIndex: 2,
     alignItems: "center",
     borderBlockStartColor: tokens.border,
     borderBlockStartStyle: "solid",

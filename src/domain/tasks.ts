@@ -435,6 +435,7 @@ export type CreateTaskInput = z.infer<typeof createTaskInputSchema>;
 
 export const prepareTaskInputSchema = taskFieldsSchema.extend({
   taskId: z.string().trim().min(1),
+  saveAsDraft: z.boolean().optional(),
   expectedVersion: z.number().int().positive(),
   idempotencyKey: z.string().trim().min(1).max(200),
   ...optionalTaskPlanningFieldsSchema.shape,

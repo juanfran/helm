@@ -294,8 +294,12 @@ export function prepareTask(
   return Effect.flatMap(
     parseInput(() => compiledPrepareTaskInputSchema.parse(input)),
     (parsed) =>
-      Effect.flatMap(Effect.all([validateReady(parsed), validateTagConstraints(parsed)]), () =>
-        services.store.prepare(parsed, actor, evaluationContext(services, agentCapabilities)),
+      Effect.flatMap(
+        Effect.all([
+          parsed.saveAsDraft ? Effect.void : validateReady(parsed),
+          validateTagConstraints(parsed),
+        ]),
+        () => services.store.prepare(parsed, actor, evaluationContext(services, agentCapabilities)),
       ),
   );
 }

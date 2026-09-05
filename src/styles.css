@@ -6,9 +6,11 @@ body {
   margin: 0;
 }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
+@layer reset {
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
 }

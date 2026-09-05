@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { Link } from "@tanstack/react-router";
 import * as stylex from "@stylexjs/stylex";
 
 import type {
@@ -287,10 +288,15 @@ function TaskResultRow({
   const selectable = Boolean(onSelectedChange);
   const fields = (
     <>
-      <span aria-hidden={selectable || undefined} {...stylex.props(styles.reference)}>
+      <Link
+        to="/projects/$projectId/tasks/$taskId"
+        params={{ projectId: item.task.projectId, taskId: item.task.id }}
+        aria-label={`Task #${item.task.sequence}`}
+        {...stylex.props(styles.reference, styles.taskLink)}
+      >
         #{item.task.sequence}
-      </span>
-      <span aria-hidden={selectable || undefined} {...stylex.props(styles.fields)}>
+      </Link>
+      <span {...stylex.props(styles.fields)}>
         {visibleFields.map((field) => (
           <TaskResultField key={field} item={item} field={field} />
         ))}
@@ -317,8 +323,7 @@ function TaskResultRow({
             onChange={(event) => onSelectedChange(item.task.id, event.currentTarget.checked)}
             {...stylex.props(styles.checkbox)}
           />
-          <label
-            htmlFor={checkboxId}
+          <div
             {...stylex.props(
               styles.taskLabel,
               styles.selectableLabel,
@@ -329,7 +334,7 @@ function TaskResultRow({
               Select task #{item.task.sequence}: {item.task.title}
             </span>
             {fields}
-          </label>
+          </div>
         </>
       ) : (
         <div
@@ -347,8 +352,19 @@ function TaskResultRow({
 
 function TaskResultField({ item, field }: { item: TaskSearchItem; field: SavedViewVisibleField }) {
   const value = taskFieldValue(item, field);
+  if (field === "title")
+    return (
+      <Link
+        to="/projects/$projectId/tasks/$taskId"
+        params={{ projectId: item.task.projectId, taskId: item.task.id }}
+        aria-label={`Open task #${item.task.sequence}: ${item.task.title}`}
+        {...stylex.props(styles.field, styles.title, styles.taskLink)}
+      >
+        {value}
+      </Link>
+    );
   return (
-    <span {...stylex.props(styles.field, field === "title" && styles.title)}>
+    <span {...stylex.props(styles.field)}>
       <span {...stylex.props(styles.srOnly)}>{fieldLabels[field]}: </span>
       {value}
     </span>
@@ -386,6 +402,12 @@ function taskFieldValue(item: TaskSearchItem, field: SavedViewVisibleField) {
 }
 
 const styles = stylex.create({
+  taskLink: {
+    color: tokens.foreground,
+    textDecoration: "none",
+    ":hover": { color: tokens.accent, textDecoration: "underline" },
+    ":focus-visible": { outline: `2px solid ${tokens.accent}`, outlineOffset: 2 },
+  },
   root: {
     display: "grid",
     gap: tokens.space3,

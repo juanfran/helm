@@ -2515,6 +2515,14 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
                 message: "Only backlog or ready tasks can have their preparation updated.",
               });
             }
+            if (input.saveAsDraft && row.lifecycle !== "backlog") {
+              throw new TaskLifecycleError({
+                taskId: row.id,
+                lifecycle: row.lifecycle,
+                message:
+                  "Only backlog tasks can be saved as incomplete drafts. Ready tasks must remain fully prepared.",
+              });
+            }
             const referencedPaths = validateProjectReferencedPaths(
               projectRepositoryRoot(tx, row.projectId),
               input.referencedPaths,
@@ -2524,7 +2532,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
             tx.update(tasks)
               .set({
                 title: input.title,
-                lifecycle: "ready",
+                lifecycle: input.saveAsDraft ? "backlog" : "ready",
                 priority: input.priority ?? row.priority,
                 position: input.position ?? row.position,
                 notBefore: hasInputField(input, "notBefore")
@@ -2553,7 +2561,7 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
             replaceReferencedPaths(tx, row.id, referencedPaths);
             const task = taskFromRow(tx, currentTask(tx, row.id), context);
             recordMutation(tx, input, command, hash, task, actor, {
-              kind: "task.prepared",
+              kind: input.saveAsDraft ? "task.draft_saved" : "task.prepared",
               payload: {
                 previousVersion: row.version,
                 version: task.version,

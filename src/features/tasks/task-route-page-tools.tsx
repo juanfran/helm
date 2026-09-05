@@ -21,32 +21,12 @@ export function TaskRoutePageTools({
   projects,
   activeProject,
   activeProjectVersion,
-  theme,
-  tasks,
 }: TaskRoutePageToolsProps) {
   const router = useRouter();
   const navigate = useNavigate();
 
-  async function persistTheme(nextTheme: TaskRoutePageToolsProps["theme"]) {
-    await applyThemeOptimistically({
-      previousTheme: theme,
-      nextTheme,
-      persist: async () => {
-        const response = await changeTheme({
-          data: { theme: nextTheme, idempotencyKey: crypto.randomUUID() },
-        });
-        if (!response.ok) throw new Error(response.error.message);
-      },
-    });
-    await router.invalidate({ sync: true });
-  }
-
   return (
     <section aria-label="Project tools" {...stylex.props(styles.root)}>
-      <div {...stylex.props(styles.utilities)}>
-        <RouteNotificationCenter projectId={activeProject.id} tasks={tasks} />
-        <ThemeControl theme={theme} onChange={persistTheme} />
-      </div>
       <ProjectSwitcher
         projects={projects}
         activeProject={activeProject}
@@ -68,10 +48,48 @@ export function TaskRoutePageTools({
   );
 }
 
+export function TaskRouteHeaderUtilities({
+  activeProject,
+  theme,
+  tasks,
+  initialPanel,
+}: TaskRoutePageToolsProps & { initialPanel: "notifications" | "appearance" }) {
+  const router = useRouter();
+  async function persistTheme(nextTheme: TaskRoutePageToolsProps["theme"]) {
+    await applyThemeOptimistically({
+      previousTheme: theme,
+      nextTheme,
+      persist: async () => {
+        const response = await changeTheme({
+          data: { theme: nextTheme, idempotencyKey: crypto.randomUUID() },
+        });
+        if (!response.ok) throw new Error(response.error.message);
+      },
+    });
+    await router.invalidate({ sync: true });
+  }
+
+  return (
+    <>
+      <RouteNotificationCenter
+        projectId={activeProject.id}
+        tasks={tasks}
+        defaultOpen={initialPanel === "notifications"}
+      />
+      <ThemeControl theme={theme} onChange={persistTheme} />
+    </>
+  );
+}
+
 function RouteNotificationCenter({
   projectId,
   tasks,
-}: Pick<TaskRoutePageToolsProps, "tasks"> & { readonly projectId: string }) {
+  defaultOpen,
+}: Pick<TaskRoutePageToolsProps, "tasks"> & {
+  readonly projectId: string;
+  readonly defaultOpen: boolean;
+}) {
+  const navigate = useNavigate();
   const events = useQuery({
     queryKey: importantProjectEventQueryKey(projectId),
     queryFn: async () => (await readImportantProjectEvents({ data: { projectId } })).events,
@@ -94,7 +112,17 @@ function RouteNotificationCenter({
       </div>
     );
   }
-  return <NotificationCenter projectId={projectId} events={events.data} tasks={tasks} />;
+  return (
+    <NotificationCenter
+      projectId={projectId}
+      events={events.data}
+      tasks={tasks}
+      defaultOpen={defaultOpen}
+      onSelectTask={(taskId) => {
+        void navigate({ to: "/projects/$projectId/tasks/$taskId", params: { projectId, taskId } });
+      }}
+    />
+  );
 }
 
 const styles = stylex.create({

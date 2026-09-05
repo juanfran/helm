@@ -1,14 +1,16 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render as renderComponent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { taskSearchItemSchema, type TaskSearchItem } from "../../domain/task-filters";
 import type { TaskLifecycle } from "../../domain/tasks";
+import { TestRouter } from "../../test-router-wrapper";
 import { TaskSearchResults } from "./task-search-results";
 
 afterEach(cleanup);
+const render = (ui: React.ReactNode) => renderComponent(ui, { wrapper: TestRouter });
 
 function item(
   id: string,
@@ -95,7 +97,7 @@ describe("TaskSearchResults", () => {
         .getAttribute("aria-checked"),
     ).toBe("true");
 
-    await user.click(screen.getByText("Verify pagination"));
+    await user.click(screen.getByRole("checkbox", { name: "Select task #2: Verify pagination" }));
     expect(onSelect).toHaveBeenCalledWith("task-2", true);
   });
 

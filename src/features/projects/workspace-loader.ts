@@ -17,9 +17,21 @@ import { projectCustomizationQueryOptions } from "./project-customization-query"
 import { readProjectEvents } from "../../server/activity-functions";
 import { readAppState, readProjects } from "../../server/project-functions";
 import { readSavedViews } from "../../server/task-query-functions";
+import { readTasks } from "../../server/task-functions";
+import { projectLandingModule } from "./project-landing-module";
 
-export async function loadWorkspacePage(queryClient: QueryClient) {
+export async function loadWorkspacePage(
+  queryClient: QueryClient,
+  projectIdOverride?: string,
+  taskId?: string,
+) {
   const [state, projects] = await Promise.all([readAppState(), readProjects()]);
+  if (projectIdOverride) {
+    const project = projects.find((item) => item.id === projectIdOverride);
+    if (!project)
+      throw new Error("This project could not be found. Choose another project from Tasks.");
+    state.activeProject = project;
+  }
   let eventCursor = 0;
   let savedViews: readonly { readonly id: string; readonly name: string }[] = [];
   if (state.activeProject) {
@@ -69,6 +81,14 @@ export async function loadWorkspacePage(queryClient: QueryClient) {
         queryClient.fetchQuery(projectCustomizationQueryOptions(projectId)),
       ]),
     );
+    if (taskId && !taskCollection.has(taskId)) {
+      const rows = await readTasks({
+        data: { projectId, taskIds: [taskId], includeArchived: true },
+      });
+      if (!rows[0]) throw new Error("This task could not be found in this project.");
+      taskCollection.utils.writeUpsert(rows[0]);
+    }
   }
+  if (!state.activeProject) await projectLandingModule.load();
   return { ...state, projects: [...projects], eventCursor, savedViews };
 }

@@ -200,10 +200,6 @@ export function ProjectSwitcher({
 
       <p id={detailId} {...stylex.props(styles.detail)}>
         <span>{activeProject.repositoryRoot}</span>
-        <span aria-hidden="true">·</span>
-        <span>Project v{activeProject.version}</span>
-        <span aria-hidden="true">·</span>
-        <span>Selection v{activeProjectVersion}</span>
       </p>
 
       <Dialog.Root open={addOpen} onOpenChange={setDialogOpen}>
@@ -298,8 +294,8 @@ const styles = stylex.create({
   root: {
     alignItems: "end",
     display: "grid",
-    gap: tokens.space1,
-    gridTemplateColumns: "minmax(220px, 360px) auto",
+    gap: tokens.space3,
+    gridTemplateColumns: "minmax(0, 1fr) auto",
     maxWidth: 560,
     position: "relative",
     width: "100%",

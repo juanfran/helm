@@ -1,4 +1,5 @@
-import type { ComponentType } from "react";
+import { type ComponentType } from "react";
+import { ProjectMenu } from "../../components/project-menu";
 import * as stylex from "@stylexjs/stylex";
 
 import type { Project, Theme } from "../../domain/projects";
@@ -30,45 +31,27 @@ export function createTaskRoutePageToolsLauncher(
   return function TaskRoutePageToolsLauncher(props: TaskRoutePageToolsProps) {
     const moduleState = useExplicitLazyModule(toolsModule);
     const status = moduleState.state.status;
-    const actionable = status === "idle" || status === "error";
-    const action = status === "error" ? moduleState.retry : moduleState.activate;
-    const buttonLabel =
-      status === "idle"
-        ? "Open project tools"
-        : status === "loading"
-          ? "Loading project tools"
-          : status === "error"
-            ? "Try project tools again"
-            : "Project tools open";
-
     return (
-      <section aria-label="Project tools" {...stylex.props(styles.root)}>
-        <span {...stylex.props(styles.label)}>Active project</span>
-        <strong {...stylex.props(styles.projectName)}>{props.activeProject.name}</strong>
-        <button
-          type="button"
-          aria-disabled={!actionable}
-          onPointerEnter={moduleState.preload}
-          onFocus={moduleState.preload}
-          onClick={actionable ? action : undefined}
-          {...stylex.props(styles.button)}
-        >
-          {buttonLabel}
-        </button>
-        {status === "loading" ? (
-          <output {...stylex.props(styles.status)}>Loading project tools…</output>
-        ) : null}
+      <ProjectMenu
+        name={props.activeProject.name}
+        preload={moduleState.preload}
+        onActivate={() => {
+          if (status === "idle") moduleState.activate();
+        }}
+      >
+        {status === "loading" || status === "idle" ? <output>Loading project tools…</output> : null}
         {status === "error" ? (
-          <div role="alert" {...stylex.props(styles.failure)}>
-            <span {...stylex.props(styles.status)}>Project tools could not be loaded.</span>
+          <div role="alert">
+            Project tools could not be loaded.{" "}
+            <button type="button" onClick={moduleState.retry} {...stylex.props(styles.button)}>
+              Try project tools again
+            </button>
           </div>
         ) : null}
         {moduleState.state.status === "ready" ? (
-          <div {...stylex.props(styles.loaded)}>
-            <moduleState.state.module.TaskRoutePageTools {...props} />
-          </div>
+          <moduleState.state.module.TaskRoutePageTools {...props} />
         ) : null}
-      </section>
+      </ProjectMenu>
     );
   };
 }
@@ -78,46 +61,6 @@ export const TaskRoutePageToolsLauncher = createTaskRoutePageToolsLauncher(
 );
 
 const styles = stylex.create({
-  root: {
-    alignItems: "center",
-    backgroundColor: tokens.surface,
-    borderColor: tokens.border,
-    borderRadius: tokens.radius2,
-    borderStyle: "solid",
-    borderWidth: 1,
-    display: "grid",
-    gap: tokens.space1,
-    gridTemplateColumns: "minmax(0, 1fr) auto",
-    minHeight: 72,
-    paddingBlock: tokens.space2,
-    paddingInline: tokens.space3,
-    width: "min(100%, 620px)",
-    "@media (max-width: 600px)": { gridTemplateColumns: "1fr" },
-  },
-  label: {
-    color: tokens.foregroundMuted,
-    fontSize: 11,
-    fontWeight: 750,
-    letterSpacing: "0.06em",
-    textTransform: "uppercase",
-  },
-  projectName: {
-    color: tokens.foreground,
-    fontSize: 14,
-    gridColumn: 1,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-  },
-  status: { color: tokens.foregroundMuted, fontSize: 12 },
-  failure: {
-    alignItems: "center",
-    display: "flex",
-    gap: tokens.space2,
-    gridColumn: "1 / -1",
-    justifyContent: "space-between",
-  },
-  loaded: { gridColumn: "1 / -1" },
   button: {
     backgroundColor: tokens.surface,
     borderColor: tokens.border,

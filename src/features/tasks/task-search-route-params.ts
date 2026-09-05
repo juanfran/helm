@@ -41,6 +41,7 @@ const taskPresentations = {
 const capabilityNamePattern = /^[a-z0-9][a-z0-9._:-]*$/i;
 
 export type TaskSearchParams = {
+  readonly project?: string;
   readonly q: string;
   readonly mode: TaskSearchMode;
   readonly lifecycle: TaskLifecycle | null;
@@ -53,7 +54,7 @@ export type TaskSearchParams = {
 };
 
 export type TaskSearchQueryParams = Omit<TaskSearchParams, "presentation">;
-export type SavedViewSearchParams = { readonly cursor: string | null };
+export type SavedViewSearchParams = { readonly cursor: string | null; readonly project?: string };
 
 function isEnumValue<TValue extends string>(
   value: unknown,
@@ -95,6 +96,9 @@ export function parseTaskSearchRouteParams(
   search: Readonly<Record<string, unknown>>,
 ): TaskSearchParams {
   return {
+    ...(trimmedNullableString(search.project, 200)
+      ? { project: trimmedNullableString(search.project, 200) ?? undefined }
+      : {}),
     q: boundedString(search.q, 500, ""),
     mode: enumValue(search.mode, taskSearchModes, "all"),
     lifecycle: nullableEnumValue(search.lifecycle, taskLifecycles),
@@ -110,7 +114,12 @@ export function parseTaskSearchRouteParams(
 export function parseSavedViewSearchRouteParams(
   search: Readonly<Record<string, unknown>>,
 ): SavedViewSearchParams {
-  return { cursor: trimmedNullableString(search.cursor, 4_000) };
+  return {
+    cursor: trimmedNullableString(search.cursor, 4_000),
+    ...(trimmedNullableString(search.project, 200)
+      ? { project: trimmedNullableString(search.project, 200) ?? undefined }
+      : {}),
+  };
 }
 
 export const emptyTaskSearchParams = parseTaskSearchRouteParams({});

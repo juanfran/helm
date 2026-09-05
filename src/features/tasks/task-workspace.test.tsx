@@ -133,6 +133,7 @@ function deferred<T>() {
 
 afterEach(() => {
   cleanup();
+  sessionStorage.clear();
   vi.restoreAllMocks();
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
 });
@@ -210,8 +211,11 @@ function useNarrowViewport() {
   window.dispatchEvent(new Event("resize"));
 }
 
-function waitForTaskDetail() {
-  return screen.findByRole("form", { name: "Prepare task" });
+async function waitForTaskDetail() {
+  const form = await screen.findByRole("form", { name: "Prepare task" });
+  fireEvent.click(screen.getByText("Planning and agent instructions", { selector: "summary" }));
+  fireEvent.click(screen.getByText("Subtasks and relationships", { selector: "summary" }));
+  return form;
 }
 
 describe("task workspace", () => {
@@ -276,9 +280,7 @@ describe("task workspace", () => {
     expect(document.activeElement).toBe(notifications);
     notificationGate.resolve({ default: TestNotifications });
     expect(await screen.findByRole("region", { name: "Loaded notifications" })).toBeTruthy();
-    expect(notifications.getAttribute("aria-disabled")).toBe("true");
-    expect(notifications.getAttribute("aria-expanded")).toBe("true");
-    expect(document.activeElement).toBe(notifications);
+    expect(notifications.isConnected).toBe(false);
 
     const appearance = screen.getByRole("button", { name: "Appearance" });
     appearance.focus();
@@ -288,7 +290,7 @@ describe("task workspace", () => {
     expect(document.activeElement).toBe(appearance);
     appearanceGate.resolve({ default: TestAppearance });
     expect(await screen.findByRole("region", { name: "Loaded appearance" })).toBeTruthy();
-    expect(document.activeElement).toBe(appearance);
+    expect(appearance.isConnected).toBe(false);
 
     const bulk = screen.getByRole("button", { name: "Bulk actions" });
     bulk.focus();
@@ -330,7 +332,9 @@ describe("task workspace", () => {
     expect(screen.getByRole("heading", { name: "Select a task" })).toBeTruthy();
 
     fireEvent.click(taskTrigger);
-    expect(document.activeElement).toBe(taskTrigger);
+    expect(document.activeElement).toBe(
+      screen.getByRole("heading", { name: "Captured task", level: 2 }),
+    );
     expect(taskTrigger.getAttribute("aria-current")).toBe("true");
     expect(screen.getByRole("article", { name: "Task #1 summary" }).textContent).toContain(
       detailedTask.descriptionText,
@@ -342,7 +346,9 @@ describe("task workspace", () => {
 
     detailGate.resolve({ default: TestTaskDetail });
     expect(await screen.findByRole("region", { name: "Loaded task #1" })).toBeTruthy();
-    expect(document.activeElement).toBe(taskTrigger);
+    expect(document.activeElement).toBe(
+      screen.getByRole("heading", { name: "Captured task", level: 2 }),
+    );
   });
 
   it("preserves the readable task summary when detail loading fails and retries", async () => {
@@ -476,7 +482,7 @@ describe("task workspace", () => {
     expect(screen.getByRole("region", { name: "Project portability" })).toBeTruthy();
   });
 
-  it("preloads the project switcher while keeping its trigger focused through activation", () => {
+  it("preloads the project switcher and supports closing it", async () => {
     const preload = vi.fn();
     render(
       <TaskWorkspace
@@ -494,10 +500,16 @@ describe("task workspace", () => {
     expect(screen.queryByRole("region", { name: "Project switcher" })).toBeNull();
 
     fireEvent.click(trigger);
-    expect(trigger.getAttribute("aria-disabled")).toBe("true");
-    expect(trigger.getAttribute("aria-expanded")).toBe("true");
-    expect(document.activeElement).toBe(trigger);
-    expect(screen.getByRole("region", { name: "Project switcher" })).toBeTruthy();
+    expect(await screen.findByRole("region", { name: "Project switcher" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Switch project" }).getAttribute("aria-expanded"),
+    ).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Close project switcher" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Switch project" }).getAttribute("aria-expanded"),
+      ).toBe("false"),
+    );
   });
 
   it("drills from the live dashboard into narrow-screen review and comment actions", async () => {
@@ -742,13 +754,14 @@ describe("task workspace", () => {
     await user.click(screen.getByRole("button", { name: "Move to ready" }));
 
     expect(workspace.onPrepareTask).toHaveBeenCalledWith({
+      saveAsDraft: false,
       taskId: backlog.id,
       title: backlog.title,
       description: emptyRichTextDocument,
       expectedOutcome: "The task is complete.",
       acceptanceCriteria: "The test passes.",
       agentContext: "Keep the seam shared.",
-      checklist: [{ id: "item-1", text: "Run pnpm check", checked: false }],
+      checklist: [{ id: expect.any(String), text: "Run pnpm check", checked: false }],
       referencedPaths: ["src/domain/tasks.ts"],
       priority: "normal",
       position: 1,
@@ -762,11 +775,27 @@ describe("task workspace", () => {
     });
   });
 
+  it("saves an incomplete draft on Enter without moving it to ready", async () => {
+    const user = userEvent.setup();
+    const workspace = props();
+    workspace.onPrepareTask.mockResolvedValue({ ok: true, task: { ...backlog, version: 2 } });
+    render(<TaskWorkspace {...workspace} />);
+    await waitForTaskDetail();
+    await user.type(screen.getByLabelText("Title", { exact: true }), "{Enter}");
+    expect(workspace.onPrepareTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        saveAsDraft: true,
+        expectedOutcome: "",
+        checklist: [],
+      }),
+    );
+  });
+
   it("reprioritizes work from the narrow-screen task controls", async () => {
     useNarrowViewport();
     const user = userEvent.setup();
     const workspace = props();
-    workspace.onUpdateTaskPlanning.mockResolvedValue({
+    workspace.onPrepareTask.mockResolvedValue({
       ok: true,
       task: { ...backlog, priority: "urgent", version: 2 },
     });
@@ -783,20 +812,23 @@ describe("task workspace", () => {
     await user.click(screen.getByRole("button", { name: "Add tag" }));
     await user.type(screen.getByLabelText("Tag 1 name"), "frontend");
     await user.type(screen.getByLabelText("Required capabilities"), "react");
-    await user.click(screen.getByRole("button", { name: "Save planning" }));
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
 
-    expect(workspace.onUpdateTaskPlanning).toHaveBeenCalledWith({
-      taskId: backlog.id,
-      priority: "urgent",
-      position: 4,
-      notBefore: "2026-09-10",
-      dueAt: "2026-09-12",
-      size: "m",
-      tags: [{ name: "frontend", description: "", color: "#2563eb", exclusiveGroup: null }],
-      requiredCapabilities: ["react"],
-      expectedVersion: 1,
-      idempotencyKey: expect.any(String),
-    });
+    expect(workspace.onPrepareTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        saveAsDraft: true,
+        taskId: backlog.id,
+        priority: "urgent",
+        position: 4,
+        notBefore: "2026-09-10",
+        dueAt: "2026-09-12",
+        size: "m",
+        tags: [{ name: "frontend", description: "", color: "#2563eb", exclusiveGroup: null }],
+        requiredCapabilities: ["react"],
+        expectedVersion: 1,
+        idempotencyKey: expect.any(String),
+      }),
+    );
   });
 
   it("preserves canonical metadata when saving an existing project tag", async () => {
@@ -810,7 +842,7 @@ describe("task workspace", () => {
       reviewModeOverride: null,
     };
     const workspace = { ...props(), tagDefinitions: [canonicalTag] };
-    workspace.onUpdateTaskPlanning.mockResolvedValue({ ok: true, task: backlog });
+    workspace.onPrepareTask.mockResolvedValue({ ok: true, task: backlog });
     render(<TaskWorkspace {...workspace} />);
 
     await waitForTaskDetail();
@@ -818,9 +850,9 @@ describe("task workspace", () => {
     await user.click(screen.getByRole("button", { name: "Add tag" }));
     await user.type(screen.getByLabelText("Tag 1 name"), "frontend");
     expect(screen.getByLabelText("Tag 1 description")).toHaveProperty("disabled", true);
-    await user.click(screen.getByRole("button", { name: "Save planning" }));
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
 
-    expect(workspace.onUpdateTaskPlanning).toHaveBeenCalledWith(
+    expect(workspace.onPrepareTask).toHaveBeenCalledWith(
       expect.objectContaining({
         tags: [
           {
@@ -900,6 +932,7 @@ describe("task workspace", () => {
   });
 
   it("surfaces a version conflict and archives with the current task version", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     const user = userEvent.setup();
     const preparedBacklog: Task = {
       ...backlog,
@@ -951,7 +984,7 @@ describe("task workspace", () => {
     await waitForTaskDetail();
 
     expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Save planning" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save draft" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Move to ready" })).toBeNull();
     expect(screen.getByText("Reopen this task before editing it.")).toBeTruthy();
     expect(screen.getByRole("group", { name: "Editable task details" })).toHaveProperty(
@@ -1129,7 +1162,7 @@ describe("task workspace", () => {
       },
     };
     const workspace = props([customized]);
-    workspace.onUpdateTaskPlanning.mockResolvedValue({ ok: true, task: customized });
+    workspace.onPrepareTask.mockResolvedValue({ ok: true, task: customized });
     workspace.onSetTaskReviewModeOverride.mockResolvedValue({
       ok: true,
       task: { ...customized, reviewModeOverride: "direct", version: 2 },
@@ -1156,14 +1189,14 @@ describe("task workspace", () => {
       reason: "Trusted task route.",
       idempotencyKey: expect.any(String),
     });
-    await user.click(screen.getByRole("button", { name: "Save planning" }));
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
 
-    expect(workspace.onUpdateTaskPlanning).toHaveBeenCalledWith(
+    expect(workspace.onPrepareTask).toHaveBeenCalledWith(
       expect.objectContaining({
         customFields: [{ fieldId: "field-owner", value: { type: "text", value: "Ada" } }],
       }),
     );
-    expect(workspace.onUpdateTaskPlanning).not.toHaveBeenCalledWith(
+    expect(workspace.onPrepareTask).not.toHaveBeenCalledWith(
       expect.objectContaining({ reviewModeOverride: expect.anything() }),
     );
   });
@@ -1182,7 +1215,7 @@ describe("task workspace", () => {
 
     const description = screen.getByLabelText("Task description");
     expect(description).toHaveProperty("textContent", task.descriptionText);
-    expect(description.closest("fieldset")).toBeNull();
+    expect(description.textContent).toBe(task.descriptionText);
     expect(screen.queryByRole("button", { name: "Edit description" })).toBeNull();
     expect(loadEditor).not.toHaveBeenCalled();
   });
@@ -1208,7 +1241,7 @@ describe("task workspace", () => {
       true,
     );
     expect(screen.getByRole("button", { name: /Archive/ })).toHaveProperty("disabled", true);
-    expect(screen.queryByRole("button", { name: "Save planning" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save draft" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Move to ready" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
   });

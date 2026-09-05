@@ -469,6 +469,90 @@ afterEach(async () => {
 });
 
 describe("task application commands", () => {
+  it("saves incomplete preparation without making backlog work claimable, and retries exactly once", async () => {
+    const task = await Effect.runPromise(createTask(backlogInput(), human, taskServices));
+    const input = {
+      ...backlogInput(),
+      taskId: task.id,
+      expectedVersion: task.version,
+      saveAsDraft: true,
+      title: "A clearer idea",
+      expectedOutcome: "Partially written outcome",
+      priority: "high",
+      idempotencyKey: "save-partial",
+    };
+    const saved = await Effect.runPromise(prepareTask(input, human, taskServices));
+    expect(saved).toMatchObject({
+      title: "A clearer idea",
+      expectedOutcome: "Partially written outcome",
+      lifecycle: "backlog",
+      priority: "high",
+      version: 2,
+      eligibility: { claimable: false },
+    });
+    expect(await Effect.runPromise(prepareTask(input, human, taskServices))).toEqual(saved);
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where kind = 'task.draft_saved'")
+        .pluck()
+        .get(),
+    ).toBe(1);
+    const stale = await Effect.runPromise(
+      Effect.either(prepareTask({ ...input, idempotencyKey: "stale-draft" }, human, taskServices)),
+    );
+    expect(Either.isLeft(stale) && stale.left["_tag"]).toBe("TaskVersionConflictError");
+    expect((await Effect.runPromise(listTasks({ projectId }, taskServices)))[0]).toMatchObject({
+      version: 2,
+      title: "A clearer idea",
+    });
+  });
+
+  it("does not weaken ready-task invariants with draft saves", async () => {
+    const task = await Effect.runPromise(createTask(readyInput(), human, taskServices));
+    const input = {
+      ...backlogInput(),
+      taskId: task.id,
+      expectedVersion: task.version,
+      saveAsDraft: true,
+      idempotencyKey: "invalid-ready-draft",
+    };
+    const result = await Effect.runPromise(Effect.either(prepareTask(input, human, taskServices)));
+    expect(Either.isLeft(result) && result.left["_tag"]).toBe("TaskLifecycleError");
+    expect((await Effect.runPromise(listTasks({ projectId }, taskServices)))[0]).toMatchObject({
+      lifecycle: "ready",
+      version: 1,
+      acceptanceCriteria: task.acceptanceCriteria,
+    });
+    expect(
+      projectStore.database
+        .prepare("select count(*) from idempotency_records where key = 'invalid-ready-draft'")
+        .pluck()
+        .get(),
+    ).toBe(0);
+  });
+
+  it("rolls back a draft with invalid repository paths without appending events", async () => {
+    const task = await Effect.runPromise(createTask(backlogInput(), human, taskServices));
+    const input = {
+      ...backlogInput(),
+      taskId: task.id,
+      expectedVersion: task.version,
+      saveAsDraft: true,
+      referencedPaths: ["../outside.txt"],
+      idempotencyKey: "invalid-draft-path",
+    };
+    const result = await Effect.runPromise(Effect.either(prepareTask(input, human, taskServices)));
+    expect(Either.isLeft(result)).toBe(true);
+    expect((await Effect.runPromise(listTasks({ projectId }, taskServices)))[0]).toMatchObject({
+      version: 1,
+    });
+    expect(
+      projectStore.database
+        .prepare("select count(*) from events where kind = 'task.draft_saved'")
+        .pluck()
+        .get(),
+    ).toBe(0);
+  });
   it("persists the injected service clock across task and relation mutations", async () => {
     const createdAt = "2026-09-03T08:00:00.000Z";
     now = createdAt;
