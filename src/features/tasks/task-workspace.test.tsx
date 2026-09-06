@@ -8,6 +8,7 @@ import type { ProjectEvent } from "../../domain/activity";
 import type { Project } from "../../domain/projects";
 import { compareTaskOrder, emptyRichTextDocument, type Task } from "../../domain/tasks";
 import { createRetryableLazyModuleLoader } from "../../components/retryable-lazy-module";
+import { TaskDetailPanel } from "./task-detail-panel";
 import { TaskWorkspace } from "./task-workspace";
 
 const project: Project = {
@@ -179,8 +180,10 @@ function props(tasks: readonly Task[] = [backlog]) {
     manualBlockers: [],
     projectEvents: [],
     initialSelectedTaskId: tasks.toSorted(compareTaskOrder)[0]?.id ?? null,
+    // Compile the real fixture during setup, outside Testing Library's render timeout.
+    // Lazy-loading tests inject deferred loaders to control pending, failure, and retry states.
     taskDetailModuleLoader: createRetryableLazyModuleLoader(() =>
-      import("./task-detail-panel").then(({ TaskDetailPanel }) => ({ default: TaskDetailPanel })),
+      Promise.resolve({ default: TaskDetailPanel }),
     ),
     liveStatus: "live" as const,
     onCreateTask: vi.fn(),
