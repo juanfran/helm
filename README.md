@@ -7,7 +7,7 @@ ready tasks, report progress, and hand back their work—all in the same queue.
 
 ![Helm task workspace: a shared queue with an agent working, a task awaiting review, and a ready task's outcome, acceptance criteria, and checklist.](docs/images/task-workspace.png)
 
-Prepare clear tasks and see who is working on what. Screenshots use a fictional sample project.
+Prepare clear tasks and see who is working on what.
 
 ## Why use it?
 
