@@ -5,6 +5,10 @@ A local project manager for you and your coding agents.
 You decide what needs doing, give it enough context, and review the result. Your agents pick up
 ready tasks, report progress, and hand back their work—all in the same queue.
 
+![Helm task workspace: a shared queue with an agent working, a task awaiting review, and a ready task's outcome, acceptance criteria, and checklist.](docs/images/task-workspace.png)
+
+Prepare clear tasks and see who is working on what. Screenshots use a fictional sample project.
+
 ## Why use it?
 
 Working with several agents means keeping instructions, priorities, and results in sync. Helm gives
@@ -51,6 +55,19 @@ For everyday use without the development server, run `pnpm build` followed by `p
 
 The tutorial walks through MCP connection settings, a complete first task, example agent prompts,
 parallel agents, dependencies, and recovering blocked work.
+
+![Human review in Helm: the agent's completion report lists changed areas and verification results, followed by approval and request-changes controls.](docs/images/task-review.png)
+
+Agents hand back evidence, not just “done.” You make the review decision.
+
+<details>
+<summary>See the dashboard: ready work, active agents, and reviews</summary>
+
+![Helm dashboard showing three claimable tasks, one active task, one task awaiting review, and two connected agent runs.](docs/images/dashboard.png)
+
+See what can start next, which agent holds each claim, and what needs your attention.
+
+</details>
 
 ## Learn more
 
