@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ProjectIdRouteImport } from './routes/$projectId'
 import { Route as ProjectIdActivityRouteImport } from './routes/$projectId.activity'
 import { Route as ProjectIdDashboardRouteImport } from './routes/$projectId.dashboard'
 import { Route as ProjectIdSearchRouteImport } from './routes/$projectId.search'
@@ -26,25 +27,30 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ProjectIdActivityRoute = ProjectIdActivityRouteImport.update({
-  id: '/$projectId/activity',
-  path: '/$projectId/activity',
+const ProjectIdRoute = ProjectIdRouteImport.update({
+  id: '/$projectId',
+  path: '/$projectId',
   getParentRoute: () => rootRouteImport,
+} as any)
+const ProjectIdActivityRoute = ProjectIdActivityRouteImport.update({
+  id: '/activity',
+  path: '/activity',
+  getParentRoute: () => ProjectIdRoute,
 } as any)
 const ProjectIdDashboardRoute = ProjectIdDashboardRouteImport.update({
-  id: '/$projectId/dashboard',
-  path: '/$projectId/dashboard',
-  getParentRoute: () => rootRouteImport,
+  id: '/dashboard',
+  path: '/dashboard',
+  getParentRoute: () => ProjectIdRoute,
 } as any)
 const ProjectIdSearchRoute = ProjectIdSearchRouteImport.update({
-  id: '/$projectId/search',
-  path: '/$projectId/search',
-  getParentRoute: () => rootRouteImport,
+  id: '/search',
+  path: '/search',
+  getParentRoute: () => ProjectIdRoute,
 } as any)
 const ProjectIdSettingsRoute = ProjectIdSettingsRouteImport.update({
-  id: '/$projectId/settings',
-  path: '/$projectId/settings',
-  getParentRoute: () => rootRouteImport,
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => ProjectIdRoute,
 } as any)
 const ApiEventsRoute = ApiEventsRouteImport.update({
   id: '/api/events',
@@ -62,23 +68,24 @@ const ApiPortabilityRoute = ApiPortabilityRouteImport.update({
   getParentRoute: () => rootRouteImport,
 } as any)
 const ProjectIdTasksIndexRoute = ProjectIdTasksIndexRouteImport.update({
-  id: '/$projectId/tasks/',
-  path: '/$projectId/tasks/',
-  getParentRoute: () => rootRouteImport,
+  id: '/tasks/',
+  path: '/tasks/',
+  getParentRoute: () => ProjectIdRoute,
 } as any)
 const ProjectIdTasksTaskIdRoute = ProjectIdTasksTaskIdRouteImport.update({
-  id: '/$projectId/tasks/$taskId',
-  path: '/$projectId/tasks/$taskId',
-  getParentRoute: () => rootRouteImport,
+  id: '/tasks/$taskId',
+  path: '/tasks/$taskId',
+  getParentRoute: () => ProjectIdRoute,
 } as any)
 const ProjectIdViewsViewIdRoute = ProjectIdViewsViewIdRouteImport.update({
-  id: '/$projectId/views/$viewId',
-  path: '/$projectId/views/$viewId',
-  getParentRoute: () => rootRouteImport,
+  id: '/views/$viewId',
+  path: '/views/$viewId',
+  getParentRoute: () => ProjectIdRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/$projectId': typeof ProjectIdRouteWithChildren
   '/$projectId/activity': typeof ProjectIdActivityRoute
   '/$projectId/dashboard': typeof ProjectIdDashboardRoute
   '/$projectId/search': typeof ProjectIdSearchRoute
@@ -92,6 +99,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/$projectId': typeof ProjectIdRouteWithChildren
   '/$projectId/activity': typeof ProjectIdActivityRoute
   '/$projectId/dashboard': typeof ProjectIdDashboardRoute
   '/$projectId/search': typeof ProjectIdSearchRoute
@@ -106,6 +114,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/$projectId': typeof ProjectIdRouteWithChildren
   '/$projectId/activity': typeof ProjectIdActivityRoute
   '/$projectId/dashboard': typeof ProjectIdDashboardRoute
   '/$projectId/search': typeof ProjectIdSearchRoute
@@ -121,6 +130,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/$projectId'
     | '/$projectId/activity'
     | '/$projectId/dashboard'
     | '/$projectId/search'
@@ -134,6 +144,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/$projectId'
     | '/$projectId/activity'
     | '/$projectId/dashboard'
     | '/$projectId/search'
@@ -147,6 +158,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/$projectId'
     | '/$projectId/activity'
     | '/$projectId/dashboard'
     | '/$projectId/search'
@@ -161,16 +173,10 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  ProjectIdActivityRoute: typeof ProjectIdActivityRoute
-  ProjectIdDashboardRoute: typeof ProjectIdDashboardRoute
-  ProjectIdSearchRoute: typeof ProjectIdSearchRoute
-  ProjectIdSettingsRoute: typeof ProjectIdSettingsRoute
+  ProjectIdRoute: typeof ProjectIdRouteWithChildren
   ApiEventsRoute: typeof ApiEventsRoute
   ApiMcpRoute: typeof ApiMcpRoute
   ApiPortabilityRoute: typeof ApiPortabilityRoute
-  ProjectIdTasksTaskIdRoute: typeof ProjectIdTasksTaskIdRoute
-  ProjectIdViewsViewIdRoute: typeof ProjectIdViewsViewIdRoute
-  ProjectIdTasksIndexRoute: typeof ProjectIdTasksIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -182,33 +188,40 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/$projectId': {
+      id: '/$projectId'
+      path: '/$projectId'
+      fullPath: '/$projectId'
+      preLoaderRoute: typeof ProjectIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/$projectId/activity': {
       id: '/$projectId/activity'
-      path: '/$projectId/activity'
+      path: '/activity'
       fullPath: '/$projectId/activity'
       preLoaderRoute: typeof ProjectIdActivityRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof ProjectIdRoute
     }
     '/$projectId/dashboard': {
       id: '/$projectId/dashboard'
-      path: '/$projectId/dashboard'
+      path: '/dashboard'
       fullPath: '/$projectId/dashboard'
       preLoaderRoute: typeof ProjectIdDashboardRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof ProjectIdRoute
     }
     '/$projectId/search': {
       id: '/$projectId/search'
-      path: '/$projectId/search'
+      path: '/search'
       fullPath: '/$projectId/search'
       preLoaderRoute: typeof ProjectIdSearchRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof ProjectIdRoute
     }
     '/$projectId/settings': {
       id: '/$projectId/settings'
-      path: '/$projectId/settings'
+      path: '/settings'
       fullPath: '/$projectId/settings'
       preLoaderRoute: typeof ProjectIdSettingsRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof ProjectIdRoute
     }
     '/api/events': {
       id: '/api/events'
@@ -233,40 +246,58 @@ declare module '@tanstack/react-router' {
     }
     '/$projectId/tasks/': {
       id: '/$projectId/tasks/'
-      path: '/$projectId/tasks'
+      path: '/tasks'
       fullPath: '/$projectId/tasks/'
       preLoaderRoute: typeof ProjectIdTasksIndexRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof ProjectIdRoute
     }
     '/$projectId/tasks/$taskId': {
       id: '/$projectId/tasks/$taskId'
-      path: '/$projectId/tasks/$taskId'
+      path: '/tasks/$taskId'
       fullPath: '/$projectId/tasks/$taskId'
       preLoaderRoute: typeof ProjectIdTasksTaskIdRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof ProjectIdRoute
     }
     '/$projectId/views/$viewId': {
       id: '/$projectId/views/$viewId'
-      path: '/$projectId/views/$viewId'
+      path: '/views/$viewId'
       fullPath: '/$projectId/views/$viewId'
       preLoaderRoute: typeof ProjectIdViewsViewIdRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof ProjectIdRoute
     }
   }
 }
 
-const rootRouteChildren: RootRouteChildren = {
-  IndexRoute: IndexRoute,
+interface ProjectIdRouteChildren {
+  ProjectIdActivityRoute: typeof ProjectIdActivityRoute
+  ProjectIdDashboardRoute: typeof ProjectIdDashboardRoute
+  ProjectIdSearchRoute: typeof ProjectIdSearchRoute
+  ProjectIdSettingsRoute: typeof ProjectIdSettingsRoute
+  ProjectIdTasksTaskIdRoute: typeof ProjectIdTasksTaskIdRoute
+  ProjectIdViewsViewIdRoute: typeof ProjectIdViewsViewIdRoute
+  ProjectIdTasksIndexRoute: typeof ProjectIdTasksIndexRoute
+}
+
+const ProjectIdRouteChildren: ProjectIdRouteChildren = {
   ProjectIdActivityRoute: ProjectIdActivityRoute,
   ProjectIdDashboardRoute: ProjectIdDashboardRoute,
   ProjectIdSearchRoute: ProjectIdSearchRoute,
   ProjectIdSettingsRoute: ProjectIdSettingsRoute,
-  ApiEventsRoute: ApiEventsRoute,
-  ApiMcpRoute: ApiMcpRoute,
-  ApiPortabilityRoute: ApiPortabilityRoute,
   ProjectIdTasksTaskIdRoute: ProjectIdTasksTaskIdRoute,
   ProjectIdViewsViewIdRoute: ProjectIdViewsViewIdRoute,
   ProjectIdTasksIndexRoute: ProjectIdTasksIndexRoute,
+}
+
+const ProjectIdRouteWithChildren = ProjectIdRoute._addFileChildren(
+  ProjectIdRouteChildren,
+)
+
+const rootRouteChildren: RootRouteChildren = {
+  IndexRoute: IndexRoute,
+  ProjectIdRoute: ProjectIdRouteWithChildren,
+  ApiEventsRoute: ApiEventsRoute,
+  ApiMcpRoute: ApiMcpRoute,
+  ApiPortabilityRoute: ApiPortabilityRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

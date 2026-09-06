@@ -30,6 +30,7 @@ type Manifest = Record<string, ManifestEntry>;
 
 const temporaryDirectories: string[] = [];
 const routeSources = [
+  "src/routes/$projectId.tsx",
   "src/routes/index.tsx",
   "src/routes/$projectId.tasks.index.tsx",
   "src/routes/$projectId.dashboard.tsx",
@@ -269,6 +270,35 @@ describe("client bundle budgets", () => {
       parents: ["src/features/tasks/task-workspace.tsx"],
     });
     expect(formatClientBundleReport(report)).toContain("- navigation /:");
+  });
+
+  it("includes the shared project layout in every project navigation, but not onboarding", () => {
+    const fixture = writeFixture();
+    const report = inspectFixture(fixture);
+    const layoutFiles = splitProperties.map((property) => `assets/_projectId-${property}-H4sH.js`);
+
+    for (const [route, navigation] of Object.entries(report.navigations)) {
+      if (route === "/") {
+        for (const file of layoutFiles) expect(navigation.files).not.toContain(file);
+      } else {
+        expect(navigation.files).toEqual(expect.arrayContaining(layoutFiles));
+      }
+    }
+  });
+
+  it("rejects a missing shared project layout entry", () => {
+    const fixture = writeFixture();
+    delete fixture.manifest["src/routes/$projectId.tsx?tsr-split=component"];
+    fixture.persist();
+
+    expect(inspectFixture(fixture).violations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "required-entry-missing",
+          target: "project layout component",
+        }),
+      ]),
+    );
   });
 
   it("measures deterministic level-nine gzip bytes", () => {

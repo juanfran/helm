@@ -36,7 +36,22 @@ const config = defineConfig(({ command, mode }) => {
       }),
       tanstackStart(),
       viteReact(),
-      nitro(),
+      nitro({
+        rolldownConfig: {
+          output: {
+            codeSplitting: {
+              groups: [
+                {
+                  // Keep Start's server runtime and route registry together. Re-chunking these
+                  // creates an initialization cycle through createSsrRpc. Client routes stay split.
+                  name: "start-ssr",
+                  test: /[/\\]\.nitro[/\\]vite[/\\]services[/\\]ssr[/\\]/,
+                },
+              ],
+            },
+          },
+        },
+      }),
     ],
   };
 });

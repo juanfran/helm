@@ -39,6 +39,10 @@ The four workspace pages retain the 900/280 workspace ceiling. Their automatical
 modules count toward each direct navigation; only the dashboard route may automatically load the
 dashboard module. Search/view/detail routes keep their prior ceilings under their new paths.
 
+Issue [#26](https://github.com/juanfran/helm/issues/26) adds a persistent project layout. Every project
+navigation includes the shared parent's loader/component/error closures, deduplicated with the leaf
+and client shell. Onboarding does not load this layout. All byte limits remain unchanged.
+
 The route split increments at the original baseline (using the former URLs) were:
 
 | Lazy route entry                 | Raw bytes | Gzip bytes | Applied increment budget |
@@ -75,16 +79,17 @@ The measurements are defined as follows:
 The checker also requires separate dynamic manifest entries for each route property below. This makes a
 route regression fail even when minification happens to keep its combined chunk below the byte limit.
 
-| Route                       | Required split entries             |
-| --------------------------- | ---------------------------------- |
-| `/`                         | loader, component, error component |
-| `/$projectId/tasks`         | loader, component, error component |
-| `/$projectId/dashboard`     | loader, component, error component |
-| `/$projectId/activity`      | loader, component, error component |
-| `/$projectId/settings`      | loader, component, error component |
-| `/$projectId/search`        | loader, component, error component |
-| `/$projectId/views/$viewId` | loader, component, error component |
-| `/$projectId/tasks/$taskId` | loader, component, error component |
+| Route                         | Required split entries             |
+| ----------------------------- | ---------------------------------- |
+| `/`                           | loader, component, error component |
+| `/$projectId` (shared parent) | loader, component, error component |
+| `/$projectId/tasks`           | loader, component, error component |
+| `/$projectId/dashboard`       | loader, component, error component |
+| `/$projectId/activity`        | loader, component, error component |
+| `/$projectId/settings`        | loader, component, error component |
+| `/$projectId/search`          | loader, component, error component |
+| `/$projectId/views/$viewId`   | loader, component, error component |
+| `/$projectId/tasks/$taskId`   | loader, component, error component |
 
 `CLIENT_NAVIGATION_CRITICAL_SOURCES` in `scripts/client-bundle-budget.mjs` is the source-based contract
 for dynamic modules requested automatically while a route renders. Each configured source must resolve

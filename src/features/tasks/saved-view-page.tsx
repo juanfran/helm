@@ -5,7 +5,6 @@ import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import * as stylex from "@stylexjs/stylex";
 import { Archive, LayoutGrid, List } from "lucide-react";
 
-import { AppHeader, ProjectNavigation } from "../../components/app-header";
 import { ActionButton as Button } from "../../components/ui/action-button";
 import type { AppState } from "../../domain/projects";
 import { importantProjectEventQueryKey } from "../activity/important-project-event-query";
@@ -13,10 +12,9 @@ import { subscribeToProjectEvents } from "../activity/project-event-subscription
 import { DeferredTaskRouteResults } from "./deferred-task-route-results";
 import { getTaskSearchCollection, taskSearchPageQueryOptions } from "./task-search-collection";
 import { emptyTaskSearchParams } from "./task-search-route-params";
-import { TaskRouteUtilities } from "./task-route-utilities";
-import { TaskRoutePageToolsLauncher } from "./task-route-page-tools-launcher";
 import { archiveHumanSavedView } from "../../server/task-query-functions";
 import { tokens } from "../../styles/tokens.stylex";
+import { useProjectShellConnection } from "../projects/project-shell-context";
 
 const routeApi = getRouteApi("/$projectId/views/$viewId");
 
@@ -26,7 +24,7 @@ function activeProjectFromState(state: AppState) {
 }
 
 export function SavedViewPage() {
-  const { state, projects, view, input, eventCursor } = routeApi.useLoaderData();
+  const { state, view, input, eventCursor } = routeApi.useLoaderData();
   const router = useRouter();
   const navigate = routeApi.useNavigate();
   const queryClient = useQueryClient();
@@ -40,6 +38,7 @@ export function SavedViewPage() {
   const [archiving, setArchiving] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [liveStatus, setLiveStatus] = useState<"connecting" | "live" | "retrying">("connecting");
+  useProjectShellConnection(liveStatus);
 
   useEffect(
     () =>
@@ -113,38 +112,6 @@ export function SavedViewPage() {
 
   return (
     <main {...stylex.props(styles.page)}>
-      <AppHeader
-        projectName={project.name}
-        navigation={<ProjectNavigation projectId={project.id} current="search" />}
-        projectControl={
-          <TaskRoutePageToolsLauncher
-            projects={projects}
-            activeProject={project}
-            activeProjectVersion={state.activeProjectVersion}
-            theme={state.theme}
-            tasks={items.map(({ task }) => task)}
-          />
-        }
-        utilities={
-          <>
-            <span aria-live="polite" {...stylex.props(styles.liveStatus)}>
-              {liveStatus === "live"
-                ? "Live"
-                : liveStatus === "retrying"
-                  ? "Reconnecting"
-                  : "Connecting"}
-            </span>
-            <TaskRouteUtilities
-              projects={projects}
-              activeProject={project}
-              activeProjectVersion={state.activeProjectVersion}
-              theme={state.theme}
-              tasks={items.map(({ task }) => task)}
-            />
-          </>
-        }
-      />
-
       <section {...stylex.props(styles.hero)}>
         <div>
           <p {...stylex.props(styles.eyebrow)}>Saved view #{view.sequence}</p>
@@ -215,10 +182,6 @@ const styles = stylex.create({
     minHeight: "100vh",
     padding: 0,
     width: "100%",
-  },
-  liveStatus: {
-    color: tokens.foregroundMuted,
-    fontSize: 12,
   },
   hero: {
     paddingInline: tokens.space5,

@@ -17,6 +17,20 @@ function getRouter() {
 }
 
 describe("project-scoped file routes", () => {
+  it("keeps the same project layout around all project page routes", () => {
+    const router = getRouter();
+    for (const id of [
+      "/$projectId/tasks/",
+      "/$projectId/tasks/$taskId",
+      "/$projectId/dashboard",
+      "/$projectId/activity",
+      "/$projectId/settings",
+      "/$projectId/search",
+      "/$projectId/views/$viewId",
+    ] as const) {
+      expect(router.routesById[id].parentRoute.id).toBe("/$projectId");
+    }
+  });
   it("builds concrete workspace and task URLs without identity query parameters", () => {
     const router = getRouter();
     for (const to of [

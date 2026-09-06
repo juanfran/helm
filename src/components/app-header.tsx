@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import * as stylex from "@stylexjs/stylex";
 import { ShipWheel } from "lucide-react";
 import { tokens } from "../styles/tokens.stylex";
-import { emptyTaskSearchParams } from "../features/tasks/task-search-params";
+import { emptyTaskSearchParams } from "../features/tasks/task-search-route-params";
 import type { WorkspaceView } from "../features/projects/workspace-search";
 
 const workspacePaths = {
@@ -51,7 +51,7 @@ export function AppHeader({
   projectControl?: ReactNode;
 }) {
   return (
-    <header {...stylex.props(styles.header)}>
+    <header aria-label="Project header" {...stylex.props(styles.header)}>
       <div {...stylex.props(styles.brand)}>
         <span {...stylex.props(styles.mark)} aria-hidden="true">
           <ShipWheel size={16} />

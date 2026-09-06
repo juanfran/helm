@@ -12,6 +12,11 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { chromium, expect as playwrightExpect } from "@playwright/test";
 
 import { HELM_PROJECT_ROOT } from "./environment.mjs";
+import {
+  verifyStableProjectHeader,
+  verifyTaskChrome,
+  verifyPolicyAlignment,
+} from "./ux-navigation-check.mjs";
 
 const timeout = 20_000;
 const expect = playwrightExpect.configure({ timeout });
@@ -495,6 +500,8 @@ try {
         // oxlint-disable-next-line no-await-in-loop
         await page.setViewportSize({ width, height: 900 });
         // oxlint-disable-next-line no-await-in-loop
+        await verifyPolicyAlignment(page);
+        // oxlint-disable-next-line no-await-in-loop
         const boxes = await page
           .locator('input[type="date"]')
           .evaluateAll((elements) =>
@@ -551,6 +558,8 @@ try {
   assert.deepEqual(browserErrors, [], "Unexpected browser console or hydration errors.");
 
   await step("project paths, clean search URLs, and direct workspace navigation", async () => {
+    await verifyStableProjectHeader(page);
+    await verifyTaskChrome(page);
     for (const [label, path] of [
       ["Settings", "settings"],
       ["Activity", "activity"],
@@ -624,6 +633,29 @@ try {
       releaseRequests();
       await expect(probe.getByRole("heading", { name: "Search tasks" })).toBeVisible({ timeout });
       await probe.unrouteAll({ behavior: "wait" });
+      const header = probe.getByRole("banner", { name: "Project header" });
+      const originalHeader = await header.elementHandle();
+      const holdNavigation = new Promise((resolve) => {
+        releaseRequests = resolve;
+      });
+      await probe.route("**/_serverFn/**", async (route) => {
+        await holdNavigation;
+        await route.continue();
+      });
+      await header.getByRole("link", { name: "Tasks", exact: true }).click();
+      await expect(
+        probe.getByText("Loading this view…", { exact: true }).filter({ visible: true }).first(),
+      ).toBeVisible({ timeout });
+      assert(
+        await originalHeader.evaluate((element) => element.isConnected),
+        "A slow page transition remounted the project header.",
+      );
+      await expect(header).toBeVisible();
+      releaseRequests();
+      await expect(probe.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
+      await probe.unrouteAll({ behavior: "wait" });
+      await header.getByRole("link", { name: "Search", exact: true }).click();
+      await expect(probe.getByRole("heading", { name: "Search tasks" })).toBeVisible();
       assert.deepEqual(consoleErrors, [], "Slow route loading produced a browser error.");
       await probe.route("**/_serverFn/**", (route) =>
         route.fulfill({
@@ -633,9 +665,10 @@ try {
         }),
       );
       await probe.reload();
-      await expect(probe.getByRole("heading", { name: "Search could not be loaded" })).toBeVisible({
-        timeout,
-      });
+      // All RPCs fail, including the shared project loader, so its boundary handles recovery.
+      await expect(
+        probe.getByRole("heading", { name: "Workspace could not be loaded" }),
+      ).toBeVisible({ timeout });
       await probe.unrouteAll({ behavior: "wait" });
       await probe.getByRole("button", { name: "Try again", exact: true }).click();
       await expect(probe.getByRole("heading", { name: "Search tasks" })).toBeVisible({ timeout });

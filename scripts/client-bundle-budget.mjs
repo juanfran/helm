@@ -339,8 +339,22 @@ export function inspectClientBundle(projectRoot = HELM_PROJECT_ROOT, options = {
 
   const routeEntries = new Map();
   const routeEntryOwners = new Map();
+  const projectLayoutEntries = new Map();
+  for (const property of routeSplitProperties) {
+    const matches = findRequiredEntry(entries, "src/routes/$projectId.tsx", property);
+    addRequiredEntryViolation(
+      violations,
+      `project layout ${property}`,
+      matches,
+      shellFiles,
+      dynamicEntryKeys,
+    );
+    if (matches.length > 0) projectLayoutEntries.set(`layout:${property}`, matches[0][0]);
+  }
   for (const [route, routeSource] of Object.entries(routeSources)) {
-    const propertyEntries = new Map();
+    // Every project navigation loads its parent layout as well as the leaf.
+    // Count the complete deduplicated closure so splitting the header cannot hide its cost.
+    const propertyEntries = new Map(route.startsWith("/$projectId/") ? projectLayoutEntries : []);
     for (const property of routeSplitProperties) {
       const label = `route ${route} ${property}`;
       const matches = findRequiredEntry(entries, routeSource, property);

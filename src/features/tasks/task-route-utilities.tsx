@@ -1,40 +1,53 @@
-import { useState } from "react";
+import { useRouter } from "@tanstack/react-router";
 import * as stylex from "@stylexjs/stylex";
+import { Bell } from "lucide-react";
 import { createRetryableLazyModuleLoader } from "../../components/retryable-lazy-module";
 import { useExplicitLazyModule } from "../../components/use-explicit-lazy-module";
 import { tokens } from "../../styles/tokens.stylex";
+import { ThemeControl } from "../projects/theme-control";
 import type { TaskRoutePageToolsProps } from "./task-route-page-tools-launcher";
 
 const utilitiesModule = createRetryableLazyModuleLoader(() =>
-  import("./task-route-page-tools").then(({ TaskRouteHeaderUtilities }) => ({
-    default: TaskRouteHeaderUtilities,
+  import("./task-route-page-tools").then(({ RouteNotificationCenter }) => ({
+    default: RouteNotificationCenter,
   })),
 );
 
 export function TaskRouteUtilities(props: TaskRoutePageToolsProps) {
   const module = useExplicitLazyModule(utilitiesModule);
-  const [initialPanel, setInitialPanel] = useState<"notifications" | "appearance">("appearance");
-  if (module.state.status === "ready")
-    return <module.state.module.default {...props} initialPanel={initialPanel} />;
+  const router = useRouter();
   return (
     <>
-      {(["notifications", "appearance"] as const).map((panel) => (
+      {module.state.status === "ready" ? (
+        <module.state.module.default
+          projectId={props.activeProject.id}
+          tasks={props.tasks}
+          defaultOpen
+        />
+      ) : (
         <button
-          key={panel}
           type="button"
-          disabled={module.state.status === "loading"}
+          aria-label="Notifications"
+          aria-disabled={module.state.status === "loading"}
           onFocus={module.preload}
           onPointerEnter={module.preload}
           onClick={() => {
-            setInitialPanel(panel);
             if (module.state.status === "error") module.retry();
-            else module.activate();
+            else if (module.state.status === "idle") module.activate();
           }}
           {...stylex.props(styles.button)}
         >
-          {panel === "notifications" ? "Notifications" : "Appearance"}
+          <Bell size={17} aria-hidden="true" />
         </button>
-      ))}
+      )}
+      <ThemeControl
+        theme={props.theme}
+        onChange={async (nextTheme) => {
+          const { changeProjectTheme } = await import("../projects/change-project-theme");
+          await changeProjectTheme(props.theme, nextTheme);
+          await router.invalidate({ sync: true });
+        }}
+      />
       {module.state.status === "error" ? (
         <span role="alert">Could not load controls. Try again.</span>
       ) : null}
@@ -47,8 +60,11 @@ const styles = stylex.create({
     color: tokens.foreground,
     border: `1px solid ${tokens.border}`,
     borderRadius: tokens.radius2,
-    minHeight: 36,
-    paddingInline: tokens.space3,
+    height: 36,
+    width: 36,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
     fontSize: 13,
     cursor: "pointer",
     ":focus-visible": { outline: `2px solid ${tokens.accent}`, outlineOffset: 2 },

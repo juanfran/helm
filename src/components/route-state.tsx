@@ -1,7 +1,7 @@
 import * as stylex from "@stylexjs/stylex";
 
 import { tokens } from "../styles/tokens.stylex";
-import { Button } from "./ui/button";
+import { ActionButton as Button } from "./ui/action-button";
 
 export type RoutePendingStateProps = {
   label?: string;

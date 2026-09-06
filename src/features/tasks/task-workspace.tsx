@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { AppHeader, ProjectNavigation } from "../../components/app-header";
+import { useProjectShellConnection } from "../projects/project-shell-context";
 import { ProjectMenu } from "../../components/project-menu";
 import { Link } from "@tanstack/react-router";
 import type { WorkspaceView } from "../projects/workspace-search";
@@ -235,6 +236,7 @@ export function TaskWorkspace({
   onChangeTheme,
   onChangeProjectReviewMode,
 }: TaskWorkspaceProps) {
+  const hasProjectShell = useProjectShellConnection(liveStatus);
   const orderedTasks = useMemo(
     () => tasks.filter((task) => !task.archivedAt).toSorted(compareTaskOrder),
     [tasks],
@@ -350,129 +352,139 @@ export function TaskWorkspace({
 
   return (
     <main {...stylex.props(styles.page)}>
-      <AppHeader
-        projectName={project.name}
-        projectControl={
-          projectSwitcher ? (
-            <ProjectMenu name={project.name} preload={projectSwitcher.preload}>
-              {projectSwitcher.surface}
-            </ProjectMenu>
-          ) : undefined
-        }
-        navigation={
-          navigation ? (
-            <ProjectNavigation projectId={project.id} current={workspaceView} />
-          ) : (
-            <nav aria-label="Workspace views" {...stylex.props(styles.viewNavigation)}>
-              {(["dashboard", "tasks", "activity", "settings"] as const)
-                .filter((view) => view !== "settings" || customizationControl || portabilityControl)
-                .map((view) => (
-                  <button
-                    key={view}
-                    type="button"
-                    aria-pressed={workspaceView === view}
-                    onFocus={
-                      view === "dashboard"
-                        ? dashboardModule.preload
-                        : view === "activity"
-                          ? activityModule.preload
-                          : undefined
-                    }
-                    onPointerEnter={
-                      view === "dashboard"
-                        ? dashboardModule.preload
-                        : view === "activity"
-                          ? activityModule.preload
-                          : undefined
-                    }
-                    onClick={() => setWorkspaceView(view)}
-                    {...stylex.props(
-                      styles.viewButton,
-                      workspaceView === view && styles.viewButtonActive,
-                    )}
-                  >
-                    {view.charAt(0).toUpperCase() + view.slice(1)}
-                  </button>
-                ))}
-              {renderSearchLink?.(stylex.props(styles.viewButton, styles.viewLink))}
-            </nav>
-          )
-        }
-        utilities={
-          <div {...stylex.props(styles.headerUtilities)}>
-            <span
-              aria-live="polite"
-              {...stylex.props(styles.liveStatus, liveStatus === "live" && styles.liveStatusReady)}
-            >
-              <span {...stylex.props(styles.liveDot)} aria-hidden="true" />
-              {liveStatus === "live"
-                ? "Live"
-                : liveStatus === "retrying"
-                  ? "Reconnecting"
-                  : "Connecting"}
-            </span>
-            {notificationsModule.state.status !== "ready" ? (
-              <button
-                type="button"
-                aria-controls="workspace-notifications"
-                aria-disabled={notificationsModule.state.status === "loading"}
-                aria-expanded={false}
-                aria-label={notificationIntentLabel}
-                onFocus={notificationsModule.preload}
-                onPointerEnter={notificationsModule.preload}
-                onClick={() => {
-                  if (notificationsModule.state.status === "idle") notificationsModule.activate();
-                  if (notificationsModule.state.status === "error") notificationsModule.retry();
-                }}
-                {...stylex.props(styles.utilityButton)}
+      {!hasProjectShell ? (
+        <AppHeader
+          projectName={project.name}
+          projectControl={
+            projectSwitcher ? (
+              <ProjectMenu name={project.name} preload={projectSwitcher.preload}>
+                {projectSwitcher.surface}
+              </ProjectMenu>
+            ) : undefined
+          }
+          navigation={
+            navigation ? (
+              <ProjectNavigation projectId={project.id} current={workspaceView} />
+            ) : (
+              <nav aria-label="Workspace views" {...stylex.props(styles.viewNavigation)}>
+                {(["dashboard", "tasks", "activity", "settings"] as const)
+                  .filter(
+                    (view) => view !== "settings" || customizationControl || portabilityControl,
+                  )
+                  .map((view) => (
+                    <button
+                      key={view}
+                      type="button"
+                      aria-pressed={workspaceView === view}
+                      onFocus={
+                        view === "dashboard"
+                          ? dashboardModule.preload
+                          : view === "activity"
+                            ? activityModule.preload
+                            : undefined
+                      }
+                      onPointerEnter={
+                        view === "dashboard"
+                          ? dashboardModule.preload
+                          : view === "activity"
+                            ? activityModule.preload
+                            : undefined
+                      }
+                      onClick={() => setWorkspaceView(view)}
+                      {...stylex.props(
+                        styles.viewButton,
+                        workspaceView === view && styles.viewButtonActive,
+                      )}
+                    >
+                      {view.charAt(0).toUpperCase() + view.slice(1)}
+                    </button>
+                  ))}
+                {renderSearchLink?.(stylex.props(styles.viewButton, styles.viewLink))}
+              </nav>
+            )
+          }
+          utilities={
+            <div {...stylex.props(styles.headerUtilities)}>
+              <span
+                aria-live="polite"
+                {...stylex.props(
+                  styles.liveStatus,
+                  liveStatus === "live" && styles.liveStatusReady,
+                )}
               >
-                Notifications
-              </button>
-            ) : null}
-            <div id="workspace-notifications">
-              {notificationsModule.state.status === "ready" ? (
-                <notificationsModule.state.module.default
-                  defaultOpen
-                  projectId={project.id}
-                  events={importantEvents}
-                  tasks={orderedTasks}
-                  onSelectTask={selectTask}
-                />
-              ) : notificationsModule.state.status === "error" ? (
-                <LazyWorkspaceFailure surface="notifications" onRetry={notificationsModule.retry} />
-              ) : notificationsModule.state.status === "loading" ? (
-                <LazyWorkspaceFallback surface="notifications" />
+                <span {...stylex.props(styles.liveDot)} aria-hidden="true" />
+                {liveStatus === "live"
+                  ? "Live"
+                  : liveStatus === "retrying"
+                    ? "Reconnecting"
+                    : "Connecting"}
+              </span>
+              {notificationsModule.state.status !== "ready" ? (
+                <button
+                  type="button"
+                  aria-controls="workspace-notifications"
+                  aria-disabled={notificationsModule.state.status === "loading"}
+                  aria-expanded={false}
+                  aria-label={notificationIntentLabel}
+                  onFocus={notificationsModule.preload}
+                  onPointerEnter={notificationsModule.preload}
+                  onClick={() => {
+                    if (notificationsModule.state.status === "idle") notificationsModule.activate();
+                    if (notificationsModule.state.status === "error") notificationsModule.retry();
+                  }}
+                  {...stylex.props(styles.utilityButton)}
+                >
+                  Notifications
+                </button>
               ) : null}
-            </div>
-            {appearanceModule.state.status !== "ready" ? (
-              <button
-                type="button"
-                aria-controls="workspace-appearance"
-                aria-disabled={appearanceModule.state.status === "loading"}
-                aria-expanded={false}
-                onFocus={appearanceModule.preload}
-                onPointerEnter={appearanceModule.preload}
-                onClick={() => {
-                  if (appearanceModule.state.status === "idle") appearanceModule.activate();
-                  if (appearanceModule.state.status === "error") appearanceModule.retry();
-                }}
-                {...stylex.props(styles.utilityButton)}
-              >
-                Appearance
-              </button>
-            ) : null}
-            <div id="workspace-appearance">
-              {appearanceModule.state.status === "ready" ? (
-                <appearanceModule.state.module.default theme={theme} onChange={onChangeTheme} />
-              ) : appearanceModule.state.status === "error" ? (
-                <LazyWorkspaceFailure surface="appearance" onRetry={appearanceModule.retry} />
-              ) : appearanceModule.state.status === "loading" ? (
-                <LazyWorkspaceFallback surface="appearance" />
+              <div id="workspace-notifications">
+                {notificationsModule.state.status === "ready" ? (
+                  <notificationsModule.state.module.default
+                    defaultOpen
+                    projectId={project.id}
+                    events={importantEvents}
+                    tasks={orderedTasks}
+                    onSelectTask={selectTask}
+                  />
+                ) : notificationsModule.state.status === "error" ? (
+                  <LazyWorkspaceFailure
+                    surface="notifications"
+                    onRetry={notificationsModule.retry}
+                  />
+                ) : notificationsModule.state.status === "loading" ? (
+                  <LazyWorkspaceFallback surface="notifications" />
+                ) : null}
+              </div>
+              {appearanceModule.state.status !== "ready" ? (
+                <button
+                  type="button"
+                  aria-controls="workspace-appearance"
+                  aria-disabled={appearanceModule.state.status === "loading"}
+                  aria-expanded={false}
+                  onFocus={appearanceModule.preload}
+                  onPointerEnter={appearanceModule.preload}
+                  onClick={() => {
+                    if (appearanceModule.state.status === "idle") appearanceModule.activate();
+                    if (appearanceModule.state.status === "error") appearanceModule.retry();
+                  }}
+                  {...stylex.props(styles.utilityButton)}
+                >
+                  Appearance
+                </button>
               ) : null}
+              <div id="workspace-appearance">
+                {appearanceModule.state.status === "ready" ? (
+                  <appearanceModule.state.module.default theme={theme} onChange={onChangeTheme} />
+                ) : appearanceModule.state.status === "error" ? (
+                  <LazyWorkspaceFailure surface="appearance" onRetry={appearanceModule.retry} />
+                ) : appearanceModule.state.status === "loading" ? (
+                  <LazyWorkspaceFallback surface="appearance" />
+                ) : null}
+              </div>
             </div>
-          </div>
-        }
-      />
+          }
+        />
+      ) : null}
 
       <div
         {...stylex.props(styles.workspace, workspaceView !== "tasks" && styles.workspaceOverview)}
@@ -491,7 +503,7 @@ export function TaskWorkspace({
                 {navigation.renderFilterLink(
                   undefined,
                   {
-                    ...stylex.props(styles.filterButton),
+                    ...stylex.props(styles.filterButton, !navigation.filter && styles.filterActive),
                     "aria-current": !navigation.filter ? "true" : undefined,
                   },
                   "All",
@@ -502,7 +514,10 @@ export function TaskWorkspace({
                       {navigation.renderFilterLink(
                         filter,
                         {
-                          ...stylex.props(styles.filterButton),
+                          ...stylex.props(
+                            styles.filterButton,
+                            navigation.filter === filter && styles.filterActive,
+                          ),
                           "aria-current": navigation.filter === filter ? "true" : undefined,
                         },
                         `${filter === "in_progress" ? counts.active : counts[filter]} ${filter === "in_progress" ? "active" : filter}`,
@@ -1169,7 +1184,7 @@ const styles = stylex.create({
     gap: tokens.space4,
     marginBlock: tokens.space4,
   },
-  capture: { display: "flex", gap: tokens.space2 },
+  capture: { display: "flex", gap: tokens.space2, marginBlockEnd: tokens.space3 },
   input: {
     backgroundColor: tokens.background,
     borderColor: tokens.border,
@@ -1202,6 +1217,8 @@ const styles = stylex.create({
     gridTemplateColumns: "minmax(0, 1fr)",
     minHeight: 58,
     paddingInlineStart: tokens.space2,
+    ":hover": { backgroundColor: tokens.surfaceMuted },
+    ":focus-within": { backgroundColor: tokens.surfaceMuted },
   },
   taskRowBulkMode: { gridTemplateColumns: "18px minmax(0, 1fr)" },
   taskRowBulkSelected: { backgroundColor: tokens.surfaceMuted, borderColor: tokens.border },
@@ -1221,7 +1238,6 @@ const styles = stylex.create({
     paddingInline: tokens.space1,
     textAlign: "start",
     width: "100%",
-    ":hover": { backgroundColor: tokens.surfaceMuted },
     ":focus-visible": {
       outlineColor: tokens.accent,
       outlineOffset: -2,
@@ -1333,7 +1349,12 @@ const styles = stylex.create({
     textDecoration: "none",
     ":hover": { backgroundColor: tokens.surface },
     ":focus-visible": { outline: `2px solid ${tokens.accent}` },
-    "[aria-current=true]": { backgroundColor: tokens.surface, color: tokens.accent },
+  },
+  filterActive: {
+    backgroundColor: tokens.accent,
+    color: tokens.background,
+    fontWeight: 700,
+    ":hover": { backgroundColor: tokens.accent },
   },
   overviewDetail: { backgroundColor: tokens.background, padding: 0 },
   detailStack: { marginInline: "auto", maxWidth: 960, width: "100%" },

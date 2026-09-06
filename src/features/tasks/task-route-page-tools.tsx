@@ -1,19 +1,18 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useLiveQuery } from "@tanstack/react-db";
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import * as stylex from "@stylexjs/stylex";
+import { Bell } from "lucide-react";
 
 import { NotificationCenter } from "../activity/notification-center";
 import { importantProjectEventQueryKey } from "../activity/important-project-event-query";
 import { executeProjectChange } from "../projects/project-navigation";
 import { ProjectSwitcher } from "../projects/project-switcher";
-import { ThemeControl } from "../projects/theme-control";
-import {
-  changeTheme,
-  createInitialProject,
-  selectHumanProject,
-} from "../../server/project-functions";
+import { createInitialProject, selectHumanProject } from "../../server/project-functions";
 import { readImportantProjectEvents } from "../../server/important-project-event-functions";
-import { applyThemeOptimistically } from "../../styles/theme";
+import { readTasks } from "../../server/task-functions";
+import { projectEventTaskId } from "../activity/project-event-presentation";
+import { getImportantProjectEventCollection } from "../activity/important-project-event-collection";
 import { tokens } from "../../styles/tokens.stylex";
 import type { TaskRoutePageToolsProps } from "./task-route-page-tools-launcher";
 
@@ -48,40 +47,7 @@ export function TaskRoutePageTools({
   );
 }
 
-export function TaskRouteHeaderUtilities({
-  activeProject,
-  theme,
-  tasks,
-  initialPanel,
-}: TaskRoutePageToolsProps & { initialPanel: "notifications" | "appearance" }) {
-  const router = useRouter();
-  async function persistTheme(nextTheme: TaskRoutePageToolsProps["theme"]) {
-    await applyThemeOptimistically({
-      previousTheme: theme,
-      nextTheme,
-      persist: async () => {
-        const response = await changeTheme({
-          data: { theme: nextTheme, idempotencyKey: crypto.randomUUID() },
-        });
-        if (!response.ok) throw new Error(response.error.message);
-      },
-    });
-    await router.invalidate({ sync: true });
-  }
-
-  return (
-    <>
-      <RouteNotificationCenter
-        projectId={activeProject.id}
-        tasks={tasks}
-        defaultOpen={initialPanel === "notifications"}
-      />
-      <ThemeControl theme={theme} onChange={persistTheme} />
-    </>
-  );
-}
-
-function RouteNotificationCenter({
+export function RouteNotificationCenter({
   projectId,
   tasks,
   defaultOpen,
@@ -90,13 +56,35 @@ function RouteNotificationCenter({
   readonly defaultOpen: boolean;
 }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const collection = getImportantProjectEventCollection(queryClient, projectId);
+  const liveEvents = useLiveQuery({ query: (query) => query.from({ event: collection }) });
   const events = useQuery({
     queryKey: importantProjectEventQueryKey(projectId),
     queryFn: async () => (await readImportantProjectEvents({ data: { projectId } })).events,
   });
+  const taskIds = [
+    ...new Set(
+      (liveEvents.data ?? []).map(projectEventTaskId).filter((id): id is string => id !== null),
+    ),
+  ].toSorted();
+  const taskNames = useQuery({
+    queryKey: ["notification-task-names", projectId, taskIds],
+    queryFn: () => readTasks({ data: { projectId, taskIds, includeArchived: true } }),
+    enabled: taskIds.length > 0,
+  });
 
-  if (events.isPending) {
-    return <output {...stylex.props(styles.notificationStatus)}>Loading notifications…</output>;
+  if (!liveEvents.isReady && !events.isError) {
+    return (
+      <button
+        type="button"
+        aria-label="Loading notifications"
+        disabled
+        {...stylex.props(styles.notificationTrigger)}
+      >
+        <Bell size={17} aria-hidden="true" />
+      </button>
+    );
   }
   if (events.isError) {
     return (
@@ -115,8 +103,8 @@ function RouteNotificationCenter({
   return (
     <NotificationCenter
       projectId={projectId}
-      events={events.data}
-      tasks={tasks}
+      events={liveEvents.data ?? []}
+      tasks={taskNames.data ?? tasks}
       defaultOpen={defaultOpen}
       onSelectTask={(taskId) => {
         void navigate({ to: "/$projectId/tasks/$taskId", params: { projectId, taskId } });
@@ -126,6 +114,17 @@ function RouteNotificationCenter({
 }
 
 const styles = stylex.create({
+  notificationTrigger: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    height: 36,
+    width: 36,
+    backgroundColor: tokens.surface,
+    border: `1px solid ${tokens.border}`,
+    borderRadius: tokens.radius2,
+    color: tokens.foregroundMuted,
+  },
   root: {
     alignItems: "start",
     display: "grid",
@@ -133,20 +132,6 @@ const styles = stylex.create({
     gridTemplateColumns: "minmax(0, 620px) auto",
     "@media (max-width: 820px)": { gridTemplateColumns: "1fr" },
   },
-  utilities: {
-    alignItems: "center",
-    display: "flex",
-    gap: tokens.space3,
-    gridColumn: 2,
-    gridRow: 1,
-    justifySelf: "end",
-    "@media (max-width: 820px)": {
-      gridColumn: 1,
-      gridRow: 2,
-      justifySelf: "start",
-    },
-  },
-  notificationStatus: { color: tokens.foregroundMuted, fontSize: 12 },
   notificationFailure: {
     alignItems: "center",
     color: tokens.danger,

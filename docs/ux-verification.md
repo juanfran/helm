@@ -10,6 +10,16 @@ saved views are project-scoped too; only actual search/filter/pagination values 
 There are no legacy compatibility redirects. Route tests cover default stripping and path identity;
 the browser smoke covers direct visits, refresh/back, new tabs, and missing/old URLs.
 
+Follow-up [#26](https://github.com/juanfran/helm/issues/26) gives project routes a persistent parent
+layout. Navigation replaces only the page body: the header, appearance selector, project menu, and
+loaded notification control retain their identity. Page initialization does not reset the last known
+connection status; actual connection errors still show Reconnecting. Notifications subscribe to the
+shared live event collection, including events received while the header stays mounted.
+
+Queue filters have explicit selected styling, Bulk actions is separated from quick capture, and hover
+paints the complete rounded task row. Appearance and notification controls share a 36-pixel height;
+the review-policy label and explanation align in columns on desktop and stack on narrow screens.
+
 ## Interaction contract
 
 | Original finding                                 | Implemented behavior                                                                                                                           |
@@ -49,7 +59,12 @@ while a human has unsaved edits, completion/review/reopening, search and saved v
 list/detail navigation, menu dismissal/focus restoration, and route failure/retry.
 
 It also checks navigation geometry and date-field overlap/horizontal overflow at 390, 800, 1024,
-1280, and 1440 pixels. Unit/application coverage includes draft recovery, storage failure fallback,
+1280, and 1440 pixels. The shared browser checks in `scripts/ux-navigation-check.mjs` assert header
+and appearance DOM identity across project routes, capture/action spacing, selected-filter contrast,
+whole-row hover with preserved corners, header-control alignment, and responsive review-policy
+alignment. A deliberately delayed in-app navigation also checks that the header stays mounted and
+visible while the destination loads. Unit coverage checks the shared project parent, connection-status
+reporting, and notification updates without remounting. Unit/application coverage includes draft recovery, storage failure fallback,
 conflict reconciliation, partial-draft lifecycle restrictions, transaction rollback, stale versions,
 idempotent retries, checklist preservation, keyboard saving, and dialog errors.
 
@@ -60,5 +75,9 @@ certification. The user's development database is never used for test mutations.
 The existing stack and existing loading budgets remain in place. The new direct-task route has
 its own cumulative budget, including its automatically loaded detail form; see
 [Client bundle budget](client-bundle-budget.md). No release is required to test these changes locally.
+
+Production verification exposed a Nitro re-chunking cycle between Start's SSR route registry and RPC
+runtime. The server build keeps that SSR service together; browser routes remain code-split. Both
+production smokes exercise the resulting server, not just Vite's development server.
 
 For everyday usage, see [Your first human–agent workflow](getting-started.md).

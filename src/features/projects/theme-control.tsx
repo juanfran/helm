@@ -1,7 +1,7 @@
 import { useState } from "react";
 import * as stylex from "@stylexjs/stylex";
 
-import { themeSchema, type Theme } from "../../domain/projects";
+import type { Theme } from "../../domain/projects";
 import { tokens } from "../../styles/tokens.stylex";
 
 export function ThemeControl({
@@ -49,7 +49,12 @@ function ThemeControlState({
           aria-label="Appearance"
           value={value}
           disabled={pending}
-          onChange={(event) => void changeTheme(themeSchema.parse(event.target.value))}
+          onChange={(event) => {
+            const nextTheme = event.target.value;
+            if (nextTheme === "system" || nextTheme === "light" || nextTheme === "dark") {
+              void changeTheme(nextTheme);
+            }
+          }}
           {...stylex.props(styles.select)}
         >
           <option value="system">System</option>
@@ -71,9 +76,9 @@ function ThemeControlState({
 
 const styles = stylex.create({
   root: {
-    alignItems: "end",
-    display: "grid",
-    gap: tokens.space1,
+    display: "flex",
+    alignItems: "center",
+    position: "relative",
   },
   control: {
     alignItems: "center",
@@ -87,7 +92,9 @@ const styles = stylex.create({
     borderColor: tokens.border,
     borderRadius: 6,
     color: tokens.foreground,
-    minHeight: 32,
+    height: 36,
+    font: "inherit",
+    paddingInline: tokens.space2,
     ":focus-visible": {
       outlineColor: tokens.accent,
       outlineOffset: 2,
@@ -98,10 +105,19 @@ const styles = stylex.create({
   status: {
     color: tokens.foregroundMuted,
     fontSize: 10,
-    minHeight: 12,
+    position: "absolute",
+    top: "100%",
+    right: 0,
+    whiteSpace: "nowrap",
     textAlign: "end",
   },
   error: {
+    position: "absolute",
+    top: "100%",
+    right: 0,
+    backgroundColor: tokens.surface,
+    padding: tokens.space2,
+    zIndex: 1,
     color: tokens.danger,
     fontSize: 11,
     maxWidth: 240,

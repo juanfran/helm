@@ -4,17 +4,15 @@ import { useLiveSuspenseQuery } from "@tanstack/react-db";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import * as stylex from "@stylexjs/stylex";
 
-import { AppHeader, ProjectNavigation } from "../../components/app-header";
 import { ActionButton as Button } from "../../components/ui/action-button";
 import { importantProjectEventQueryKey } from "../activity/important-project-event-query";
 import { subscribeToProjectEvents } from "../activity/project-event-subscription";
 import { DeferredTaskRouteResults } from "./deferred-task-route-results";
 import { getTaskSearchCollection, taskSearchPageQueryOptions } from "./task-search-collection";
 import { SearchFilterControls } from "./task-route-controls";
-import { TaskRouteUtilities } from "./task-route-utilities";
-import { TaskRoutePageToolsLauncher } from "./task-route-page-tools-launcher";
 import { readSavedViews } from "../../server/task-query-functions";
 import { tokens } from "../../styles/tokens.stylex";
+import { useProjectShellConnection } from "../projects/project-shell-context";
 
 const routeApi = getRouteApi("/$projectId/search");
 const visibleFields = [
@@ -35,7 +33,7 @@ function savedViewsQueryOptions(projectId: string) {
 }
 
 export function SearchPage() {
-  const { state, project, projects, input, eventCursor } = routeApi.useLoaderData();
+  const { project, input, eventCursor } = routeApi.useLoaderData();
   const search = routeApi.useSearch();
   const router = useRouter();
   const navigate = routeApi.useNavigate();
@@ -51,6 +49,7 @@ export function SearchPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [liveStatus, setLiveStatus] = useState<"connecting" | "live" | "retrying">("connecting");
+  useProjectShellConnection(liveStatus);
 
   useEffect(
     () =>
@@ -118,38 +117,6 @@ export function SearchPage() {
 
   return (
     <main {...stylex.props(styles.page)}>
-      <AppHeader
-        projectName={project.name}
-        navigation={<ProjectNavigation projectId={project.id} current="search" />}
-        projectControl={
-          <TaskRoutePageToolsLauncher
-            projects={projects}
-            activeProject={project}
-            activeProjectVersion={state.activeProjectVersion}
-            theme={state.theme}
-            tasks={items.map(({ task }) => task)}
-          />
-        }
-        utilities={
-          <>
-            <span aria-live="polite" {...stylex.props(styles.liveStatus)}>
-              {liveStatus === "live"
-                ? "Live"
-                : liveStatus === "retrying"
-                  ? "Reconnecting"
-                  : "Connecting"}
-            </span>
-            <TaskRouteUtilities
-              projects={projects}
-              activeProject={project}
-              activeProjectVersion={state.activeProjectVersion}
-              theme={state.theme}
-              tasks={items.map(({ task }) => task)}
-            />
-          </>
-        }
-      />
-
       <section {...stylex.props(styles.hero)}>
         <h1 {...stylex.props(styles.title)}>Search tasks</h1>
       </section>
@@ -281,10 +248,6 @@ const styles = stylex.create({
     minHeight: "100vh",
     padding: 0,
     width: "100%",
-  },
-  liveStatus: {
-    color: tokens.foregroundMuted,
-    fontSize: 12,
   },
   hero: { marginBlock: tokens.space5, paddingInline: tokens.space5, maxWidth: 760 },
   title: {
