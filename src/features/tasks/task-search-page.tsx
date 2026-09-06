@@ -10,7 +10,8 @@ import { subscribeToProjectEvents } from "../activity/project-event-subscription
 import { DeferredTaskRouteResults } from "./deferred-task-route-results";
 import { getTaskSearchCollection, taskSearchPageQueryOptions } from "./task-search-collection";
 import { SearchFilterControls } from "./task-route-controls";
-import { readSavedViews } from "../../server/task-query-functions";
+import { savedViewsQueryOptions } from "../projects/workspace-state-query";
+import { DeferredSection } from "../projects/workspace-section";
 import { tokens } from "../../styles/tokens.stylex";
 import { useProjectShellConnection } from "../projects/project-shell-context";
 
@@ -25,13 +26,6 @@ const visibleFields = [
   "due_at",
 ] as const;
 
-function savedViewsQueryOptions(projectId: string) {
-  return {
-    queryKey: ["saved-views", projectId] as const,
-    queryFn: () => readSavedViews({ data: { projectId, includeArchived: false } }),
-  };
-}
-
 export function SearchPage() {
   const { project, input, eventCursor } = routeApi.useLoaderData();
   const search = routeApi.useSearch();
@@ -44,7 +38,7 @@ export function SearchPage() {
     query: (query) => query.from({ hit: collection }).orderBy(({ hit }) => hit.rank, "asc"),
   });
   const { data: page } = useSuspenseQuery(taskSearchPageQueryOptions(input));
-  const { data: savedViews } = useSuspenseQuery(savedViewsQueryOptions(projectId));
+
   const [viewName, setViewName] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -123,11 +117,18 @@ export function SearchPage() {
 
       <div {...stylex.props(styles.layout)}>
         <section {...stylex.props(styles.resultsPanel)}>
-          <SearchFilterControls
-            projectId={projectId}
-            search={search}
-            onApply={(nextSearch) => void navigate({ search: nextSearch })}
-          />
+          <DeferredSection
+            label="Search filters"
+            onRetry={() => {
+              void queryClient.resetQueries({ queryKey: ["task-tags", projectId] });
+            }}
+          >
+            <SearchFilterControls
+              projectId={projectId}
+              search={search}
+              onApply={(nextSearch) => void navigate({ search: nextSearch })}
+            />
+          </DeferredSection>
 
           <div {...stylex.props(styles.resultToolbar)}>
             <p {...stylex.props(styles.resultCount)}>
@@ -216,28 +217,40 @@ export function SearchPage() {
 
           <section {...stylex.props(styles.sideCard)}>
             <h2 {...stylex.props(styles.sideTitle)}>Saved views</h2>
-            {savedViews.length === 0 ? (
-              <p {...stylex.props(styles.cardCopy)}>No saved views yet.</p>
-            ) : (
-              <nav aria-label="Saved views" {...stylex.props(styles.viewList)}>
-                {savedViews.map((view) => (
-                  <Link
-                    key={view.id}
-                    to="/$projectId/views/$viewId"
-                    params={{ projectId, viewId: view.id }}
-                    search={{ cursor: null }}
-                    {...stylex.props(styles.viewLink)}
-                  >
-                    <span>{view.name}</span>
-                    <small>{view.definition.presentation}</small>
-                  </Link>
-                ))}
-              </nav>
-            )}
+            <DeferredSection
+              label="Saved views"
+              onRetry={() => {
+                void queryClient.resetQueries({ queryKey: ["saved-views", projectId] });
+              }}
+            >
+              <SavedViewLinks projectId={projectId} />
+            </DeferredSection>
           </section>
         </aside>
       </div>
     </main>
+  );
+}
+
+function SavedViewLinks({ projectId }: { projectId: string }) {
+  const { data: savedViews } = useSuspenseQuery(savedViewsQueryOptions(projectId));
+  return savedViews.length === 0 ? (
+    <p {...stylex.props(styles.cardCopy)}>No saved views yet.</p>
+  ) : (
+    <nav aria-label="Saved views" {...stylex.props(styles.viewList)}>
+      {savedViews.map((view) => (
+        <Link
+          key={view.id}
+          to="/$projectId/views/$viewId"
+          params={{ projectId, viewId: view.id }}
+          search={{ cursor: null }}
+          {...stylex.props(styles.viewLink)}
+        >
+          <span>{view.name}</span>
+          <small>{view.definition.presentation}</small>
+        </Link>
+      ))}
+    </nav>
   );
 }
 

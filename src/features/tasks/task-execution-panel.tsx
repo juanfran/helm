@@ -173,6 +173,9 @@ export function TaskExecutionPanel({
   const highlightedAttempt = task.reviewAttemptId
     ? taskAttempts.find((attempt) => attempt.id === task.reviewAttemptId)
     : taskAttempts.at(-1);
+  const reviewEvidenceReady = Boolean(
+    task.reviewAttemptId && highlightedAttempt?.status === "completed",
+  );
   const priorAttempts = highlightedAttempt
     ? taskAttempts.filter((attempt) => attempt.id !== highlightedAttempt.id)
     : taskAttempts;
@@ -189,7 +192,7 @@ export function TaskExecutionPanel({
 
   async function approve(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!task.reviewAttemptId || !approvalSummary.trim()) return;
+    if (!task.reviewAttemptId || !reviewEvidenceReady || !approvalSummary.trim()) return;
     setPendingAction("approve");
     setError(null);
     try {
@@ -212,7 +215,13 @@ export function TaskExecutionPanel({
   async function requestChanges(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const requested = lines(requestedChanges);
-    if (!task.reviewAttemptId || !changeSummary.trim() || requested.length === 0) return;
+    if (
+      !task.reviewAttemptId ||
+      !reviewEvidenceReady ||
+      !changeSummary.trim() ||
+      requested.length === 0
+    )
+      return;
     setPendingAction("changes");
     setError(null);
     try {
@@ -354,7 +363,7 @@ export function TaskExecutionPanel({
               {...stylex.props(styles.actionForm)}
             >
               <fieldset
-                disabled={pending || !task.reviewAttemptId}
+                disabled={pending || !reviewEvidenceReady}
                 {...stylex.props(styles.fieldset)}
               >
                 <label htmlFor={"approval-summary-" + task.id}>Approval summary</label>
@@ -380,7 +389,7 @@ export function TaskExecutionPanel({
               {...stylex.props(styles.actionForm)}
             >
               <fieldset
-                disabled={pending || !task.reviewAttemptId}
+                disabled={pending || !reviewEvidenceReady}
                 {...stylex.props(styles.fieldset)}
               >
                 <label htmlFor={"change-summary-" + task.id}>Change request summary</label>

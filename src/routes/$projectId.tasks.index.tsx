@@ -9,7 +9,10 @@ export const Route = createFileRoute("/$projectId/tasks/")({
   ssr: false,
   codeSplitGroupings: [["loader"], ["component"], ["errorComponent"]],
   validateSearch: workspaceSearchSchema,
-  loader: ({ context, params }) => loadWorkspacePage(context.queryClient, params.projectId),
+  loader: async ({ context, params, parentMatchPromise }) => {
+    await parentMatchPromise;
+    return loadWorkspacePage(context.queryClient, params.projectId, undefined, "tasks");
+  },
   pendingComponent: RoutePendingState,
   errorComponent: WorkspacePageError,
   component: Page,

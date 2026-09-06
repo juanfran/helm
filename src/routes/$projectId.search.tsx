@@ -11,8 +11,10 @@ import {
 } from "../features/tasks/task-search-route-params";
 import { taskTagsQueryOptions } from "../features/tasks/task-tags-query";
 import { readProjectEvents } from "../server/activity-functions";
-import { readAppState, readProjects } from "../server/project-functions";
-import { readSavedViews } from "../server/task-query-functions";
+import {
+  workspaceStateQueryOptions,
+  savedViewsQueryOptions,
+} from "../features/projects/workspace-state-query";
 
 export const Route = createFileRoute("/$projectId/search")({
   ssr: false,
@@ -20,8 +22,11 @@ export const Route = createFileRoute("/$projectId/search")({
   validateSearch: parseTaskSearchRouteParams,
   search: { middlewares: [stripSearchParams(emptyTaskSearchParams)] },
   loaderDeps: ({ search: { presentation: _presentation, ...query } }) => query,
-  loader: async ({ context, deps, params }) => {
-    const [state, projects] = await Promise.all([readAppState(), readProjects()]);
+  loader: async ({ context, deps, params, parentMatchPromise }) => {
+    await parentMatchPromise;
+    const snapshot = await context.queryClient.ensureQueryData(workspaceStateQueryOptions());
+    const state = { ...snapshot.state };
+    const projects = snapshot.projects;
     const project = projects.find((item) => item.id === params.projectId);
     if (!project) throw new Error("This project could not be found.");
     state.activeProject = project;
@@ -37,16 +42,11 @@ export const Route = createFileRoute("/$projectId/search")({
     });
     const input = taskSearchInputFromParams(projectId, deps);
     const collection = getTaskSearchCollection(context.queryClient, input);
-    await Promise.all([
-      collection.isReady()
-        ? collection.utils.refetch({ throwOnError: true })
-        : collection.preload(),
-      context.queryClient.ensureQueryData({
-        queryKey: ["saved-views", projectId] as const,
-        queryFn: () => readSavedViews({ data: { projectId, includeArchived: false } }),
-      }),
-      context.queryClient.ensureQueryData(taskTagsQueryOptions(projectId)),
-    ]);
+    void context.queryClient.prefetchQuery(savedViewsQueryOptions(projectId));
+    void context.queryClient.prefetchQuery(taskTagsQueryOptions(projectId));
+    await (collection.isReady()
+      ? collection.utils.refetch({ throwOnError: true })
+      : collection.preload());
     return {
       state,
       project,

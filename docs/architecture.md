@@ -159,14 +159,23 @@ The browser uses an event to invalidate only affected collection subsets or quer
 
 TanStack DB is the default for task-shaped reactive data. Collections use the TanStack Query adapter and are scoped to the router's QueryClient and business scope.
 
-- Routes backed by TanStack DB disable SSR, define stable collections or live-query collections outside render, and await `collection.preload()` or `liveQuery.preload()` in the route loader.
-- Components read preloaded data with Suspense-capable live queries inside error boundaries.
+- Routes backed by TanStack DB disable SSR and define stable collections or live-query collections outside render. Loaders await only navigation-critical preloads and reuse ready collections while the project stream keeps them current.
+- Loaders start secondary snapshots and route-specific module imports alongside critical reads. Execution history, collaboration, dashboard summaries, and activity use section-level Suspense and retry boundaries; task preparation remains usable while these sections load. Review actions require the matching completion evidence.
 - On-demand collections preload the exact live query; preloading their source collection is a no-op.
-- Non-reactive singleton data uses TanStack Query. Its route loader calls `queryClient.ensureQueryData(queryOptions)` and the component uses `useSuspenseQuery` with the same options.
+- Non-reactive singleton data uses TanStack Query with shared options. Loaders ensure critical singleton reads; supporting Search filters and saved views are prefetched and suspend only their own sections. Explicit commands and project events invalidate cached metadata.
 - Links preload on intent. Search parameters participating in data selection are validated and included in loader dependencies.
 - Loaders never import SQLite or filesystem modules. Server-only work lives behind server functions or server routes.
 
 This division avoids duplicate caches: TanStack DB owns reactive task data; TanStack Query is its transport/cache adapter and owns only reads that do not justify a collection.
+
+The persistent project shell owns the workspace event subscription and durable cursor, so child-route
+navigation does not reset synchronization. A lightweight readiness gate tracks each collection's initial
+snapshot, not its records. Snapshots start after cursor capture and run outside the shared projection
+coordinator. Events project into ready collections and mark pending snapshots dirty. Before a dirty
+snapshot becomes usable, it catches up under the coordinator, preventing updates from being lost behind
+an older in-flight response. Search and saved views retain query-scoped subscriptions for their paginated
+results. Navigation also rechecks task rows whose start date or lease expiration has passed, since time
+can change eligibility without a new event. Settings does not load task or history collections.
 
 Client loading is a tested production boundary. Vite emits a client manifest, and the production build
 walks its static-import graph before recording a valid build fingerprint. Hard limits cover the initial

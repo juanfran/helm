@@ -16,6 +16,7 @@ import {
   createRetryableLazyModuleLoader,
   type RetryableLazyModuleLoader,
 } from "../../components/retryable-lazy-module";
+import { WorkspaceSection } from "../projects/workspace-section";
 import { useExplicitLazyModule } from "../../components/use-explicit-lazy-module";
 import type {
   ActivityEntry,
@@ -145,16 +146,18 @@ export function TaskDetailPanel({
   return (
     <div {...stylex.props(styles.detailStack)}>
       {task.lifecycle === "review" ? (
-        <TaskExecutionPanel
-          key={task.id}
-          task={task}
-          attempts={attempts}
-          onApproveReview={onApproveReview}
-          onRequestChanges={onRequestChanges}
-          onCancelTask={onCancelTask}
-          onRestoreTask={onRestoreTask}
-          onReopenTask={onReopenTask}
-        />
+        <WorkspaceSection label="Execution history" resources={["attempts"]}>
+          <TaskExecutionPanel
+            key={task.id}
+            task={task}
+            attempts={attempts}
+            onApproveReview={onApproveReview}
+            onRequestChanges={onRequestChanges}
+            onCancelTask={onCancelTask}
+            onRestoreTask={onRestoreTask}
+            onReopenTask={onReopenTask}
+          />
+        </WorkspaceSection>
       ) : null}
       <PreparationPanel
         key={`preparation:${task.id}`}
@@ -178,16 +181,18 @@ export function TaskDetailPanel({
         onResolveManualBlocker={onResolveManualBlocker}
       />
       {task.lifecycle !== "review" ? (
-        <TaskExecutionPanel
-          key={task.id}
-          task={task}
-          attempts={attempts}
-          onApproveReview={onApproveReview}
-          onRequestChanges={onRequestChanges}
-          onCancelTask={onCancelTask}
-          onRestoreTask={onRestoreTask}
-          onReopenTask={onReopenTask}
-        />
+        <WorkspaceSection label="Execution history" resources={["attempts"]}>
+          <TaskExecutionPanel
+            key={task.id}
+            task={task}
+            attempts={attempts}
+            onApproveReview={onApproveReview}
+            onRequestChanges={onRequestChanges}
+            onCancelTask={onCancelTask}
+            onRestoreTask={onRestoreTask}
+            onReopenTask={onReopenTask}
+          />
+        </WorkspaceSection>
       ) : null}
     </div>
   );
@@ -1162,15 +1167,17 @@ function PreparationPanel({
       </button>
       <div id={`task-collaboration-${task.id}`}>
         {collaborationModule.state.status === "ready" ? (
-          <collaborationModule.state.module.default
-            task={task}
-            entries={activityEntries}
-            blockers={manualBlockers}
-            onCreateEntry={onCreateActivityEntry}
-            onWithdrawEntry={onWithdrawActivityEntry}
-            onCreateBlocker={onCreateManualBlocker}
-            onResolveBlocker={onResolveManualBlocker}
-          />
+          <WorkspaceSection label="Collaboration" resources={["activity", "blockers"]}>
+            <collaborationModule.state.module.default
+              task={task}
+              entries={activityEntries}
+              blockers={manualBlockers}
+              onCreateEntry={onCreateActivityEntry}
+              onWithdrawEntry={onWithdrawActivityEntry}
+              onCreateBlocker={onCreateManualBlocker}
+              onResolveBlocker={onResolveManualBlocker}
+            />
+          </WorkspaceSection>
         ) : collaborationModule.state.status === "error" ? (
           <LazyDetailFailure surface="collaboration" onRetry={collaborationModule.retry} />
         ) : collaborationModule.state.status === "loading" ? (

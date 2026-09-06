@@ -72,26 +72,16 @@ import type {
   TaskCollaborationModuleLoader,
   TaskDetailPanelProps,
 } from "./task-detail-panel";
+import { workspaceModules } from "../projects/workspace-modules";
+import { WorkspaceSection } from "../projects/workspace-section";
 import { useVisibleTaskSelection } from "./visible-task-selection";
 
-const operationalDashboardModule = createRetryableLazyModuleLoader(() =>
-  import("../dashboard/operational-dashboard").then(({ OperationalDashboard }) => ({
-    default: OperationalDashboard,
-  })),
-);
+const operationalDashboardModule = workspaceModules.dashboard;
 const bulkTaskControlsModule = createRetryableLazyModuleLoader(() =>
   import("./bulk-task-controls").then(({ BulkTaskControls }) => ({ default: BulkTaskControls })),
 );
-const projectActivityFeedModule = createRetryableLazyModuleLoader(() =>
-  import("../activity/project-activity-feed").then(({ ProjectActivityFeed }) => ({
-    default: ProjectActivityFeed,
-  })),
-);
-const projectReviewModeControlModule = createRetryableLazyModuleLoader(() =>
-  import("../projects/project-review-mode-control").then(({ ProjectReviewModeControl }) => ({
-    default: ProjectReviewModeControl,
-  })),
-);
+const projectActivityFeedModule = workspaceModules.activity;
+const projectReviewModeControlModule = workspaceModules.settings;
 const notificationCenterModule = createRetryableLazyModuleLoader(() =>
   import("../activity/notification-center").then(({ NotificationCenter }) => ({
     default: NotificationCenter,
@@ -100,11 +90,7 @@ const notificationCenterModule = createRetryableLazyModuleLoader(() =>
 const themeControlModule = createRetryableLazyModuleLoader(() =>
   import("../projects/theme-control").then(({ ThemeControl }) => ({ default: ThemeControl })),
 );
-const taskDetailPanelModule = createRetryableLazyModuleLoader(() =>
-  import("./task-detail-panel").then(({ TaskDetailPanel }) => ({
-    default: TaskDetailPanel,
-  })),
-);
+const taskDetailPanelModule = workspaceModules.taskDetail;
 
 type TaskDetailPanelModuleLoader = RetryableLazyModuleLoader<{
   default: ComponentType<TaskDetailPanelProps>;
@@ -758,13 +744,15 @@ export function TaskWorkspace({
             </div>
           ) : workspaceView === "dashboard" ? (
             dashboardModule.state.status === "ready" ? (
-              <dashboardModule.state.module.default
-                tasks={orderedTasks}
-                attempts={attempts}
-                events={projectEvents}
-                activeAgentRuns={activeAgentRuns}
-                onSelectTask={selectTask}
-              />
+              <WorkspaceSection label="Dashboard" resources={["attempts", "events"]}>
+                <dashboardModule.state.module.default
+                  tasks={orderedTasks}
+                  attempts={attempts}
+                  events={projectEvents}
+                  activeAgentRuns={activeAgentRuns}
+                  onSelectTask={selectTask}
+                />
+              </WorkspaceSection>
             ) : dashboardModule.state.status === "error" ? (
               <LazyWorkspaceFailure surface="dashboard" onRetry={dashboardModule.retry} />
             ) : (
@@ -772,12 +760,17 @@ export function TaskWorkspace({
             )
           ) : workspaceView === "activity" ? (
             activityModule.state.status === "ready" ? (
-              <activityModule.state.module.default
-                events={projectEvents}
-                tasks={orderedTasks}
-                entries={activityEntries}
-                attempts={attempts}
-              />
+              <WorkspaceSection
+                label="Activity"
+                resources={["attempts", "events", "activity", "blockers"]}
+              >
+                <activityModule.state.module.default
+                  events={projectEvents}
+                  tasks={orderedTasks}
+                  entries={activityEntries}
+                  attempts={attempts}
+                />
+              </WorkspaceSection>
             ) : activityModule.state.status === "error" ? (
               <LazyWorkspaceFailure surface="activity" onRetry={activityModule.retry} />
             ) : (

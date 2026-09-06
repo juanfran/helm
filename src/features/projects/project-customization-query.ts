@@ -5,6 +5,7 @@ import { readProjectCustomization } from "../../server/customization-functions";
 export function projectCustomizationQueryOptions(projectId: string) {
   return queryOptions({
     queryKey: ["project-customization", projectId] as const,
+    staleTime: Infinity,
     queryFn: () => readProjectCustomization({ data: { projectId, includeRetired: true } }),
   });
 }

@@ -17,9 +17,9 @@ export type ProjectionDelta<T> = {
 };
 
 export type ProjectEventProjector = {
-  taskCollection: ProjectionCollection<Task>;
+  taskCollection?: ProjectionCollection<Task>;
   attemptCollection?: ProjectionCollection<TaskAttemptSummary>;
-  activityCollection: ProjectionCollection<ActivityEntry>;
+  activityCollection?: ProjectionCollection<ActivityEntry>;
   blockerCollection?: ProjectionCollection<ManualBlocker>;
   eventCollection?: ProjectionCollection<ProjectEvent>;
   importantEventCollection?: ProjectionCollection<ProjectEvent>;
@@ -61,13 +61,13 @@ export async function projectEvent(event: ProjectEvent, projector: ProjectEventP
     event.kind.startsWith("task.blocker.");
 
   const [taskDelta, attemptDelta, activityDelta, blockerDelta] = await Promise.all([
-    taskIds.length > 0
+    taskIds.length > 0 && projector.taskCollection
       ? projector.readTaskDelta(taskIds)
       : Promise.resolve<ProjectionDelta<Task>>({ upserts: [], deleteIds: [] }),
     taskIds.length > 0 && projector.attemptCollection && readAttemptDelta
       ? readAttemptDelta(taskIds)
       : Promise.resolve<ProjectionDelta<TaskAttemptSummary>>({ upserts: [], deleteIds: [] }),
-    activityEntryIds.length > 0
+    activityEntryIds.length > 0 && projector.activityCollection
       ? projector.readActivityDelta(activityEntryIds)
       : Promise.resolve<ProjectionDelta<ActivityEntry>>({ upserts: [], deleteIds: [] }),
     shouldReadBlockers && readBlockerDelta
@@ -75,11 +75,12 @@ export async function projectEvent(event: ProjectEvent, projector: ProjectEventP
       : Promise.resolve<ProjectionDelta<ManualBlocker>>({ upserts: [], deleteIds: [] }),
   ]);
 
-  applyProjectionDelta(projector.taskCollection, taskDelta);
+  if (projector.taskCollection) applyProjectionDelta(projector.taskCollection, taskDelta);
   if (projector.attemptCollection) {
     applyProjectionDelta(projector.attemptCollection, attemptDelta);
   }
-  applyProjectionDelta(projector.activityCollection, activityDelta);
+  if (projector.activityCollection)
+    applyProjectionDelta(projector.activityCollection, activityDelta);
   if (projector.blockerCollection && blockerDelta) {
     applyProjectionDelta(projector.blockerCollection, blockerDelta);
   }

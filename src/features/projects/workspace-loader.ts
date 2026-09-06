@@ -1,31 +1,24 @@
 import type { QueryClient } from "@tanstack/react-query";
-
-import {
-  getActivityEntryCollection,
-  getManualBlockerCollection,
-  getProjectEventCollection,
-} from "../activity/activity-collection";
-import { getImportantProjectEventCollection } from "../activity/important-project-event-collection";
-import {
-  getProjectSyncCoordinator,
-  waitForAllProjectSync,
-} from "../activity/project-sync-coordinator";
-import { getTaskAttemptCollection } from "../tasks/task-attempt-collection";
-import { getTaskCollection } from "../tasks/task-collection";
+import { readTasks } from "../../server/task-functions";
 import { taskTagsQueryOptions } from "../tasks/task-tags-query";
 import { projectCustomizationQueryOptions } from "./project-customization-query";
-import { readProjectEvents } from "../../server/activity-functions";
-import { readAppState, readProjects } from "../../server/project-functions";
-import { readSavedViews } from "../../server/task-query-functions";
-import { readTasks } from "../../server/task-functions";
 import { projectLandingModule } from "./project-landing-module";
+import { getWorkspaceData } from "./workspace-data";
+import { savedViewsQueryOptions, workspaceStateQueryOptions } from "./workspace-state-query";
+import { workspaceModules } from "./workspace-modules";
+import type { WorkspaceView } from "./workspace-search";
 
 export async function loadWorkspacePage(
   queryClient: QueryClient,
   projectIdOverride?: string,
   taskId?: string,
+  view: WorkspaceView = "tasks",
 ) {
-  const [state, projects] = await Promise.all([readAppState(), readProjects()]);
+  if (taskId) workspaceModules.taskDetail.preload();
+  if (view !== "tasks") workspaceModules[view].preload();
+  const snapshot = await queryClient.ensureQueryData(workspaceStateQueryOptions());
+  const state = { ...snapshot.state };
+  const projects = snapshot.projects;
   if (projectIdOverride) {
     const project = projects.find((item) => item.id === projectIdOverride);
     if (!project)
@@ -33,62 +26,35 @@ export async function loadWorkspacePage(
     state.activeProject = project;
   }
   let eventCursor = 0;
-  let savedViews: readonly { readonly id: string; readonly name: string }[] = [];
   if (state.activeProject) {
     const projectId = state.activeProject.id;
-    const [eventPage, projectSavedViews] = await Promise.all([
-      readProjectEvents({
-        data: {
-          projectId,
-          direction: "backward",
-          afterCursor: 0,
-          beforeCursor: null,
-          limit: 1,
-        },
-      }),
-      readSavedViews({ data: { projectId, includeArchived: false } }),
-    ]);
-    savedViews = projectSavedViews.map(({ id, name }) => ({ id, name }));
-    eventCursor = eventPage.latestCursor;
-    const syncCoordinator = getProjectSyncCoordinator(queryClient, projectId);
-    const taskCollection = getTaskCollection(queryClient, projectId);
-    const attemptCollection = getTaskAttemptCollection(queryClient, projectId);
-    const activityCollection = getActivityEntryCollection(queryClient, projectId);
-    const blockerCollection = getManualBlockerCollection(queryClient, projectId);
-    const eventCollection = getProjectEventCollection(queryClient, projectId);
-    const importantEventCollection = getImportantProjectEventCollection(queryClient, projectId);
-    await syncCoordinator.run(() =>
-      waitForAllProjectSync([
-        taskCollection.isReady()
-          ? taskCollection.utils.refetch({ throwOnError: true })
-          : taskCollection.preload(),
-        attemptCollection.isReady()
-          ? attemptCollection.utils.refetch({ throwOnError: true })
-          : attemptCollection.preload(),
-        activityCollection.isReady()
-          ? activityCollection.utils.refetch({ throwOnError: true })
-          : activityCollection.preload(),
-        blockerCollection.isReady()
-          ? blockerCollection.utils.refetch({ throwOnError: true })
-          : blockerCollection.preload(),
-        eventCollection.isReady()
-          ? eventCollection.utils.refetch({ throwOnError: true })
-          : eventCollection.preload(),
-        importantEventCollection.isReady()
-          ? importantEventCollection.utils.refetch({ throwOnError: true })
-          : importantEventCollection.preload(),
-        queryClient.ensureQueryData(taskTagsQueryOptions(projectId)),
-        queryClient.fetchQuery(projectCustomizationQueryOptions(projectId)),
-      ]),
-    );
-    if (taskId && !taskCollection.has(taskId)) {
+    const data = getWorkspaceData(queryClient, projectId);
+    eventCursor = await data.captureCursor();
+    const required: Promise<unknown>[] = [];
+    if (view !== "settings") required.push(data.resources.tasks.ensure());
+    if (view === "settings" || view === "tasks") {
+      required.push(queryClient.ensureQueryData(projectCustomizationQueryOptions(projectId)));
+      required.push(queryClient.ensureQueryData(taskTagsQueryOptions(projectId)));
+    }
+    // Start secondary reads alongside critical data; their sections own waiting and failure.
+    if (taskId || view === "dashboard" || view === "activity")
+      void data.resources.attempts.ensure();
+    if (taskId || view === "activity") {
+      void data.resources.activity.ensure();
+      void data.resources.blockers.ensure();
+    }
+    if (view === "dashboard" || view === "activity") void data.resources.events.ensure();
+    if (view === "tasks" || view === "settings")
+      void queryClient.prefetchQuery(savedViewsQueryOptions(projectId));
+    await Promise.all(required);
+    if (view !== "settings") await data.refreshTimeSensitiveTasks();
+    if (taskId && !data.collections.tasks.has(taskId)) {
       const rows = await readTasks({
         data: { projectId, taskIds: [taskId], includeArchived: true },
       });
       if (!rows[0]) throw new Error("This task could not be found in this project.");
-      taskCollection.utils.writeUpsert(rows[0]);
+      data.collections.tasks.utils.writeUpsert(rows[0]);
     }
-  }
-  if (!state.activeProject) await projectLandingModule.load();
-  return { ...state, projects: [...projects], eventCursor, savedViews };
+  } else await projectLandingModule.load();
+  return { ...state, projects: [...projects], eventCursor };
 }

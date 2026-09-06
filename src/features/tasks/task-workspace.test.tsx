@@ -538,6 +538,26 @@ describe("task workspace", () => {
     render(
       <TaskWorkspace
         {...workspace}
+        attempts={[
+          {
+            id: "attempt-review",
+            taskId: reviewTask.id,
+            attemptNumber: 1,
+            agentRunId: "run-review",
+            agentProfileId: "profile-review",
+            agentDisplayName: "Review agent",
+            status: "completed",
+            summary: "Implemented the requested behavior.",
+            changedAreas: [],
+            verificationResults: [],
+            references: [],
+            risks: [],
+            followUpWork: [],
+            failureClassification: null,
+            createdAt: reviewTask.createdAt,
+            completedAt: reviewTask.updatedAt,
+          },
+        ]}
         dashboardModuleLoader={createRetryableLazyModuleLoader(loadDashboard)}
       />,
     );

@@ -11,14 +11,19 @@ import {
 } from "../features/projects/project-shell-context";
 import { TaskRoutePageToolsLauncher } from "../features/tasks/task-route-page-tools-launcher";
 import { TaskRouteUtilities } from "../features/tasks/task-route-utilities";
-import { readAppState, readProjects } from "../server/project-functions";
+import { workspaceStateQueryOptions } from "../features/projects/workspace-state-query";
+import { WorkspaceSync } from "../features/projects/workspace-sync";
 import { tokens } from "../styles/tokens.stylex";
 
 export const Route = createFileRoute("/$projectId")({
   ssr: false,
   codeSplitGroupings: [["loader"], ["component"], ["errorComponent"]],
-  loader: async ({ params }) => {
-    const [state, projects] = await Promise.all([readAppState(), readProjects()]);
+  staleTime: Infinity,
+  loader: async ({ params, context }) => {
+    const { state, projects } = await context.queryClient.fetchQuery({
+      ...workspaceStateQueryOptions(),
+      staleTime: 0,
+    });
     const project = projects.find((item) => item.id === params.projectId);
     if (!project) throw new Error("This project could not be found.");
     return { state, projects, project };
@@ -75,6 +80,7 @@ function ProjectShell({ state, projects, project }: ReturnType<typeof Route.useL
           </>
         }
       />
+      <WorkspaceSync projectId={project.id} reportConnection={reportConnection} />
       <Outlet />
     </ProjectShellContext.Provider>
   );

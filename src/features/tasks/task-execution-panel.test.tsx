@@ -137,6 +137,25 @@ afterEach(() => {
 });
 
 describe("task execution panel", () => {
+  it("keeps review actions disabled until the matching completion evidence is visible", async () => {
+    const user = userEvent.setup();
+    const panel = props({ attempts: [previousAttempt] });
+    const rendered = render(<TaskExecutionPanel {...panel} />);
+    const approval = screen.getByRole("form", { name: "Approve task review" });
+    const changes = screen.getByRole("form", { name: "Request task changes" });
+    expect(approval.querySelector("fieldset")).toHaveProperty("disabled", true);
+    expect(changes.querySelector("fieldset")).toHaveProperty("disabled", true);
+    await user.type(screen.getByLabelText("Approval summary"), "Cannot approve unseen evidence");
+    await user.click(within(approval).getByRole("button", { name: "Approve" }));
+    expect(panel.onApproveReview).not.toHaveBeenCalled();
+    rendered.rerender(
+      <TaskExecutionPanel {...panel} attempts={[previousAttempt, reviewAttempt]} />,
+    );
+    expect(screen.getByText(reviewAttempt.summary)).toBeTruthy();
+    expect(approval.querySelector("fieldset")).toHaveProperty("disabled", false);
+    expect(changes.querySelector("fieldset")).toHaveProperty("disabled", false);
+  });
+
   it("renders the structured report and submits attributed approval or requested changes", async () => {
     const user = userEvent.setup();
     const panel = props();

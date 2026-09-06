@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, type ComponentType } from "react";
-import { useLiveSuspenseQuery } from "@tanstack/react-db";
-import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+import { useState, type ComponentProps, type ComponentType } from "react";
+import { useLiveQuery, useLiveSuspenseQuery } from "@tanstack/react-db";
+import { useQueryClient, useQuery } from "@tanstack/react-query";
 import { Link, useRouter } from "@tanstack/react-router";
 import * as stylex from "@stylexjs/stylex";
 
@@ -19,13 +19,12 @@ import {
   type ResolveManualBlockerInput,
   type WithdrawActivityEntryInput,
 } from "../../domain/activity";
+import type { Task } from "../../domain/tasks";
 import type { Project, Theme } from "../../domain/projects";
 import { richTextToPlainText } from "../../domain/rich-text";
 import {
   createHumanActivity,
   createHumanManualBlocker,
-  readActivityEntries,
-  readManualBlockers,
   resolveHumanManualBlocker,
   withdrawHumanActivity,
 } from "../../server/activity-functions";
@@ -55,8 +54,6 @@ import {
   invalidateHumanTaskClaim,
   prepareHumanTask,
   previewHumanBulkTasks,
-  readTaskAttempts,
-  readTasks,
   reopenHumanTask,
   requestHumanTaskChanges,
   restoreCancelledHumanTask,
@@ -70,14 +67,12 @@ import {
   getManualBlockerCollection,
   getProjectEventCollection,
 } from "../activity/activity-collection";
-import { getImportantProjectEventCollection } from "../activity/important-project-event-collection";
 import { reconcileOptimisticCommand } from "../activity/optimistic-reconciliation";
 import { applyProjectionDelta, projectEvent } from "../activity/project-event-projector";
-import { subscribeToProjectEvents } from "../activity/project-event-subscription";
-import {
-  getProjectSyncCoordinator,
-  waitForAllProjectSync,
-} from "../activity/project-sync-coordinator";
+import { getWorkspaceData } from "./workspace-data";
+import { WorkspaceDataContext } from "./workspace-section";
+import { savedViewsQueryOptions } from "./workspace-state-query";
+import { getProjectSyncCoordinator } from "../activity/project-sync-coordinator";
 import { activeAgentRunsQueryOptions } from "../dashboard/agent-runs-query";
 import { getTaskAttemptCollection } from "../tasks/task-attempt-collection";
 import { getTaskCollection } from "../tasks/task-collection";
@@ -127,10 +122,10 @@ export function WorkspacePage({
   const router = useRouter();
 
   if (state.activeProject) {
+    const Home = view === "settings" ? ActiveProjectHome : TaskDataHome;
     return (
-      <ActiveProjectHome
+      <Home
         key={state.activeProject.id}
-        state={state}
         search={search}
         view={view}
         selectedTaskId={selectedTaskId}
@@ -216,8 +211,19 @@ export function ProjectLandingDataManagementIntent({
   );
 }
 
+function TaskDataHome(props: Omit<ComponentProps<typeof ActiveProjectHome>, "tasks">) {
+  const queryClient = useQueryClient();
+  const collection = getTaskCollection(queryClient, props.project.id);
+  const { data: tasks } = useLiveSuspenseQuery({
+    query: (query) => query.from({ task: collection }),
+  });
+  return <ActiveProjectHome {...props} tasks={tasks} />;
+}
+
+const noTasks: readonly Task[] = [];
+
 function ActiveProjectHome({
-  state,
+  tasks = noTasks,
   search,
   view,
   selectedTaskId,
@@ -226,7 +232,6 @@ function ActiveProjectHome({
   activeProjectVersion,
   theme,
 }: {
-  state: WorkspacePageState;
   search: WorkspaceSearch;
   view: import("./workspace-search").WorkspaceView;
   selectedTaskId: string | null;
@@ -234,8 +239,8 @@ function ActiveProjectHome({
   projects: readonly Project[];
   activeProjectVersion: number;
   theme: Theme;
+  tasks?: readonly Task[];
 }) {
-  const { eventCursor, savedViews } = state;
   const router = useRouter();
   const queryClient = useQueryClient();
   const taskCollection = getTaskCollection(queryClient, project.id);
@@ -243,177 +248,63 @@ function ActiveProjectHome({
   const activityCollection = getActivityEntryCollection(queryClient, project.id);
   const blockerCollection = getManualBlockerCollection(queryClient, project.id);
   const eventCollection = getProjectEventCollection(queryClient, project.id);
-  const importantEventCollection = getImportantProjectEventCollection(queryClient, project.id);
   const syncCoordinator = getProjectSyncCoordinator(queryClient, project.id);
-  const [liveStatus, setLiveStatus] = useState<"connecting" | "live" | "retrying">("connecting");
-  const { data: tasks } = useLiveSuspenseQuery({
-    query: (query) => query.from({ task: taskCollection }),
+  const liveStatus = "connecting";
+  const { data: attempts = [] } = useLiveQuery({
+    query: (query) =>
+      selectedTaskId || view === "dashboard" || view === "activity"
+        ? query.from({ attempt: attemptCollection })
+        : undefined,
   });
-  const { data: attempts } = useLiveSuspenseQuery({
-    query: (query) => query.from({ attempt: attemptCollection }),
+  const { data: activityEntries = [] } = useLiveQuery({
+    query: (query) =>
+      selectedTaskId || view === "activity" ? query.from({ entry: activityCollection }) : undefined,
   });
-  const { data: activityEntries } = useLiveSuspenseQuery({
-    query: (query) => query.from({ entry: activityCollection }),
+  const { data: manualBlockers = [] } = useLiveQuery({
+    query: (query) =>
+      selectedTaskId || view === "activity"
+        ? query.from({ blocker: blockerCollection })
+        : undefined,
   });
-  const { data: manualBlockers } = useLiveSuspenseQuery({
-    query: (query) => query.from({ blocker: blockerCollection }),
+  const { data: projectEvents = [] } = useLiveQuery({
+    query: (query) =>
+      view === "dashboard" || view === "activity"
+        ? query.from({ event: eventCollection })
+        : undefined,
   });
-  const { data: projectEvents } = useLiveSuspenseQuery({
-    query: (query) => query.from({ event: eventCollection }),
+  const importantEvents = projectEvents;
+  const { data: tagDefinitions = [] } = useQuery({
+    ...taskTagsQueryOptions(project.id),
+    enabled: view === "tasks" || view === "settings",
   });
-  const { data: importantEvents } = useLiveSuspenseQuery({
-    query: (query) => query.from({ event: importantEventCollection }),
+  const { data: customization } = useQuery({
+    ...projectCustomizationQueryOptions(project.id),
+    enabled: view === "tasks" || view === "settings",
   });
-  const { data: tagDefinitions } = useSuspenseQuery(taskTagsQueryOptions(project.id));
-  const { data: customization } = useSuspenseQuery(projectCustomizationQueryOptions(project.id));
-  const { data: activeAgentRuns } = useSuspenseQuery(activeAgentRunsQueryOptions());
+  const { data: activeAgentRuns = [] } = useQuery({
+    ...activeAgentRunsQueryOptions(),
+    enabled: view === "dashboard",
+  });
 
-  const refetchProjectCollections = useCallback(
-    () =>
-      waitForAllProjectSync([
-        taskCollection.utils.refetch({ throwOnError: true }),
-        attemptCollection.utils.refetch({ throwOnError: true }),
-        activityCollection.utils.refetch({ throwOnError: true }),
-        blockerCollection.utils.refetch({ throwOnError: true }),
-        eventCollection.utils.refetch({ throwOnError: true }),
-        importantEventCollection.utils.refetch({ throwOnError: true }),
-      ]),
-    [
-      activityCollection,
-      attemptCollection,
-      blockerCollection,
-      eventCollection,
-      importantEventCollection,
-      taskCollection,
-    ],
-  );
-
-  const readTaskDelta = useCallback(
-    async (taskIds: readonly string[]) => {
-      const rows = await readTasks({
-        data: { projectId: project.id, taskIds: [...taskIds], includeArchived: true },
-      });
-      const byId = new Map(rows.map((task) => [task.id, task]));
-      return {
-        upserts: rows.filter((task) => task.archivedAt === null),
-        deleteIds: taskIds.filter((taskId) => {
-          const task = byId.get(taskId);
-          return !task || task.archivedAt !== null;
-        }),
-      };
-    },
-    [project.id],
-  );
-
-  const readAttemptDelta = useCallback(
-    async (taskIds: readonly string[]) => ({
-      upserts: await readTaskAttempts({
-        data: { projectId: project.id, taskIds: [...taskIds] },
-      }),
-      deleteIds: [],
-    }),
-    [project.id],
-  );
-
-  const eventProjector = useMemo(
-    () => ({
-      taskCollection,
-      attemptCollection,
-      activityCollection,
-      blockerCollection,
-      eventCollection,
-      importantEventCollection,
-      readTaskDelta,
-      readAttemptDelta,
-      async readActivityDelta(entryIds: readonly string[]) {
-        const rows = await readActivityEntries({
-          data: { projectId: project.id, entryIds: [...entryIds], limit: entryIds.length },
-        });
-        if (rows.length !== new Set(entryIds).size) {
-          throw new Error("An activity event referenced an entry that could not be projected.");
-        }
-        return { upserts: rows, deleteIds: [] };
-      },
-      async readBlockerDelta(taskIds: readonly string[]) {
-        const pages = await Promise.all(
-          taskIds.map((taskId) =>
-            readManualBlockers({
-              data: {
-                projectId: project.id,
-                taskId,
-                includeResolved: true,
-                limit: 200,
-              },
-            }),
-          ),
-        );
-        return { upserts: pages.flat(), deleteIds: [] };
-      },
-    }),
-    [
-      activityCollection,
-      attemptCollection,
-      blockerCollection,
-      eventCollection,
-      importantEventCollection,
-      project.id,
-      readAttemptDelta,
-      readTaskDelta,
-      taskCollection,
-    ],
-  );
-
-  useEffect(
-    () =>
-      subscribeToProjectEvents({
-        projectId: project.id,
-        afterCursor: eventCursor,
-        onOpen: () => setLiveStatus("live"),
-        onError: () => setLiveStatus("retrying"),
-        onEvent: async (event) => {
-          await syncCoordinator.run(async () => {
-            try {
-              await projectEvent(event, eventProjector);
-              setLiveStatus("live");
-            } catch (error) {
-              try {
-                await refetchProjectCollections();
-              } catch (refreshError) {
-                throw new AggregateError(
-                  [error, refreshError],
-                  "Project event projection and recovery both failed.",
-                  { cause: refreshError },
-                );
-              }
-              throw error;
-            }
-          });
-          if (event.changes.scopes.includes("projects")) {
-            await refreshProjectCustomization(queryClient, project.id);
-            await router.invalidate({ sync: true });
-          }
-        },
-      }),
-    [
-      eventCursor,
-      eventProjector,
-      project.id,
-      queryClient,
-      refetchProjectCollections,
-      router,
-      syncCoordinator,
-    ],
-  );
+  const data = getWorkspaceData(queryClient, project.id);
+  const readTaskDelta = data.readTaskDelta;
+  const readAttemptDelta = data.readAttemptDelta;
+  const { data: savedViews = [] } = useQuery({
+    ...savedViewsQueryOptions(project.id),
+    enabled: view === "tasks" || view === "settings",
+  });
 
   async function refreshTaskRows(taskIds: readonly string[]) {
     await syncCoordinator.run(async () => {
       const uniqueTaskIds = [...new Set(taskIds)];
       const [taskDelta, attemptDelta] = await Promise.all([
         readTaskDelta(uniqueTaskIds),
-        readAttemptDelta(uniqueTaskIds),
+        data.resources.attempts.ready
+          ? readAttemptDelta(uniqueTaskIds)
+          : Promise.resolve({ upserts: [], deleteIds: [] }),
       ]);
       applyProjectionDelta(taskCollection, taskDelta);
-      applyProjectionDelta(attemptCollection, attemptDelta);
+      if (data.resources.attempts.ready) applyProjectionDelta(attemptCollection, attemptDelta);
     });
   }
 
@@ -426,15 +317,7 @@ function ActiveProjectHome({
   }
 
   async function projectCommittedEvent(event: Parameters<typeof projectEvent>[0]) {
-    await syncCoordinator.run(async () => {
-      eventCollection.utils.writeUpsert(event);
-      try {
-        await projectEvent(event, eventProjector);
-      } catch {
-        setLiveStatus("retrying");
-        await refetchProjectCollections().catch(() => undefined);
-      }
-    });
+    await syncCoordinator.run(() => data.projectReady(event));
   }
 
   async function applyCustomizationResponse<
@@ -576,207 +459,220 @@ function ActiveProjectHome({
   }
 
   return (
-    <TaskWorkspace
-      project={project}
-      savedViews={savedViews}
-      navigation={{
-        view,
-        selectedTaskId,
-        filter: search.filter,
-        renderTaskLink: (task, props, children) => (
-          <Link
-            to="/$projectId/tasks/$taskId"
-            params={{ projectId: project.id, taskId: task.id }}
-            search={{ filter: search.filter }}
-            {...props}
-          >
-            {children}
-          </Link>
-        ),
-        renderBackLink: (props) => (
-          <Link
-            to="/$projectId/tasks"
-            params={{ projectId: project.id }}
-            search={{ filter: search.filter }}
-            {...props}
-          >
-            Back to tasks
-          </Link>
-        ),
-        renderFilterLink: (filter, props, children) => (
-          <Link
-            to="/$projectId/tasks"
-            params={{ projectId: project.id }}
-            search={{ filter }}
-            {...props}
-          >
-            {children}
-          </Link>
-        ),
-        onTaskCreated: (taskId) => {
-          void router.navigate({
-            to: "/$projectId/tasks/$taskId",
-            params: { projectId: project.id, taskId },
-            search: { filter: search.filter },
-          });
-        },
-      }}
-      theme={theme}
-      tasks={tasks}
-      attempts={attempts}
-      tagDefinitions={tagDefinitions}
-      activityEntries={activityEntries}
-      manualBlockers={manualBlockers}
-      projectEvents={projectEvents}
-      importantEvents={importantEvents}
-      activeAgentRuns={activeAgentRuns}
-      liveStatus={liveStatus}
-      projectSwitcher={{
-        preload: projectSwitcherModule.preload,
-        surface: (
+    <WorkspaceDataContext.Provider value={data}>
+      <TaskWorkspace
+        project={project}
+        savedViews={savedViews}
+        navigation={{
+          view,
+          selectedTaskId,
+          filter: search.filter,
+          renderTaskLink: (task, props, children) => (
+            <Link
+              to="/$projectId/tasks/$taskId"
+              params={{ projectId: project.id, taskId: task.id }}
+              search={{ filter: search.filter }}
+              {...props}
+            >
+              {children}
+            </Link>
+          ),
+          renderBackLink: (props) => (
+            <Link
+              to="/$projectId/tasks"
+              params={{ projectId: project.id }}
+              search={{ filter: search.filter }}
+              {...props}
+            >
+              Back to tasks
+            </Link>
+          ),
+          renderFilterLink: (filter, props, children) => (
+            <Link
+              to="/$projectId/tasks"
+              params={{ projectId: project.id }}
+              search={{ filter }}
+              {...props}
+            >
+              {children}
+            </Link>
+          ),
+          onTaskCreated: (taskId) => {
+            void router.navigate({
+              to: "/$projectId/tasks/$taskId",
+              params: { projectId: project.id, taskId },
+              search: { filter: search.filter },
+            });
+          },
+        }}
+        theme={theme}
+        tasks={tasks}
+        attempts={attempts}
+        tagDefinitions={tagDefinitions}
+        activityEntries={activityEntries}
+        manualBlockers={manualBlockers}
+        projectEvents={projectEvents}
+        importantEvents={importantEvents}
+        activeAgentRuns={activeAgentRuns}
+        liveStatus={liveStatus}
+        projectSwitcher={{
+          preload: projectSwitcherModule.preload,
+          surface: (
+            <RetryableLazySurface
+              moduleLoader={projectSwitcherModule}
+              fallback={<WorkspaceModuleFallback label="Loading project switcher" compact />}
+              render={(ProjectSwitcher) => (
+                <ProjectSwitcher
+                  projects={projects}
+                  activeProject={project}
+                  activeProjectVersion={activeProjectVersion}
+                  onSelect={(input) =>
+                    executeProjectChange(() => selectHumanProject({ data: input }), {
+                      navigateToWorkspace: () => router.navigate({ to: "/", replace: true }),
+                      refreshRoutes: () => router.invalidate({ sync: true }),
+                    })
+                  }
+                  onCreate={(input) =>
+                    executeProjectChange(() => createInitialProject({ data: input }), {
+                      navigateToWorkspace: () => router.navigate({ to: "/", replace: true }),
+                      refreshRoutes: () => router.invalidate({ sync: true }),
+                    })
+                  }
+                />
+              )}
+              renderFailure={(retry) => (
+                <WorkspaceModuleFailure label="Project switcher" onRetry={retry} compact />
+              )}
+            />
+          ),
+        }}
+        customizationControl={
+          customization && (
+            <RetryableLazySurface
+              moduleLoader={projectCustomizationControlModule}
+              fallback={<WorkspaceModuleFallback label="Loading project customization" />}
+              render={(ProjectCustomizationControl) => (
+                <ProjectCustomizationControl
+                  customization={customization}
+                  tagDefinitions={tagDefinitions}
+                  onAddFieldDefinition={(input) =>
+                    addHumanCustomFieldDefinition({ data: input }).then(applyCustomizationResponse)
+                  }
+                  onRetireFieldDefinition={(input) =>
+                    retireHumanCustomFieldDefinition({ data: input }).then(
+                      applyCustomizationResponse,
+                    )
+                  }
+                  onReorderFieldDefinitions={(input) =>
+                    reorderHumanCustomFieldDefinitions({ data: input }).then(
+                      applyCustomizationResponse,
+                    )
+                  }
+                  onChangeTagReviewModeOverride={(input) =>
+                    changeHumanTagReviewModeOverride({ data: input }).then(
+                      applyCustomizationResponse,
+                    )
+                  }
+                />
+              )}
+              renderFailure={(retry) => (
+                <WorkspaceModuleFailure label="Project customization" onRetry={retry} />
+              )}
+            />
+          )
+        }
+        portabilityControl={
           <RetryableLazySurface
-            moduleLoader={projectSwitcherModule}
-            fallback={<WorkspaceModuleFallback label="Loading project switcher" compact />}
-            render={(ProjectSwitcher) => (
-              <ProjectSwitcher
-                projects={projects}
-                activeProject={project}
-                activeProjectVersion={activeProjectVersion}
-                onSelect={(input) =>
-                  executeProjectChange(() => selectHumanProject({ data: input }), {
-                    navigateToWorkspace: () => router.navigate({ to: "/", replace: true }),
-                    refreshRoutes: () => router.invalidate({ sync: true }),
-                  })
-                }
-                onCreate={(input) =>
-                  executeProjectChange(() => createInitialProject({ data: input }), {
-                    navigateToWorkspace: () => router.navigate({ to: "/", replace: true }),
-                    refreshRoutes: () => router.invalidate({ sync: true }),
-                  })
-                }
+            moduleLoader={projectDataManagementControlModule}
+            fallback={<WorkspaceModuleFallback label="Loading data management" />}
+            render={(ProjectDataManagementControl) => (
+              <ProjectDataManagementControl
+                project={project}
+                savedViews={savedViews}
+                onPreview={(input) => previewHumanProjectImport({ data: input })}
+                onExecute={(input) => executeHumanProjectImport({ data: input })}
+                onComplete={() => router.invalidate({ sync: true })}
               />
             )}
             renderFailure={(retry) => (
-              <WorkspaceModuleFailure label="Project switcher" onRetry={retry} compact />
+              <WorkspaceModuleFailure label="Data management" onRetry={retry} />
             )}
           />
-        ),
-      }}
-      customizationControl={
-        <RetryableLazySurface
-          moduleLoader={projectCustomizationControlModule}
-          fallback={<WorkspaceModuleFallback label="Loading project customization" />}
-          render={(ProjectCustomizationControl) => (
-            <ProjectCustomizationControl
-              customization={customization}
-              tagDefinitions={tagDefinitions}
-              onAddFieldDefinition={(input) =>
-                addHumanCustomFieldDefinition({ data: input }).then(applyCustomizationResponse)
-              }
-              onRetireFieldDefinition={(input) =>
-                retireHumanCustomFieldDefinition({ data: input }).then(applyCustomizationResponse)
-              }
-              onReorderFieldDefinitions={(input) =>
-                reorderHumanCustomFieldDefinitions({ data: input }).then(applyCustomizationResponse)
-              }
-              onChangeTagReviewModeOverride={(input) =>
-                changeHumanTagReviewModeOverride({ data: input }).then(applyCustomizationResponse)
-              }
-            />
-          )}
-          renderFailure={(retry) => (
-            <WorkspaceModuleFailure label="Project customization" onRetry={retry} />
-          )}
-        />
-      }
-      portabilityControl={
-        <RetryableLazySurface
-          moduleLoader={projectDataManagementControlModule}
-          fallback={<WorkspaceModuleFallback label="Loading data management" />}
-          render={(ProjectDataManagementControl) => (
-            <ProjectDataManagementControl
-              project={project}
-              savedViews={savedViews}
-              onPreview={(input) => previewHumanProjectImport({ data: input })}
-              onExecute={(input) => executeHumanProjectImport({ data: input })}
-              onComplete={() => router.invalidate({ sync: true })}
-            />
-          )}
-          renderFailure={(retry) => (
-            <WorkspaceModuleFailure label="Data management" onRetry={retry} />
-          )}
-        />
-      }
-      onCreateTask={(input) => createHumanTask({ data: input }).then(applyTaskResponse)}
-      onPrepareTask={(input) => prepareHumanTask({ data: input }).then(applyTaskResponse)}
-      onUpdateTaskPlanning={(input) =>
-        updateHumanTaskPlanning({ data: input }).then(applyTaskResponse)
-      }
-      onSetTaskReviewModeOverride={(input) =>
-        setHumanTaskReviewModeOverride({ data: input }).then(applyTaskResponse)
-      }
-      onApproveTaskReview={(input) =>
-        approveHumanTaskReview({ data: input }).then(applyTransitionResponse)
-      }
-      onRequestTaskChanges={(input) =>
-        requestHumanTaskChanges({ data: input }).then(applyTransitionResponse)
-      }
-      onCancelTask={(input) => cancelHumanTask({ data: input }).then(applyTransitionResponse)}
-      onRestoreCancelledTask={(input) =>
-        restoreCancelledHumanTask({ data: input }).then(applyTransitionResponse)
-      }
-      onReopenTask={(input) => reopenHumanTask({ data: input }).then(applyTransitionResponse)}
-      onCreateTaskRelation={(input) =>
-        createHumanTaskRelation({ data: input }).then(async (response) => {
-          if (response.ok) {
-            await refreshTaskRows([response.relation.sourceTaskId, response.relation.targetTaskId]);
-          }
-          return response;
-        })
-      }
-      onArchiveTask={(input) => archiveHumanTask({ data: input }).then(applyTaskResponse)}
-      onInvalidateClaim={(input) =>
-        invalidateHumanTaskClaim({ data: input }).then(async (response) => {
-          if (response.ok) {
-            await refreshTaskRows([response.result.task.id]);
-          }
-          return response;
-        })
-      }
-      onCreateActivityEntry={createActivityEntry}
-      onWithdrawActivityEntry={withdrawActivity}
-      onCreateManualBlocker={createBlocker}
-      onResolveManualBlocker={resolveBlocker}
-      onPreviewBulkTasks={(intent) => previewHumanBulkTasks({ data: intent })}
-      onExecuteBulkTasks={async (input) => {
-        const response = await executeHumanBulkTasks({ data: input });
-        if (response.ok) {
-          await refreshTaskRows(response.result.items.map((item) => item.taskId));
         }
-        return response;
-      }}
-      onChangeTheme={async (nextTheme) => {
-        await applyThemeOptimistically({
-          previousTheme: theme,
-          nextTheme,
-          persist: async () => {
-            const response = await changeTheme({
-              data: { theme: nextTheme, idempotencyKey: crypto.randomUUID() },
-            });
-            if (!response.ok) throw new Error(response.error.message);
-          },
-        });
-        await router.invalidate({ sync: true });
-      }}
-      onChangeProjectReviewMode={async (input) => {
-        const response = await changeProjectReviewMode({ data: input });
-        if (response.ok) {
-          await refreshProjectCustomization(queryClient, project.id);
+        onCreateTask={(input) => createHumanTask({ data: input }).then(applyTaskResponse)}
+        onPrepareTask={(input) => prepareHumanTask({ data: input }).then(applyTaskResponse)}
+        onUpdateTaskPlanning={(input) =>
+          updateHumanTaskPlanning({ data: input }).then(applyTaskResponse)
+        }
+        onSetTaskReviewModeOverride={(input) =>
+          setHumanTaskReviewModeOverride({ data: input }).then(applyTaskResponse)
+        }
+        onApproveTaskReview={(input) =>
+          approveHumanTaskReview({ data: input }).then(applyTransitionResponse)
+        }
+        onRequestTaskChanges={(input) =>
+          requestHumanTaskChanges({ data: input }).then(applyTransitionResponse)
+        }
+        onCancelTask={(input) => cancelHumanTask({ data: input }).then(applyTransitionResponse)}
+        onRestoreCancelledTask={(input) =>
+          restoreCancelledHumanTask({ data: input }).then(applyTransitionResponse)
+        }
+        onReopenTask={(input) => reopenHumanTask({ data: input }).then(applyTransitionResponse)}
+        onCreateTaskRelation={(input) =>
+          createHumanTaskRelation({ data: input }).then(async (response) => {
+            if (response.ok) {
+              await refreshTaskRows([
+                response.relation.sourceTaskId,
+                response.relation.targetTaskId,
+              ]);
+            }
+            return response;
+          })
+        }
+        onArchiveTask={(input) => archiveHumanTask({ data: input }).then(applyTaskResponse)}
+        onInvalidateClaim={(input) =>
+          invalidateHumanTaskClaim({ data: input }).then(async (response) => {
+            if (response.ok) {
+              await refreshTaskRows([response.result.task.id]);
+            }
+            return response;
+          })
+        }
+        onCreateActivityEntry={createActivityEntry}
+        onWithdrawActivityEntry={withdrawActivity}
+        onCreateManualBlocker={createBlocker}
+        onResolveManualBlocker={resolveBlocker}
+        onPreviewBulkTasks={(intent) => previewHumanBulkTasks({ data: intent })}
+        onExecuteBulkTasks={async (input) => {
+          const response = await executeHumanBulkTasks({ data: input });
+          if (response.ok) {
+            await refreshTaskRows(response.result.items.map((item) => item.taskId));
+          }
+          return response;
+        }}
+        onChangeTheme={async (nextTheme) => {
+          await applyThemeOptimistically({
+            previousTheme: theme,
+            nextTheme,
+            persist: async () => {
+              const response = await changeTheme({
+                data: { theme: nextTheme, idempotencyKey: crypto.randomUUID() },
+              });
+              if (!response.ok) throw new Error(response.error.message);
+            },
+          });
           await router.invalidate({ sync: true });
-        }
-        return response;
-      }}
-    />
+        }}
+        onChangeProjectReviewMode={async (input) => {
+          const response = await changeProjectReviewMode({ data: input });
+          if (response.ok) {
+            await refreshProjectCustomization(queryClient, project.id);
+            await router.invalidate({ sync: true });
+          }
+          return response;
+        }}
+      />
+    </WorkspaceDataContext.Provider>
   );
 }
 

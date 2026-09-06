@@ -12,6 +12,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { chromium, expect as playwrightExpect } from "@playwright/test";
 
 import { HELM_PROJECT_ROOT } from "./environment.mjs";
+import { verifyProgressiveLoading } from "./progressive-loading-check.mjs";
 import {
   verifyStableProjectHeader,
   verifyTaskChrome,
@@ -461,6 +462,27 @@ try {
     assert.equal(tail.payload.events.length, 0);
     await page.getByRole("link", { name: "Activity", exact: true }).click();
     await expect(page.getByText(/^task · reopened$/i).first()).toBeVisible();
+  });
+
+  await step("progressive task loading and replay across an in-flight snapshot", async () => {
+    await verifyProgressiveLoading({
+      browser,
+      origin,
+      projectId,
+      taskId,
+      title,
+      addComment: async (text) => {
+        const { context } = await call(agent.client, "get_task_context", { projectId, taskId });
+        await call(agent.client, "add_comment", {
+          entryId: randomUUID(),
+          projectId,
+          taskId,
+          content: richText(text),
+          expectedTaskVersion: context.task.version,
+          idempotencyKey: randomUUID(),
+        });
+      },
+    });
   });
 
   await step("intent-preloaded search and direct saved-view navigation", async () => {
