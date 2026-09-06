@@ -96,6 +96,10 @@ async function connectAgent(origin, suffix) {
   });
   clients.push({ client, transport });
   await client.connect(transport, { timeout });
+  assert.match(client.getInstructions() ?? "", /Helm is/);
+  const guide = await call(client, "get_helm_guide", {});
+  assert.match(guide.guide, /expectedVersion/);
+  assert.match(guide.guide, /human review/);
   const { registration } = await call(client, "register_agent_run", {
     profileKey: `workflow-${suffix}`,
     displayName: `Workflow agent ${suffix}`,

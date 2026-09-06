@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -323,7 +324,223 @@ function schemaRootPropertyNames(schema: unknown): string[] {
   return properties && typeof properties === "object" ? Object.keys(properties) : [];
 }
 
+function assertInputDescriptions(schema: unknown) {
+  if (!schema || typeof schema !== "object") return;
+  const properties: unknown = Reflect.get(schema, "properties");
+  if (properties && typeof properties === "object") {
+    for (const [name, property] of Object.entries(properties)) {
+      expect(property, name).toBeTypeOf("object");
+      expect(Reflect.get(property, "description"), name).toBeTypeOf("string");
+    }
+  }
+  for (const value of Object.values(schema)) assertInputDescriptions(value);
+}
+
 describe("MCP project contract", () => {
+  it("onboards an unfamiliar agent through initialization and a readable guide", async () => {
+    expect(client.getInstructions()).toContain("Helm is");
+    expect(client.getInstructions()).toContain("register_agent_run");
+    expect(client.getInstructions()).toContain("claim_next");
+    expect(client.getInstructions()).toContain("renew_lease");
+    const resources = await client.listResources();
+    expect(resources.resources).toEqual(
+      expect.arrayContaining([expect.objectContaining({ uri: "helm://guide" })]),
+    );
+    const resource = await client.readResource({ uri: "helm://guide" });
+    const guide = await client.callTool({ name: "get_helm_guide", arguments: {} });
+    expect(guide.isError).not.toBe(true);
+    const guideText = z.object({ guide: z.string() }).parse(guide.structuredContent).guide;
+    expect(guideText).toBe(z.object({ text: z.string() }).parse(resource.contents[0]).text);
+    expect(guideText).toContain("expectedVersion");
+    expect(guideText).toContain("idempotencyKey");
+    expect(guideText).toContain("human review");
+  });
+
+  it("advertises the real bulk preview arguments and keeps the catalog bounded", async () => {
+    const catalog = await client.listTools();
+    const preview = catalog.tools.find(({ name }) => name === "preview_bulk_tasks");
+    expect(preview).toBeDefined();
+    expect(schemaRootPropertyNames(preview?.inputSchema)).toContain("projectId");
+    expect(schemaRootPropertyNames(preview?.inputSchema)).toContain("selection");
+    const validate = new AjvJsonSchemaValidator().getValidator(preview!.inputSchema);
+    expect(validate({}).valid).toBe(false);
+    expect(
+      validate({
+        schemaVersion: 1,
+        kind: "update",
+        projectId,
+        reason: "Prioritize the agreed task.",
+        selection: { type: "ids", taskIds: ["task-1"] },
+        patch: { priority: "high" },
+      }).valid,
+    ).toBe(true);
+    // The previous catalog was 515 KB without bulk inputs or field descriptions.
+    expect(Buffer.byteLength(JSON.stringify(catalog))).toBeLessThan(500_000);
+  });
+
+  it("explains critical inputs and declares tool safety hints", async () => {
+    const { tools } = await client.listTools();
+    for (const tool of tools) {
+      assertInputDescriptions(tool.inputSchema);
+      expect(tool.annotations?.readOnlyHint).toBeTypeOf("boolean");
+      expect(tool.annotations?.destructiveHint).toBeTypeOf("boolean");
+      expect(tool.annotations?.openWorldHint).toBe(false);
+      for (const name of [
+        "projectId",
+        "taskId",
+        "expectedVersion",
+        "idempotencyKey",
+        "leaseToken",
+        "profileKey",
+        "capabilities",
+        "resumeRunId",
+        "takeoverActiveRun",
+      ]) {
+        const property = tool.inputSchema.properties?.[name];
+        if (property) expect(Reflect.get(property, "description")).toBeTypeOf("string");
+      }
+    }
+  });
+
+  it("validates guide examples and follows discovery, bulk preview, claim, progress, renewal, and review", async () => {
+    const guideResult = await client.callTool({ name: "get_helm_guide", arguments: {} });
+    const guide = z.object({ guide: z.string() }).parse(guideResult.structuredContent).guide;
+    const catalog = await client.listTools();
+    const validator = new AjvJsonSchemaValidator();
+    const examples = new Map<string, Record<string, unknown>>();
+    let content: unknown;
+    for (const block of guide.matchAll(/```json\n([\s\S]*?)\n```/g)) {
+      const parsed: unknown = JSON.parse(block[1]!);
+      const call = z
+        .object({ tool: z.string(), arguments: z.record(z.string(), z.unknown()) })
+        .safeParse(parsed);
+      if (call.success) {
+        const tool = catalog.tools.find(({ name }) => name === call.data.tool);
+        expect(tool).toBeDefined();
+        const result = validator.getValidator(tool!.inputSchema)(call.data.arguments);
+        expect(result.errorMessage).toBeUndefined();
+        expect(result.valid).toBe(true);
+        examples.set(call.data.tool, call.data.arguments);
+      } else {
+        content = richTextDocumentSchema.parse(parsed);
+      }
+    }
+    expect([...examples.keys()]).toEqual([
+      "register_agent_run",
+      "complete_task",
+      "create_task",
+      "preview_bulk_tasks",
+    ]);
+    expect(content).toBeDefined();
+    const projects = projectCatalogSchema.parse(
+      (await client.callTool({ name: "list_projects", arguments: {} })).structuredContent,
+    );
+    const selectedProject = projects.projects[0]!;
+    const registered = await client.callTool({
+      name: "register_agent_run",
+      arguments: examples.get("register_agent_run")!,
+    });
+    expect(registered.isError).not.toBe(true);
+    const task = successfulTaskSchema.parse(
+      (
+        await client.callTool({
+          name: "create_task",
+          arguments: {
+            ...examples.get("create_task"),
+            projectId: selectedProject.id,
+            expectedOutcome: "The example can be executed without hidden inputs.",
+            acceptanceCriteria:
+              "Each step succeeds using advertised arguments and returned IDs/versions.",
+            checklist: [{ id: "verify", text: "Verify the workflow", checked: false }],
+          },
+        })
+      ).structuredContent,
+    ).task;
+    const sqliteBulkStore = createSqliteBulkTaskStore(projectStore.database);
+    bulkPreviewOperation = (...arguments_) => sqliteBulkStore.preview(...arguments_);
+    bulkExecuteOperation = (...arguments_) => sqliteBulkStore.execute(...arguments_);
+    const intent = {
+      ...examples.get("preview_bulk_tasks"),
+      projectId: selectedProject.id,
+      selection: { type: "ids", taskIds: [task.id] },
+      patch: { lifecycle: "ready", priority: "high" },
+    };
+    const preview = successfulBulkTaskPreviewSchema.parse(
+      (await client.callTool({ name: "preview_bulk_tasks", arguments: intent })).structuredContent,
+    ).preview;
+    const executed = await client.callTool({
+      name: "execute_bulk_tasks",
+      arguments: { intent, previewToken: preview.previewToken, idempotencyKey: "guide-bulk" },
+    });
+    expect(executed.isError).not.toBe(true);
+    const work = successfulDiscoverySchema.parse(
+      (await client.callTool({ name: "find_work", arguments: { projectId: selectedProject.id } }))
+        .structuredContent,
+    );
+    expect(work.page.candidates[0]?.id).toBe(task.id);
+    const claim = successfulLeaseGrantSchema.parse(
+      (
+        await client.callTool({
+          name: "claim_next",
+          arguments: { projectId: selectedProject.id, idempotencyKey: "guide-claim" },
+        })
+      ).structuredContent,
+    ).grant;
+    const context = successfulContextSchema.parse(
+      (
+        await client.callTool({
+          name: "get_task_context",
+          arguments: { projectId: selectedProject.id, taskId: claim.task.id },
+        })
+      ).structuredContent,
+    ).context;
+    expect(context.task.version).toBe(claim.task.version);
+    const progress = successfulActivityMutationSchema.parse(
+      (
+        await client.callTool({
+          name: "report_progress",
+          arguments: {
+            projectId: selectedProject.id,
+            taskId: claim.task.id,
+            leaseToken: claim.leaseToken,
+            expectedTaskVersion: claim.task.version,
+            entryId: "guide-progress",
+            idempotencyKey: "guide-progress",
+            content,
+          },
+        })
+      ).structuredContent,
+    ).payload;
+    const renewed = successfulLeaseGrantSchema.parse(
+      (
+        await client.callTool({
+          name: "renew_lease",
+          arguments: {
+            leaseToken: claim.leaseToken,
+            expectedVersion: progress.taskVersion,
+            idempotencyKey: "guide-renew",
+          },
+        })
+      ).structuredContent,
+    ).grant;
+    const completion = successfulCompletionSchema.parse(
+      (
+        await client.callTool({
+          name: "complete_task",
+          arguments: {
+            ...examples.get("complete_task"),
+            projectId: selectedProject.id,
+            taskId: renewed.task.id,
+            leaseToken: renewed.leaseToken,
+            expectedVersion: renewed.task.version,
+          },
+        })
+      ).structuredContent,
+    ).result;
+    expect(completion.task.lifecycle).toBe("review");
+    expect(completion.task.claim).toBeNull();
+  });
+
   it("advertises the installed package identity during MCP initialization", () => {
     expect(client.getServerVersion()).toEqual({
       name: packageMetadata.name,
@@ -699,11 +916,21 @@ describe("MCP shared task-query contract", () => {
         properties: {
           filter: expect.any(Object),
           order: expect.any(Object),
-          fields: expect.objectContaining({ maxItems: 10 }),
+          fields: expect.any(Object),
         },
         required: expect.arrayContaining(["filter"]),
       },
     });
+    const validateSearch = new AjvJsonSchemaValidator().getValidator(searchTool!.inputSchema);
+    expect(validateSearch({ filter: { schemaVersion: 1, projectId }, fields: [] }).valid).toBe(
+      true,
+    );
+    expect(
+      validateSearch({
+        filter: { schemaVersion: 1, projectId },
+        fields: Array(11).fill("descriptionText"),
+      }).valid,
+    ).toBe(false);
     expect(searchTool?.inputSchema.properties).not.toHaveProperty("agentCapabilities");
     expect(listViewsTool).toMatchObject({
       annotations: { readOnlyHint: true },

@@ -122,6 +122,11 @@ You should see the repository you connected. If Helm's tools do not appear, chec
 is still running, the URL ends in `/api/mcp`, and the client supports Streamable HTTP.
 Opening the MCP URL as a normal web page is not a connection test.
 
+Helm supplies a short workflow guide when the client connects. An agent with no prior Helm context
+can also call `get_helm_guide` without registering; clients with resource browsing can read the same
+guide at `helm://guide`. It includes request examples, project selection, claims, renewal, version
+conflicts, retry safety, and the human-review handoff.
+
 ## 4. Give the agent one task
 
 Start with a supervised handoff. Replace the repository path in this prompt:
