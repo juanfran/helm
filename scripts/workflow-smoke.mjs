@@ -13,6 +13,7 @@ import { chromium, expect as playwrightExpect } from "@playwright/test";
 
 import { HELM_PROJECT_ROOT } from "./environment.mjs";
 import { verifyProgressiveLoading } from "./progressive-loading-check.mjs";
+import { verifyMultiTabNavigation } from "./multi-tab-navigation-check.mjs";
 import {
   verifyStableProjectHeader,
   verifyTaskChrome,
@@ -483,6 +484,10 @@ try {
         });
       },
     });
+  });
+
+  await step("navigation with multiple live tabs sharing one HTTP connection pool", async () => {
+    await verifyMultiTabNavigation(browser, origin, projectId);
   });
 
   await step("intent-preloaded search and direct saved-view navigation", async () => {

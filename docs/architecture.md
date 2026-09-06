@@ -153,6 +153,15 @@ Tools return compact structured data plus readable summaries. List calls paginat
 
 Every committed event receives a monotonic SQLite sequence. The server publishes new sequences through an SSE endpoint. Clients reconnect with their last cursor, replay missed events from SQLite, then continue live.
 
+Browser subscriptions share one physical SSE connection through a same-origin SharedWorker, across
+application, workspace, Search, saved-view consumers, and tabs. The hub filters by project and uses
+SQLite for replay when a new consumer joins behind the transport cursor. Each consumer still advances
+its own cursor only after successful projection; a failed projection can rewind independently without
+duplicating updates for other consumers. Closing or leaving a tab releases its logical subscriptions.
+Browsers without SharedWorker support fall back to one shared connection per tab. Development console
+mirroring is disabled because its extra per-tab SSE streams can also exhaust HTTP/1 connection slots;
+the devtools panels and normal browser/terminal logs remain available.
+
 The browser uses an event to invalidate only affected collection subsets or query keys. Optimistic local mutations remain visible while the server command persists; authoritative events reconcile them. Slow consumers can discard transient notifications and recover from the durable cursor.
 
 ## Client data and navigation

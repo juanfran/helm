@@ -23,7 +23,9 @@ const config = defineConfig(({ command, mode }) => {
     },
     server: host ? { host } : undefined,
     plugins: [
-      devtools(),
+      // Per-tab log-mirroring SSE can exhaust Chrome's HTTP/1 connection pool.
+      // Keep the devtools panels; inspect server logs in the terminal.
+      devtools({ consolePiping: { enabled: false } }),
       stylexPlugin({
         dev: mode === "development",
         fileName: "stylex.css",

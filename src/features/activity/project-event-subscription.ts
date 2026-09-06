@@ -1,5 +1,6 @@
 import type { ProjectEvent } from "../../domain/activity";
 import { parseProjectEventWire } from "./project-event-wire";
+import { sharedProjectEventSource } from "./shared-project-event-source";
 
 export type EventSourceLike = {
   addEventListener(type: string, listener: EventListener): void;
@@ -25,10 +26,6 @@ type ActiveConnection = {
   handleConnectionError: EventListener;
 };
 
-function defaultEventSource(url: string): EventSourceLike {
-  return new EventSource(url);
-}
-
 function asError(error: unknown) {
   return error instanceof Error ? error : new Error("Project event projection failed.");
 }
@@ -47,7 +44,7 @@ export function subscribeToProjectEvents({
   onCursor,
   onOpen,
   onError,
-  createEventSource = defaultEventSource,
+  createEventSource = sharedProjectEventSource,
 }: ProjectEventSubscriptionOptions) {
   let appliedCursor = afterCursor;
   let stopped = false;
