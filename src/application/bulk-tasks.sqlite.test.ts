@@ -7,7 +7,31 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createProject } from "./projects";
 import { executeBulkTasks, previewBulkTasks, type BulkTaskServices } from "./bulk-tasks";
-import { createTask, listTasks, updateTaskPlanning, type TaskServices } from "./tasks";
+import {
+  archiveTask,
+  cancelTask,
+  claimTask,
+  completeTask,
+  createTask,
+  createTaskRelation,
+  listTaskAttempts,
+  listTasks,
+  reopenTask,
+  restoreCancelledTask,
+  updateTaskPlanning,
+  type TaskServices,
+} from "./tasks";
+import { registerAgentRun } from "./agents";
+import { searchTasks } from "./task-queries";
+import { createSqliteAgentStore } from "../infrastructure/sqlite-agent-store.server";
+import { createSqliteTaskQueryStore } from "../infrastructure/sqlite-task-query-store.server";
+import type { BulkTaskReconcileItem } from "../domain/bulk-tasks";
+import { canonicalHelmProjectExportJson } from "../domain/portability";
+import {
+  executeSqliteProjectImportInCurrentTransaction,
+  exportSqliteProject,
+  previewSqliteProjectImport,
+} from "../infrastructure/sqlite-portable-project.server";
 import { emptyRichTextDocument, type Actor, type CreateTaskInput } from "../domain/tasks";
 import { localRepositoryInspector } from "../infrastructure/repository-inspector.server";
 import { createSqliteBulkTaskStore } from "../infrastructure/sqlite-bulk-task-store.server";
@@ -1073,5 +1097,629 @@ describe("SQLite bulk task commands", () => {
         .pluck()
         .get(),
     ).toBe(0);
+  });
+});
+
+function reconcileIntent(items: BulkTaskReconcileItem[]) {
+  return {
+    schemaVersion: 1 as const,
+    kind: "reconcile" as const,
+    projectId,
+    reason: "Reconcile the external snapshot requested by the human",
+    items,
+  };
+}
+
+async function executeIntent(intent: unknown, actor: Actor = human) {
+  const preview = await Effect.runPromise(previewBulkTasks(intent, actor, bulkServices));
+  const input = { intent, previewToken: preview.previewToken, idempotencyKey: crypto.randomUUID() };
+  const result = await Effect.runPromise(executeBulkTasks(input, actor, bulkServices));
+  return { preview, input, result };
+}
+
+function reconciliationSnapshot() {
+  return {
+    tasks: projectStore.database.prepare("select * from tasks order by id").all(),
+    attempts: projectStore.database.prepare("select * from attempts order by id").all(),
+    leases: projectStore.database.prepare("select * from leases order by id").all(),
+    events: projectStore.database.prepare("select * from events order by cursor").all(),
+    idempotency: projectStore.database
+      .prepare("select * from idempotency_records order by key")
+      .all(),
+  };
+}
+
+const readyContent = {
+  expectedOutcome: "External work is ready to execute",
+  acceptanceCriteria: "Verify the agreed behavior",
+  checklist: [{ id: "verify", text: "Run verification", checked: false }],
+};
+
+describe("Content refresh and external reconciliation", () => {
+  it("patches content without erasing omitted fields and enforces preparation on the resulting task", async () => {
+    const task = await Effect.runPromise(
+      createTask(
+        taskInput({ title: "Yesterday", agentContext: "Preserve this context" }),
+        human,
+        taskServices,
+      ),
+    );
+    const description = {
+      version: 1 as const,
+      doc: {
+        type: "doc" as const,
+        content: [{ type: "paragraph", content: [{ type: "text", text: "Nebulous description" }] }],
+      },
+    };
+    const { preview } = await executeIntent(
+      updateIntent([task.id], {
+        title: "Today's title",
+        description,
+        ...readyContent,
+        lifecycle: "ready",
+      }),
+    );
+    expect(preview.targets[0]?.changes.map(({ field }) => field)).toEqual(
+      expect.arrayContaining([
+        "title",
+        "description",
+        "expectedOutcome",
+        "acceptanceCriteria",
+        "checklist",
+        "lifecycle",
+      ]),
+    );
+    expect((await Effect.runPromise(listTasks({ projectId }, taskServices)))[0]).toMatchObject({
+      title: "Today's title",
+      description,
+      descriptionText: "Nebulous description",
+      agentContext: task.agentContext,
+      ...readyContent,
+      lifecycle: "ready",
+      version: 2,
+    });
+    const queryServices = {
+      store: createSqliteTaskQueryStore(projectStore.database),
+      clock: { today: () => now.slice(0, 10), now: () => now },
+    };
+    const page = await Effect.runPromise(
+      searchTasks(
+        { filter: { schemaVersion: 1, projectId, search: { text: "Nebulous", mode: "all" } } },
+        [],
+        queryServices,
+      ),
+    );
+    expect(page.items.map(({ task: itemTask }) => itemTask.id)).toEqual([task.id]);
+    const invalid = await Effect.runPromise(
+      previewBulkTasks(updateIntent([task.id], { acceptanceCriteria: "" }), human, bulkServices),
+    );
+    expect(invalid).toMatchObject({
+      executable: false,
+      targets: [{ failures: [{ code: "task_not_prepared" }] }],
+    });
+    await executeIntent(
+      updateIntent([task.id], {
+        lifecycle: "backlog",
+        acceptanceCriteria: "",
+        description: emptyRichTextDocument,
+        checklist: [],
+      }),
+    );
+    const cleared = (await Effect.runPromise(listTasks({ projectId }, taskServices)))[0];
+    expect(cleared).toMatchObject({
+      lifecycle: "backlog",
+      descriptionText: "",
+      acceptanceCriteria: "",
+      checklist: [],
+      agentContext: task.agentContext,
+    });
+  });
+
+  it("reconciles different external states, keeps no-ops stable, audits source and actor, and preserves retry results", async () => {
+    const tasks = await Promise.all(
+      ["Completed", "External active", "Cancelled", "Unchanged"].map((title) =>
+        Effect.runPromise(createTask(taskInput({ title }), human, taskServices)),
+      ),
+    );
+    const actor: Actor = { type: "agent", id: "import-run" };
+    const items = tasks.map((task, index) => ({
+      taskId: task.id,
+      expectedVersion: task.version,
+      sourceRef: `tracker:ITEM-${index}`,
+      patch: { lifecycle: (["done", "in_progress", "cancelled", "backlog"] as const)[index]! },
+    }));
+    const intent = reconcileIntent(items);
+    const before = reconciliationSnapshot();
+    const preview = await Effect.runPromise(previewBulkTasks(intent, actor, bulkServices));
+    expect(reconciliationSnapshot()).toEqual(before);
+    expect(preview).toMatchObject({ executable: true, affectedCount: 3, matchedCount: 4 });
+    const input = {
+      intent,
+      previewToken: preview.previewToken,
+      idempotencyKey: "external-snapshot",
+    };
+    const result = await Effect.runPromise(executeBulkTasks(input, actor, bulkServices));
+    expect(result).toMatchObject({ kind: "reconcile", affectedCount: 3 });
+    const stored = await Effect.runPromise(listTasks({ projectId }, taskServices));
+    for (const [index, task] of tasks.entries()) {
+      expect(stored.find(({ id }) => id === task.id)).toMatchObject({
+        lifecycle: items[index]!.patch.lifecycle,
+        claim: null,
+        reviewAttemptId: null,
+        version: index === 3 ? 1 : 2,
+      });
+    }
+    expect(stored.find(({ id }) => id === tasks[1]!.id)?.eligibility?.claimable).toBe(false);
+    expect(await Effect.runPromise(listTaskAttempts({ projectId }, taskServices))).toEqual([]);
+    expect(projectStore.database.prepare("select count(*) from leases").pluck().get()).toBe(0);
+    const audit = projectStore.database
+      .prepare<[], { kind: string; actor_type: string; actor_id: string; payload_json: string }>(
+        "select kind, actor_type, actor_id, payload_json from events where kind in ('task.bulk.reconciled', 'task.reconciled') order by cursor",
+      )
+      .all();
+    expect(audit.map(({ kind }) => kind)).toEqual([
+      "task.bulk.reconciled",
+      "task.reconciled",
+      "task.reconciled",
+      "task.reconciled",
+    ]);
+    for (const event of audit.slice(1)) {
+      expect(event).toMatchObject({ actor_type: "agent", actor_id: actor.id });
+      expect(JSON.parse(event.payload_json)).toMatchObject({
+        sourceRef: expect.stringMatching(/^tracker:ITEM-/),
+        reason: intent.reason,
+        execution: "external",
+        previousVersion: 1,
+        version: 2,
+        parentEventCursor: result.parentEventCursor,
+      });
+    }
+    await executeIntent(
+      reconcileIntent([
+        {
+          taskId: tasks[0]!.id,
+          expectedVersion: 2,
+          sourceRef: items[0]!.sourceRef,
+          patch: { title: "Refreshed after completion", acceptanceCriteria: "New criteria" },
+        },
+      ]),
+    );
+    const afterRefresh = reconciliationSnapshot();
+    expect(await Effect.runPromise(executeBulkTasks(input, actor, bulkServices))).toEqual(result);
+    expect(reconciliationSnapshot()).toEqual(afterRefresh);
+    const collision = await Effect.runPromise(
+      Effect.either(
+        executeBulkTasks(
+          { ...input, intent: { ...intent, reason: "Different reason" } },
+          actor,
+          bulkServices,
+        ),
+      ),
+    );
+    expect(Either.isLeft(collision) && collision.left["_tag"]).toBe(
+      "BulkTaskIdempotencyConflictError",
+    );
+    const noOp = await Effect.runPromise(
+      previewBulkTasks(
+        reconcileIntent([{ ...items[1]!, expectedVersion: 2 }]),
+        actor,
+        bulkServices,
+      ),
+    );
+    expect(noOp).toMatchObject({
+      executable: false,
+      affectedCount: 0,
+      failures: [{ code: "no_changes" }],
+    });
+  });
+
+  it("updates dependent eligibility and emits realtime hints when external completion changes", async () => {
+    const prerequisite = await Effect.runPromise(
+      createTask(taskInput({ title: "External prerequisite" }), human, taskServices),
+    );
+    const dependent = await Effect.runPromise(
+      createTask(
+        taskInput({ title: "Dependent", lifecycle: "ready", ...readyContent }),
+        human,
+        taskServices,
+      ),
+    );
+    await Effect.runPromise(
+      createTaskRelation(
+        {
+          projectId,
+          sourceTaskId: prerequisite.id,
+          targetTaskId: dependent.id,
+          type: "blocks",
+          expectedSourceVersion: prerequisite.version,
+          expectedTargetVersion: dependent.version,
+          idempotencyKey: "external-blocks",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    const current = (await Effect.runPromise(listTasks({ projectId }, taskServices))).find(
+      ({ id }) => id === prerequisite.id,
+    )!;
+    const { result } = await executeIntent(
+      reconcileIntent([
+        {
+          taskId: current.id,
+          expectedVersion: current.version,
+          sourceRef: "tracker:dependency",
+          patch: { lifecycle: "done" },
+        },
+      ]),
+    );
+    const stored = await Effect.runPromise(listTasks({ projectId }, taskServices));
+    expect(stored.find(({ id }) => id === dependent.id)?.eligibility?.claimable).toBe(true);
+    const hints = projectStore.database
+      .prepare<[number], { changes_json: string }>(
+        "select changes_json from events where cursor >= ?",
+      )
+      .all(result.parentEventCursor);
+    expect(hints).toHaveLength(2);
+    for (const row of hints)
+      expect(JSON.parse(row.changes_json).taskIds).toEqual(
+        expect.arrayContaining([current.id, dependent.id]),
+      );
+    await executeIntent(
+      reconcileIntent([
+        {
+          taskId: current.id,
+          expectedVersion: current.version + 1,
+          sourceRef: "tracker:dependency",
+          patch: { lifecycle: "in_progress" },
+        },
+      ]),
+    );
+    expect(
+      (await Effect.runPromise(listTasks({ projectId }, taskServices))).find(
+        ({ id }) => id === dependent.id,
+      )?.eligibility?.claimable,
+    ).toBe(false);
+  });
+
+  it("rejects stale item versions, changed previews, and mixed invalid batches without writes", async () => {
+    const task = await Effect.runPromise(createTask(taskInput(), human, taskServices));
+    const item = {
+      taskId: task.id,
+      expectedVersion: task.version,
+      sourceRef: "tracker:one",
+      patch: { title: "Fresh text", lifecycle: "done" as const },
+    };
+    const intent = reconcileIntent([item]);
+    const preview = await Effect.runPromise(previewBulkTasks(intent, human, bulkServices));
+    await executeIntent(updateIntent([task.id], { title: "Concurrent human edit" }));
+    const before = reconciliationSnapshot();
+    const stale = await Effect.runPromise(
+      Effect.either(
+        executeBulkTasks(
+          { intent, previewToken: preview.previewToken, idempotencyKey: "stale-import" },
+          human,
+          bulkServices,
+        ),
+      ),
+    );
+    expect(Either.isLeft(stale) && stale.left["_tag"]).toBe("BulkTaskPreviewStaleError");
+    const freshPreview = await Effect.runPromise(previewBulkTasks(intent, human, bulkServices));
+    expect(freshPreview).toMatchObject({
+      executable: false,
+      targets: [{ failures: [{ code: "task_version_conflict" }] }],
+    });
+    const mixed = reconcileIntent([
+      { ...item, expectedVersion: 2 },
+      { ...item, taskId: "missing" },
+    ]);
+    const invalid = await Effect.runPromise(previewBulkTasks(mixed, human, bulkServices));
+    expect(invalid.executable).toBe(false);
+    const failure = await Effect.runPromise(
+      Effect.either(
+        executeBulkTasks(
+          { intent: mixed, previewToken: invalid.previewToken, idempotencyKey: "mixed-import" },
+          human,
+          bulkServices,
+        ),
+      ),
+    );
+    expect(Either.isLeft(failure) && failure.left["_tag"]).toBe("BulkTaskPreviewValidationError");
+    expect(reconciliationSnapshot()).toEqual(before);
+  });
+
+  it("protects active and expired Helm execution, pending and cancelled reviews, and archived work", async () => {
+    const registration = await Effect.runPromise(
+      registerAgentRun(
+        {
+          profileKey: "worker",
+          displayName: "Worker",
+          capabilities: [],
+          idempotencyKey: "register-worker",
+        },
+        { sessionId: "worker-session", clientName: "test", clientVersion: "1" },
+        { store: createSqliteAgentStore(projectStore.database) },
+      ),
+    );
+    const task = await Effect.runPromise(
+      createTask(taskInput({ lifecycle: "ready", ...readyContent }), human, taskServices),
+    );
+    const grant = await Effect.runPromise(
+      claimTask(
+        {
+          projectId,
+          taskId: task.id,
+          expectedVersion: task.version,
+          leaseDurationSeconds: 300,
+          idempotencyKey: "claim-worker",
+        },
+        registration,
+        taskServices,
+      ),
+    );
+    const assertProtected = async (version: number, code: string) => {
+      const before = reconciliationSnapshot();
+      const intent = reconcileIntent([
+        {
+          taskId: task.id,
+          expectedVersion: version,
+          sourceRef: "tracker:protected",
+          patch: { lifecycle: "done", acceptanceCriteria: "Overwritten criteria" },
+        },
+      ]);
+      const preview = await Effect.runPromise(previewBulkTasks(intent, human, bulkServices));
+      expect(preview.executable).toBe(false);
+      expect(preview.targets[0]?.failures).toEqual(
+        expect.arrayContaining([expect.objectContaining({ code })]),
+      );
+      const result = await Effect.runPromise(
+        Effect.either(
+          executeBulkTasks(
+            { intent, previewToken: preview.previewToken, idempotencyKey: crypto.randomUUID() },
+            human,
+            bulkServices,
+          ),
+        ),
+      );
+      expect(Either.isLeft(result) && result.left["_tag"]).toBe("BulkTaskPreviewValidationError");
+      expect(reconciliationSnapshot()).toEqual(before);
+    };
+    await assertProtected(grant.task.version, "task_execution_conflict");
+    now = "2026-09-04T12:10:00.000Z";
+    await assertProtected(grant.task.version, "task_execution_conflict");
+    now = "2026-09-04T12:01:00.000Z";
+    const completed = await Effect.runPromise(
+      completeTask(
+        {
+          projectId,
+          taskId: task.id,
+          leaseToken: grant.leaseToken,
+          expectedVersion: grant.task.version,
+          idempotencyKey: "complete-worker",
+          report: {
+            resultSummary: "Work complete",
+            changedAreas: ["src/example.ts"],
+            verificationResults: [{ name: "Tests", status: "passed", details: "Tests passed" }],
+            references: [],
+            risks: [],
+            followUpWork: [],
+          },
+        },
+        registration,
+        taskServices,
+      ),
+    );
+    expect(completed.task.lifecycle).toBe("review");
+    await assertProtected(completed.task.version, "task_execution_conflict");
+    const cancelled = await Effect.runPromise(
+      cancelTask(
+        {
+          taskId: task.id,
+          expectedVersion: completed.task.version,
+          reason: "Cancel review",
+          idempotencyKey: "cancel-review",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    await assertProtected(cancelled.task.version, "task_execution_conflict");
+    const archived = await Effect.runPromise(
+      archiveTask(
+        {
+          taskId: task.id,
+          expectedVersion: cancelled.task.version,
+          reason: "Archive cancelled review",
+          idempotencyKey: "archive-review",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    await assertProtected(archived.version, "task_archived");
+  });
+
+  it("round-trips externally reconciled tasks and their provenance through JSON without inventing execution history", async () => {
+    const tasks = await Promise.all(
+      ["done", "in_progress", "cancelled"].map((lifecycle) =>
+        Effect.runPromise(
+          createTask(taskInput({ title: `External ${lifecycle}` }), human, taskServices),
+        ),
+      ),
+    );
+    await executeIntent(
+      reconcileIntent(
+        tasks.map((task, index) => ({
+          taskId: task.id,
+          expectedVersion: 1,
+          sourceRef: `tracker:ITEM-${index}`,
+          patch: { lifecycle: (["done", "in_progress", "cancelled"] as const)[index]! },
+        })),
+      ),
+    );
+    const artifact = exportSqliteProject(projectStore.database, { projectId }, { now });
+    expect(artifact.attempts).toEqual([]);
+    const target = createSqliteProjectStore(":memory:");
+    try {
+      const input = {
+        source: { format: "json" as const, content: canonicalHelmProjectExportJson(artifact) },
+        targetProjectId: null,
+        repositoryRoot: artifact.project.repositoryRoot,
+        reason: "Restore reconciled external work",
+      };
+      const preview = previewSqliteProjectImport(target.database, input, human, { now });
+      expect(preview).toMatchObject({ executable: true, conflicts: [] });
+      target.database
+        .transaction(() =>
+          executeSqliteProjectImportInCurrentTransaction(
+            target.database,
+            { ...input, previewToken: preview.previewToken, idempotencyKey: "restore-reconciled" },
+            human,
+            { now },
+          ),
+        )
+        .immediate();
+      const restored = exportSqliteProject(target.database, { projectId }, { now });
+      expect(restored.tasks).toEqual(artifact.tasks);
+      expect(restored.attempts).toEqual([]);
+      expect(target.database.prepare("select count(*) from leases").pluck().get()).toBe(0);
+      expect(
+        restored.sourceEvents.find(({ kind }) => kind === "project.import.source_events_batch")
+          ?.payload,
+      ).toMatchObject({ sourceEvents: artifact.sourceEvents });
+    } finally {
+      target.close();
+    }
+  });
+
+  it("keeps imported work manageable by humans without making incomplete tasks ready", async () => {
+    const task = await Effect.runPromise(createTask(taskInput(), human, taskServices));
+    const item = {
+      taskId: task.id,
+      expectedVersion: 1,
+      sourceRef: "tracker:external",
+      patch: { lifecycle: "in_progress" as const },
+    };
+    await executeIntent(reconcileIntent([item]));
+    const cancelled = await Effect.runPromise(
+      cancelTask(
+        {
+          taskId: task.id,
+          expectedVersion: 2,
+          reason: "Stop external work",
+          idempotencyKey: "cancel-external",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    expect(cancelled).toMatchObject({
+      task: { lifecycle: "cancelled", cancelledFromLifecycle: "in_progress" },
+      attempt: null,
+      claim: null,
+    });
+    const restored = await Effect.runPromise(
+      restoreCancelledTask(
+        {
+          taskId: task.id,
+          expectedVersion: 3,
+          reason: "Prepare this work locally",
+          idempotencyKey: "restore-external",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    expect(restored.task).toMatchObject({ lifecycle: "backlog", version: 4 });
+    await executeIntent(
+      reconcileIntent([{ ...item, expectedVersion: 4, patch: { lifecycle: "done" } }]),
+    );
+    const before = reconciliationSnapshot();
+    const invalid = await Effect.runPromise(
+      Effect.either(
+        reopenTask(
+          {
+            projectId,
+            taskId: task.id,
+            expectedVersion: 5,
+            destination: "ready",
+            reason: "Reopen incomplete imported work",
+            idempotencyKey: "invalid-reopen",
+          },
+          human,
+          taskServices,
+        ),
+      ),
+    );
+    expect(Either.isLeft(invalid) && invalid.left["_tag"]).toBe("TaskPreparationError");
+    expect(reconciliationSnapshot()).toEqual(before);
+    const reopened = await Effect.runPromise(
+      reopenTask(
+        {
+          projectId,
+          taskId: task.id,
+          expectedVersion: 5,
+          destination: "backlog",
+          reason: "Prepare imported work",
+          idempotencyKey: "reopen-import",
+        },
+        human,
+        taskServices,
+      ),
+    );
+    expect(reopened.task).toMatchObject({ lifecycle: "backlog", version: 6 });
+    await executeIntent(
+      reconcileIntent([
+        { ...item, expectedVersion: 6, patch: { lifecycle: "ready", ...readyContent } },
+      ]),
+    );
+    expect((await Effect.runPromise(listTasks({ projectId }, taskServices)))[0]).toMatchObject({
+      lifecycle: "ready",
+      version: 7,
+      eligibility: { claimable: true },
+    });
+  });
+
+  it("rolls content, states, events, search, and idempotency back if a later reconciliation event fails", async () => {
+    const tasks = await Promise.all(
+      ["One", "Two"].map((title) =>
+        Effect.runPromise(createTask(taskInput({ title }), human, taskServices)),
+      ),
+    );
+    const intent = reconcileIntent(
+      tasks.map((task) => ({
+        taskId: task.id,
+        expectedVersion: task.version,
+        sourceRef: `tracker:${task.title}`,
+        patch: { title: "Rollback content", lifecycle: "done" },
+      })),
+    );
+    const preview = await Effect.runPromise(previewBulkTasks(intent, human, bulkServices));
+    projectStore.database.exec(
+      `create trigger reject_later_reconciliation before insert on events when NEW.kind = 'task.reconciled' and exists (select 1 from events where kind = 'task.reconciled') begin select raise(abort, 'reconciliation event rejected'); end;`,
+    );
+    const before = reconciliationSnapshot();
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const result = await Effect.runPromise(
+      Effect.either(
+        executeBulkTasks(
+          { intent, previewToken: preview.previewToken, idempotencyKey: "rollback-reconciliation" },
+          human,
+          bulkServices,
+        ),
+      ),
+    );
+    expect(Either.isLeft(result) && result.left["_tag"]).toBe("BulkTaskPersistenceError");
+    expect(reconciliationSnapshot()).toEqual(before);
+    const page = await Effect.runPromise(
+      searchTasks(
+        { filter: { schemaVersion: 1, projectId, search: { text: "Rollback", mode: "all" } } },
+        [],
+        {
+          store: createSqliteTaskQueryStore(projectStore.database),
+          clock: { today: () => now.slice(0, 10), now: () => now },
+        },
+      ),
+    );
+    expect(page.items).toEqual([]);
   });
 });

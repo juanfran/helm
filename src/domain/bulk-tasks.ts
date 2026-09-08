@@ -159,61 +159,118 @@ function overlappingValues(left: readonly string[], right: readonly string[]) {
   return [...new Set(left.filter((value) => rightValues.has(value)))].toSorted();
 }
 
-export const bulkTaskUpdatePatchSchema = z
-  .strictObject({
-    lifecycle: z.enum(["backlog", "ready"]).optional(),
-    priority: taskPrioritySchema.optional(),
-    notBefore: taskDateSchema.nullable().optional(),
-    dueAt: taskDateSchema.nullable().optional(),
-    tags: optionalIdChangesSchema.optional(),
-    capabilities: optionalCapabilityChangesSchema.optional(),
-    customFields: bulkTaskCustomFieldChangesSchema.optional(),
+const taskContentPatchShape = createTaskInputSchema
+  .pick({
+    title: true,
+    description: true,
+    expectedOutcome: true,
+    acceptanceCriteria: true,
+    agentContext: true,
+    checklist: true,
   })
-  .superRefine((patch, context) => {
-    const hasScalarChange = ["lifecycle", "priority", "notBefore", "dueAt"].some((field) =>
-      Object.prototype.hasOwnProperty.call(patch, field),
+  .partial().shape;
+
+const bulkTaskPatchSchema = z.strictObject({
+  ...taskContentPatchShape,
+  lifecycle: z.enum(["backlog", "ready"]).optional(),
+  priority: taskPrioritySchema.optional(),
+  notBefore: taskDateSchema.nullable().optional(),
+  dueAt: taskDateSchema.nullable().optional(),
+  tags: optionalIdChangesSchema.optional(),
+  capabilities: optionalCapabilityChangesSchema.optional(),
+  customFields: bulkTaskCustomFieldChangesSchema.optional(),
+});
+
+function validatePatch(
+  patch: z.infer<typeof bulkTaskPatchSchema> | BulkTaskReconcilePatch,
+  context: z.core.$RefinementCtx,
+) {
+  const hasScalarChange = [
+    ...Object.keys(taskContentPatchShape),
+    "lifecycle",
+    "priority",
+    "notBefore",
+    "dueAt",
+  ].some((field) => Object.prototype.hasOwnProperty.call(patch, field));
+  const hasSetChange =
+    Boolean(patch.tags && (patch.tags.add.length > 0 || patch.tags.remove.length > 0)) ||
+    Boolean(
+      patch.capabilities &&
+      (patch.capabilities.add.length > 0 || patch.capabilities.remove.length > 0),
+    ) ||
+    Boolean(
+      patch.customFields &&
+      (patch.customFields.set.length > 0 || patch.customFields.clear.length > 0),
     );
-    const hasSetChange =
-      Boolean(patch.tags && (patch.tags.add.length > 0 || patch.tags.remove.length > 0)) ||
-      Boolean(
-        patch.capabilities &&
-        (patch.capabilities.add.length > 0 || patch.capabilities.remove.length > 0),
-      ) ||
-      Boolean(
-        patch.customFields &&
-        (patch.customFields.set.length > 0 || patch.customFields.clear.length > 0),
-      );
-    if (!hasScalarChange && !hasSetChange) {
-      context.addIssue({
-        code: "custom",
-        message: "A bulk update must change at least one supported field.",
-      });
-    }
+  if (!hasScalarChange && !hasSetChange) {
+    context.addIssue({
+      code: "custom",
+      message: "A bulk update must change at least one supported field.",
+    });
+  }
 
-    const tagOverlap = patch.tags ? overlappingValues(patch.tags.add, patch.tags.remove) : [];
-    if (tagOverlap.length > 0) {
-      context.addIssue({
-        code: "custom",
-        message: `Tags cannot be added and removed together: ${tagOverlap.join(", ")}.`,
-        path: ["tags"],
-      });
-    }
+  const tagOverlap = patch.tags ? overlappingValues(patch.tags.add, patch.tags.remove) : [];
+  if (tagOverlap.length > 0) {
+    context.addIssue({
+      code: "custom",
+      message: `Tags cannot be added and removed together: ${tagOverlap.join(", ")}.`,
+      path: ["tags"],
+    });
+  }
 
-    const capabilityOverlap = patch.capabilities
-      ? overlappingValues(
-          normalizeCapabilities(patch.capabilities.add),
-          normalizeCapabilities(patch.capabilities.remove),
-        )
-      : [];
-    if (capabilityOverlap.length > 0) {
-      context.addIssue({
-        code: "custom",
-        message: `Capabilities cannot be added and removed together: ${capabilityOverlap.join(", ")}.`,
-        path: ["capabilities"],
-      });
+  const capabilityOverlap = patch.capabilities
+    ? overlappingValues(
+        normalizeCapabilities(patch.capabilities.add),
+        normalizeCapabilities(patch.capabilities.remove),
+      )
+    : [];
+  if (capabilityOverlap.length > 0) {
+    context.addIssue({
+      code: "custom",
+      message: `Capabilities cannot be added and removed together: ${capabilityOverlap.join(", ")}.`,
+      path: ["capabilities"],
+    });
+  }
+}
+
+export const bulkTaskUpdatePatchSchema = bulkTaskPatchSchema.superRefine(validatePatch);
+export type BulkTaskUpdatePatch = z.infer<typeof bulkTaskUpdatePatchSchema>;
+
+const reconcilePatchSchema = bulkTaskPatchSchema.extend({
+  lifecycle: z.enum(["backlog", "ready", "in_progress", "done", "cancelled"]).optional(),
+});
+export type BulkTaskReconcilePatch = z.infer<typeof reconcilePatchSchema>;
+export const bulkTaskReconcilePatchSchema = reconcilePatchSchema.superRefine(validatePatch);
+
+export const bulkTaskReconcileItemSchema = z.strictObject({
+  taskId: opaqueIdSchema,
+  expectedVersion: z.number().int().positive(),
+  sourceRef: z.string().trim().min(1).max(2_000),
+  patch: bulkTaskReconcilePatchSchema,
+});
+export type BulkTaskReconcileItem = z.infer<typeof bulkTaskReconcileItemSchema>;
+
+const bulkReconcileIntentSchema = z
+  .strictObject({
+    schemaVersion: z.literal(1),
+    kind: z.literal("reconcile"),
+    projectId: opaqueIdSchema,
+    reason: reasonSchema,
+    items: z.array(bulkTaskReconcileItemSchema).min(1).max(MAX_BULK_UPDATE_TARGETS),
+  })
+  .superRefine((intent, context) => {
+    const seen = new Set<string>();
+    for (const [index, item] of intent.items.entries()) {
+      if (seen.has(item.taskId)) {
+        context.addIssue({
+          code: "custom",
+          message: "Each task may only be reconciled once per batch.",
+          path: ["items", index, "taskId"],
+        });
+      }
+      seen.add(item.taskId);
     }
   });
-export type BulkTaskUpdatePatch = z.infer<typeof bulkTaskUpdatePatchSchema>;
 
 const bulkCreateIntentSchema = z
   .strictObject({
@@ -259,7 +316,11 @@ const bulkUpdateIntentSchema = z
     }
   });
 
-export const bulkTaskIntentSchema = z.union([bulkCreateIntentSchema, bulkUpdateIntentSchema]);
+export const bulkTaskIntentSchema = z.union([
+  bulkCreateIntentSchema,
+  bulkUpdateIntentSchema,
+  bulkReconcileIntentSchema,
+]);
 export type BulkTaskIntent = z.infer<typeof bulkTaskIntentSchema>;
 
 export const bulkTaskPreviewTokenSchema = z
@@ -283,6 +344,8 @@ export const bulkTaskValidationCodeSchema = z.enum([
   "wrong_project",
   "task_archived",
   "task_not_editable",
+  "task_version_conflict",
+  "task_execution_conflict",
   "task_not_prepared",
   "tag_not_found",
   "exclusive_tag_conflict",
@@ -308,6 +371,12 @@ export type BulkTaskValidationFailure = z.infer<typeof bulkTaskValidationFailure
 export const bulkTaskProjectedChangeSchema = z.strictObject({
   field: z.enum([
     "task",
+    "title",
+    "description",
+    "expectedOutcome",
+    "acceptanceCriteria",
+    "agentContext",
+    "checklist",
     "lifecycle",
     "priority",
     "notBefore",
@@ -338,7 +407,7 @@ export type BulkTaskPreviewTarget = z.infer<typeof bulkTaskPreviewTargetSchema>;
 export const bulkTaskPreviewSchema = z.strictObject({
   schemaVersion: z.literal(1),
   mode: z.literal("atomic"),
-  kind: z.enum(["create", "update"]),
+  kind: z.enum(["create", "update", "reconcile"]),
   projectId: opaqueIdSchema,
   matchedCount: z.number().int().nonnegative(),
   affectedCount: z.number().int().nonnegative(),
@@ -360,7 +429,7 @@ export const bulkTaskExecutionItemSchema = z.strictObject({
 export const bulkTaskExecutionResultSchema = z.strictObject({
   schemaVersion: z.literal(1),
   mode: z.literal("atomic"),
-  kind: z.enum(["create", "update"]),
+  kind: z.enum(["create", "update", "reconcile"]),
   operationId: opaqueIdSchema,
   projectId: opaqueIdSchema,
   matchedCount: z.number().int().nonnegative(),
@@ -417,6 +486,38 @@ function canonicalCreateTask(task: BulkTaskCreateItem["task"]) {
   };
 }
 
+function canonicalTaskPatch(patch: BulkTaskReconcilePatch) {
+  return {
+    ...patch,
+    ...(patch.tags
+      ? {
+          tags: {
+            add: sortedUnique(patch.tags.add),
+            remove: sortedUnique(patch.tags.remove),
+          },
+        }
+      : {}),
+    ...(patch.capabilities
+      ? {
+          capabilities: {
+            add: normalizeCapabilities(patch.capabilities.add),
+            remove: normalizeCapabilities(patch.capabilities.remove),
+          },
+        }
+      : {}),
+    ...(patch.customFields
+      ? {
+          customFields: {
+            set: [...patch.customFields.set].toSorted((left, right) =>
+              left.fieldId.localeCompare(right.fieldId),
+            ),
+            clear: sortedUnique(patch.customFields.clear),
+          },
+        }
+      : {}),
+  };
+}
+
 export function canonicalizeBulkTaskIntent(input: unknown): BulkTaskIntent {
   const intent = bulkTaskIntentSchema.parse(input);
   if (intent.kind === "create") {
@@ -426,6 +527,14 @@ export function canonicalizeBulkTaskIntent(input: unknown): BulkTaskIntent {
         ...item,
         task: canonicalCreateTask(item.task),
       })),
+    });
+  }
+  if (intent.kind === "reconcile") {
+    return bulkTaskIntentSchema.parse({
+      ...intent,
+      items: intent.items
+        .map((item) => ({ ...item, patch: canonicalTaskPatch(item.patch) }))
+        .toSorted((left, right) => left.taskId.localeCompare(right.taskId)),
     });
   }
   const selection =
@@ -441,35 +550,7 @@ export function canonicalizeBulkTaskIntent(input: unknown): BulkTaskIntent {
   return bulkTaskIntentSchema.parse({
     ...intent,
     selection,
-    patch: {
-      ...intent.patch,
-      ...(intent.patch.tags
-        ? {
-            tags: {
-              add: sortedUnique(intent.patch.tags.add),
-              remove: sortedUnique(intent.patch.tags.remove),
-            },
-          }
-        : {}),
-      ...(intent.patch.capabilities
-        ? {
-            capabilities: {
-              add: normalizeCapabilities(intent.patch.capabilities.add),
-              remove: normalizeCapabilities(intent.patch.capabilities.remove),
-            },
-          }
-        : {}),
-      ...(intent.patch.customFields
-        ? {
-            customFields: {
-              set: [...intent.patch.customFields.set].toSorted((left, right) =>
-                left.fieldId.localeCompare(right.fieldId),
-              ),
-              clear: sortedUnique(intent.patch.customFields.clear),
-            },
-          }
-        : {}),
-    },
+    patch: canonicalTaskPatch(intent.patch),
   });
 }
 
@@ -699,7 +780,10 @@ export function bulkTaskCustomFieldsJson(
   );
 }
 
-export type BulkTaskProjectedFields = {
+export type BulkTaskProjectedFields = Pick<
+  Task,
+  "title" | "description" | "expectedOutcome" | "acceptanceCriteria" | "agentContext" | "checklist"
+> & {
   readonly lifecycle: TaskLifecycle;
   readonly priority: TaskPriority;
   readonly notBefore: string | null;
@@ -737,7 +821,59 @@ export function projectBulkTaskUpdate(
   tagDefinitions: readonly TaskTag[],
   customFieldDefinitions: readonly CustomFieldDefinition[] = [],
 ): BulkTaskUpdateProjection {
-  const patch = bulkTaskUpdatePatchSchema.parse(patchInput);
+  return projectTaskPatch(
+    task,
+    bulkTaskUpdatePatchSchema.parse(patchInput),
+    tagDefinitions,
+    customFieldDefinitions,
+    false,
+  );
+}
+
+export function projectBulkTaskReconcile(
+  task: Task,
+  item: BulkTaskReconcileItem,
+  tagDefinitions: readonly TaskTag[],
+  customFieldDefinitions: readonly CustomFieldDefinition[],
+  hasActiveExecution: boolean,
+): BulkTaskUpdateProjection {
+  const projection = projectTaskPatch(
+    task,
+    bulkTaskReconcilePatchSchema.parse(item.patch),
+    tagDefinitions,
+    customFieldDefinitions,
+    true,
+  );
+  const failures = [...projection.failures];
+  const targetOptions = { targetKey: task.id, taskId: task.id };
+  if (item.expectedVersion !== task.version) {
+    failures.push(
+      failure(
+        "task_version_conflict",
+        `Expected version ${item.expectedVersion}; task is now version ${task.version}. Refresh context and reconcile concurrent changes.`,
+        targetOptions,
+      ),
+    );
+  }
+  if (hasActiveExecution || task.claim || task.lifecycle === "review" || task.reviewAttemptId) {
+    failures.push(
+      failure(
+        "task_execution_conflict",
+        "Resolve active Helm attempts, leases, or pending review before reconciling external work.",
+        targetOptions,
+      ),
+    );
+  }
+  return { ...projection, failures };
+}
+
+function projectTaskPatch(
+  task: Task,
+  patch: BulkTaskReconcilePatch,
+  tagDefinitions: readonly TaskTag[],
+  customFieldDefinitions: readonly CustomFieldDefinition[],
+  reconciliation: boolean,
+): BulkTaskUpdateProjection {
   const failures: BulkTaskValidationFailure[] = [];
   const targetOptions = { targetKey: task.id, taskId: task.id } as const;
 
@@ -745,7 +881,7 @@ export function projectBulkTaskUpdate(
     failures.push(
       failure("task_archived", "Archived tasks cannot be changed in bulk.", targetOptions),
     );
-  } else if (!editableLifecycle(task.lifecycle)) {
+  } else if (!reconciliation && !editableLifecycle(task.lifecycle)) {
     failures.push(
       failure(
         "task_not_editable",
@@ -837,6 +973,12 @@ export function projectBulkTaskUpdate(
     finalExplicitCustomFields,
   );
   const projected: BulkTaskProjectedFields = {
+    title: patch.title ?? task.title,
+    description: patch.description ?? task.description,
+    expectedOutcome: patch.expectedOutcome ?? task.expectedOutcome,
+    acceptanceCriteria: patch.acceptanceCriteria ?? task.acceptanceCriteria,
+    agentContext: patch.agentContext ?? task.agentContext,
+    checklist: patch.checklist ?? task.checklist,
     lifecycle: patch.lifecycle ?? task.lifecycle,
     priority: patch.priority ?? task.priority,
     notBefore: Object.prototype.hasOwnProperty.call(patch, "notBefore")
@@ -850,8 +992,8 @@ export function projectBulkTaskUpdate(
     customFields: finalCustomFields,
   };
 
-  if (patch.lifecycle === "ready" && task.lifecycle !== "ready") {
-    const missingFields = missingReadyPreparation(task);
+  if (projected.lifecycle === "ready") {
+    const missingFields = missingReadyPreparation(projected);
     if (missingFields.length > 0) {
       failures.push(
         failure("task_not_prepared", `Ready tasks require: ${missingFields.join(", ")}.`, {
@@ -863,6 +1005,17 @@ export function projectBulkTaskUpdate(
   }
 
   const changes: BulkTaskProjectedChange[] = [];
+  for (const field of [
+    "title",
+    "description",
+    "expectedOutcome",
+    "acceptanceCriteria",
+    "agentContext",
+    "checklist",
+  ] as const) {
+    if (!sameJson(task[field], projected[field]))
+      changes.push(change(field, task[field], projected[field]));
+  }
   const scalarValues = [
     ["lifecycle", task.lifecycle, projected.lifecycle],
     ["priority", task.priority, projected.priority],

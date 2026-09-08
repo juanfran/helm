@@ -609,7 +609,7 @@ export function createHelmMcpServer(
     {
       title: "Preview a bulk task operation",
       description:
-        "Resolve and validate an atomic bulk create or update without changing Helm state. Use the returned token with the same intent when executing.",
+        "Preview atomic task creation, content/planning updates, or external reconciliation without writes. update patches backlog/ready tasks. reconcile accepts up to 200 per-task versions, sourceRef values, and individual content/state patches (including in_progress, done, cancelled); active Helm execution/review is protected. Execute with the same intent and returned token.",
       inputSchema: bulkTaskIntentSchema,
       outputSchema: {
         ok: z.boolean(),

@@ -21,6 +21,8 @@ import {
   type BulkTaskStore,
 } from "../application/bulk-tasks";
 import {
+  attempts,
+  leases,
   customFieldDefinitions,
   events,
   idempotencyRecords,
@@ -44,6 +46,9 @@ import {
   canonicalizeBulkTaskIntent,
   projectBulkTaskCreateCustomFields,
   projectBulkTaskUpdate,
+  projectBulkTaskReconcile,
+  type BulkTaskReconcilePatch,
+  type BulkTaskSelection,
   validateBulkTaskCreateItem,
   validateBulkTaskCreateParent,
   validateBulkTaskCreateTagDefinitions,
@@ -96,6 +101,8 @@ type CreatePlan = {
 type UpdatePlan = {
   readonly task: Task;
   readonly projection: BulkTaskUpdateProjection;
+  readonly patch: BulkTaskReconcilePatch;
+  readonly sourceRef?: string;
 };
 
 type PreviewAnalysis = {
@@ -247,10 +254,11 @@ function relevantTagHash(
       }),
     );
   }
-  if (!intent.patch.tags) return hash("[]");
+  const patches =
+    intent.kind === "reconcile" ? intent.items.map(({ patch }) => patch) : [intent.patch];
+  if (!patches.some(({ tags: changes }) => changes)) return hash("[]");
   const relevantIds = new Set([
-    ...intent.patch.tags.add,
-    ...intent.patch.tags.remove,
+    ...patches.flatMap(({ tags: changes }) => (changes?.add ?? []).concat(changes?.remove ?? [])),
     ...selectedTasks.flatMap((task) => task.tags.map(({ id }) => id)),
   ]);
   return hash(
@@ -465,7 +473,7 @@ function createPreviewAnalysis(
 function updateSelection(
   database: Database.Database,
   db: DrizzleDatabase,
-  intent: Extract<BulkTaskIntent, { kind: "update" }>,
+  intent: { projectId: string; selection: BulkTaskSelection },
   context: BulkTaskEvaluationContext,
 ): UpdateSelection {
   if (intent.selection.type === "filter") {
@@ -513,7 +521,7 @@ function updateSelection(
 function updatePreviewAnalysis(
   database: Database.Database,
   db: DrizzleDatabase,
-  intent: Extract<BulkTaskIntent, { kind: "update" }>,
+  intent: Exclude<BulkTaskIntent, { kind: "create" }>,
   actor: Actor,
   context: BulkTaskEvaluationContext,
 ): PreviewAnalysis {
@@ -522,7 +530,28 @@ function updatePreviewAnalysis(
   const tagDefinitions = tagRows.map(taskTag);
   const customFieldRows = projectCustomFields(db, intent.projectId);
   const customDefinitions = customFieldRows.map(customFieldDefinition);
-  const selection = updateSelection(database, db, intent, context);
+  const selectionIntent =
+    intent.kind === "reconcile"
+      ? {
+          projectId: intent.projectId,
+          selection: { type: "ids" as const, taskIds: intent.items.map(({ taskId }) => taskId) },
+        }
+      : intent;
+  const selection = updateSelection(database, db, selectionIntent, context);
+  const reconciliationItems = new Map(
+    intent.kind === "reconcile" ? intent.items.map((item) => [item.taskId, item]) : [],
+  );
+  const activeExecutionIds = new Set<string>();
+  if (intent.kind === "reconcile" && selection.requestedIds.length > 0) {
+    for (const table of [attempts, leases]) {
+      const rows = db
+        .select({ taskId: table.taskId })
+        .from(table)
+        .where(and(inArray(table.taskId, [...selection.requestedIds]), eq(table.status, "active")))
+        .all();
+      for (const row of rows) activeExecutionIds.add(row.taskId);
+    }
+  }
   const selectedById = new Map(selection.selected.map((task) => [task.id, task]));
   const topFailures: BulkTaskValidationFailure[] = [];
   if (!project) {
@@ -543,13 +572,20 @@ function updatePreviewAnalysis(
     for (const taskId of selection.requestedIds) {
       const task = selectedById.get(taskId);
       if (task) {
-        const projection = projectBulkTaskUpdate(
-          task,
-          intent.patch,
-          tagDefinitions,
-          customDefinitions,
-        );
-        updatePlans.push({ task, projection });
+        const item = reconciliationItems.get(task.id);
+        if (intent.kind === "reconcile" && !item) throw new Error("Missing reconciliation item.");
+        const patch = intent.kind === "update" ? intent.patch : item!.patch;
+        const projection =
+          intent.kind === "reconcile"
+            ? projectBulkTaskReconcile(
+                task,
+                item!,
+                tagDefinitions,
+                customDefinitions,
+                activeExecutionIds.has(task.id),
+              )
+            : projectBulkTaskUpdate(task, intent.patch, tagDefinitions, customDefinitions);
+        updatePlans.push({ task, projection, patch, sourceRef: item?.sourceRef });
         const changed = projection.failures.length === 0 && projection.changes.length > 0;
         targets.push({
           targetKey: task.id,
@@ -566,7 +602,7 @@ function updatePreviewAnalysis(
         continue;
       }
 
-      if (intent.selection.type === "filter") continue;
+      if (selectionIntent.selection.type === "filter") continue;
       const row = selection.requestedRows.get(taskId);
       const wrongProject = Boolean(row && row.projectId !== intent.projectId);
       const targetFailure = validationFailure(
@@ -639,10 +675,9 @@ function updatePreviewAnalysis(
     preview: bulkTaskPreviewSchema.parse({
       schemaVersion: 1,
       mode: "atomic",
-      kind: "update",
+      kind: intent.kind,
       projectId: intent.projectId,
-      matchedCount:
-        intent.selection.type === "ids" ? intent.selection.taskIds.length : selection.matchedCount,
+      matchedCount: selection.matchedCount,
       affectedCount,
       executable: allFailures.length === 0,
       targets,
@@ -739,7 +774,12 @@ function appendParentEvent(
 ) {
   return appendEvent(db, {
     projectId: analysis.intent.projectId,
-    kind: analysis.intent.kind === "create" ? "task.bulk.created" : "task.bulk.updated",
+    kind:
+      analysis.intent.kind === "create"
+        ? "task.bulk.created"
+        : analysis.intent.kind === "reconcile"
+          ? "task.bulk.reconciled"
+          : "task.bulk.updated",
     actor,
     entityType: "bulk_task_operation",
     entityId: operationId,
@@ -997,6 +1037,14 @@ function replaceUpdateAssignments(
   }
 }
 
+function updateEventTaskIds(task: Task) {
+  return [task.id].concat(
+    task.downstreamRelations
+      .filter(({ type }) => type === "blocks")
+      .map(({ targetTaskId }) => targetTaskId),
+  );
+}
+
 function executeUpdates(
   db: DrizzleDatabase,
   analysis: PreviewAnalysis,
@@ -1004,10 +1052,11 @@ function executeUpdates(
   operationId: string,
   occurredAt: string,
 ) {
-  if (analysis.intent.kind !== "update") throw new Error("Expected a bulk update intent.");
+  if (analysis.intent.kind === "create")
+    throw new Error("Expected a bulk update or reconciliation intent.");
   const affectedTaskIds = analysis.updatePlans
     .filter(({ projection }) => projection.changes.length > 0)
-    .map(({ task }) => task.id);
+    .flatMap(({ task }) => updateEventTaskIds(task));
   const parentEvent = appendParentEvent(
     db,
     analysis,
@@ -1018,14 +1067,25 @@ function executeUpdates(
   );
   const items: BulkTaskExecutionResult["items"][number][] = [];
 
-  for (const { task, projection } of analysis.updatePlans) {
+  for (const { task, projection, patch, sourceRef } of analysis.updatePlans) {
     const changed = projection.changes.length > 0;
     const version = task.version + (changed ? 1 : 0);
     if (changed) {
       const mutation = db
         .update(tasks)
         .set({
+          title: projection.projected.title,
+          descriptionJson: JSON.stringify(projection.projected.description),
+          descriptionText: richTextToPlainText(projection.projected.description),
+          expectedOutcome: projection.projected.expectedOutcome,
+          acceptanceCriteria: projection.projected.acceptanceCriteria,
+          agentContext: projection.projected.agentContext,
+          checklistJson: JSON.stringify(projection.projected.checklist),
           lifecycle: projection.projected.lifecycle,
+          ...(analysis.intent.kind === "reconcile" &&
+          projection.projected.lifecycle !== task.lifecycle
+            ? { cancelledFromLifecycle: null, reviewAttemptId: null }
+            : {}),
           priority: projection.projected.priority,
           notBefore: projection.projected.notBefore,
           dueAt: projection.projected.dueAt,
@@ -1045,14 +1105,14 @@ function executeUpdates(
         db,
         task.id,
         projection,
-        Boolean(analysis.intent.patch.tags),
-        Boolean(analysis.intent.patch.capabilities),
-        analysis.intent.patch.customFields,
+        Boolean(patch.tags),
+        Boolean(patch.capabilities),
+        patch.customFields,
         occurredAt,
       );
       appendEvent(db, {
         projectId: analysis.intent.projectId,
-        kind: "task.planning.updated",
+        kind: analysis.intent.kind === "reconcile" ? "task.reconciled" : "task.planning.updated",
         actor,
         entityType: "task",
         entityId: task.id,
@@ -1062,8 +1122,11 @@ function executeUpdates(
           previousVersion: task.version,
           version,
           changes: [...projection.changes],
+          ...(sourceRef
+            ? { sourceRef, reason: analysis.intent.reason, execution: "external" }
+            : {}),
         },
-        taskIds: [task.id],
+        taskIds: updateEventTaskIds(task),
         occurredAt,
       });
     }
@@ -1079,7 +1142,7 @@ function executeUpdates(
   return bulkTaskExecutionResultSchema.parse({
     schemaVersion: 1,
     mode: "atomic",
-    kind: "update",
+    kind: analysis.intent.kind,
     operationId,
     projectId: analysis.intent.projectId,
     matchedCount: analysis.preview.matchedCount,

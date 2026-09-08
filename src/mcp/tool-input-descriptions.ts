@@ -4,6 +4,8 @@ export const inputDescriptions: Readonly<Record<string, string>> = {
     "Opaque project ID from list_projects. Match repositoryRoot to the user's intended repository; the active browser project is only a preference.",
   taskId:
     "Opaque task ID returned by discovery, search, creation, or context; not the human task sequence number.",
+  sourceRef:
+    "External tracker reference or URL identifying the source task. Required for each explicit reconciliation; recorded in audit history, never fetched by Helm.",
   taskIds: "Opaque task IDs from the same project, not task sequence numbers.",
   profileKey:
     "Stable identifier for your agent profile, e.g. local-typescript-agent. Reuse your own profile, not another agent's identity.",
@@ -130,11 +132,14 @@ export const inputDescriptions: Readonly<Record<string, string>> = {
   destination: "State to reopen into: ready for a new attempt or backlog for further preparation.",
   importance: "Event importance levels to include in a cursor read.",
   schemaVersion: "Bulk intent or structured-filter format version; currently 1.",
-  kind: "Bulk operation discriminator: create or update.",
-  intent: "Exact bulk create/update intent used in preview_bulk_tasks, unchanged for execution.",
+  kind: "Bulk operation discriminator: create, update, or reconcile.",
+  intent:
+    "Exact bulk create/update/reconcile intent used in preview_bulk_tasks, unchanged for execution.",
   selection: "Explicit task IDs or a structured filter selecting tasks within this project.",
-  patch: "Only the supported planning/metadata fields to change; omitted fields are preserved.",
-  items: "Bulk create entries, each with a unique clientId and task fields.",
+  patch:
+    "Supported content, lifecycle, and planning/metadata fields to change; omitted fields are preserved.",
+  items:
+    "Create entries use unique clientId and task fields. Reconcile entries use unique taskId, expectedVersion, sourceRef, and an individual patch.",
   clientId: "Caller-chosen unique identifier to correlate a bulk-created task with its result.",
   task: "Task fields for one bulk-created item; project and mutation identity come from the enclosing intent.",
   previewToken:

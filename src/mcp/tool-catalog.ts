@@ -44,7 +44,7 @@ function exportSchema(schema: Schema | undefined, input: boolean): Tool["inputSc
     reused: "ref",
   });
   if (input) describeFields(json);
-  // All Helm arguments/results are objects, including the two bulk-intent variants.
+  // All Helm arguments/results are objects, including bulk-intent variants.
   return ToolSchema.shape.inputSchema.parse({ ...json, type: "object" });
 }
 

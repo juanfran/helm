@@ -2009,7 +2009,10 @@ function lifecycleConflicts(artifact: HelmProjectExport): ProjectImportConflict[
   for (const task of artifact.tasks) {
     const owner = taskEntity(task.id);
     if (!owner) continue;
-    if (["ready", "in_progress", "review", "done"].includes(task.lifecycle)) {
+    const activeAttempts = (attemptsByTask.get(task.id) ?? []).filter(
+      ({ status }) => status === "active",
+    );
+    if (["ready", "review"].includes(task.lifecycle) || activeAttempts.length > 0) {
       const missing = missingReadyPreparation(task);
       if (missing.length > 0) {
         conflicts.push(
@@ -2052,10 +2055,7 @@ function lifecycleConflicts(artifact: HelmProjectExport): ProjectImportConflict[
         ),
       );
     }
-    if (
-      (task.lifecycle === "cancelled" && task.cancelledFromLifecycle === null) ||
-      (task.lifecycle !== "cancelled" && task.cancelledFromLifecycle !== null)
-    ) {
+    if (task.lifecycle !== "cancelled" && task.cancelledFromLifecycle !== null) {
       conflicts.push(
         conflict(
           "immutable_mismatch",
@@ -2065,31 +2065,16 @@ function lifecycleConflicts(artifact: HelmProjectExport): ProjectImportConflict[
         ),
       );
     }
-    const activeAttempts = (attemptsByTask.get(task.id) ?? []).filter(
-      ({ status }) => status === "active",
-    );
+    // Unleased external progress carries no attempt; a Helm attempt still requires in_progress.
     const expectsActiveAttempt = task.lifecycle === "in_progress" && task.archivedAt === null;
     if (
-      (expectsActiveAttempt && activeAttempts.length !== 1) ||
+      (expectsActiveAttempt && activeAttempts.length > 1) ||
       (!expectsActiveAttempt && activeAttempts.length > 0)
     ) {
       conflicts.push(
         conflict(
           "immutable_mismatch",
           `Task ${task.id} has inconsistent active-attempt metadata.`,
-          owner,
-          ["tasks", task.id, "lifecycle"],
-        ),
-      );
-    }
-    if (
-      task.lifecycle === "done" &&
-      !(attemptsByTask.get(task.id) ?? []).some(({ status }) => status === "completed")
-    ) {
-      conflicts.push(
-        conflict(
-          "immutable_mismatch",
-          `Done task ${task.id} requires completed attempt evidence.`,
           owner,
           ["tasks", task.id, "lifecycle"],
         ),
@@ -2854,8 +2839,17 @@ function requireCasChange(
   });
 }
 
-function resetsSourceExecution(task: HelmProjectExport["tasks"][number]) {
-  return task.lifecycle === "in_progress" && task.archivedAt === null;
+function sourceExecutionTaskIds(artifact: HelmProjectExport) {
+  return new Set(
+    artifact.attempts.filter(({ status }) => status === "active").map(({ taskId }) => taskId),
+  );
+}
+
+function resetsSourceExecution(
+  task: HelmProjectExport["tasks"][number],
+  activeTaskIds: ReadonlySet<string>,
+) {
+  return task.lifecycle === "in_progress" && task.archivedAt === null && activeTaskIds.has(task.id);
 }
 
 function insertBatches<T>(rows: readonly T[], insert: (batch: T[]) => void) {
@@ -2871,6 +2865,7 @@ function insertArtifact(
   now: string,
 ) {
   const db = drizzle(database, { schema });
+  const activeTaskIds = sourceExecutionTaskIds(artifact);
   const created = createdSet(preview);
   const updated = updatedSet(preview);
   const shouldCreate = (entityType: ProjectImportEntityType, id: string) =>
@@ -3021,7 +3016,7 @@ function insertArtifact(
       });
     }
     const description = richTextDocumentSchema.parse(task.description);
-    const resetExecution = resetsSourceExecution(task);
+    const resetExecution = resetsSourceExecution(task, activeTaskIds);
     requireCasChange(
       db
         .update(tasks)
@@ -3080,7 +3075,7 @@ function insertArtifact(
   for (const level of taskInsertionLevels) {
     const taskRows = level.map((task) => {
       const description = richTextDocumentSchema.parse(task.description);
-      const resetInProgress = resetsSourceExecution(task);
+      const resetInProgress = resetsSourceExecution(task, activeTaskIds);
       return {
         id: task.id,
         projectId: task.projectId,
@@ -3306,6 +3301,7 @@ function importOperationDetails(
 ): ImportOperationDetail[] {
   const entities = importEntityMap(artifact);
   const tasksById = mapById(artifact.tasks);
+  const activeTaskIds = sourceExecutionTaskIds(artifact);
   const created = createdSet(preview);
   const associatedFieldsByTask = new Map<string, Set<string>>();
   const associate = (taskId: string, field: string) => {
@@ -3334,7 +3330,7 @@ function importOperationDetails(
     const sourceVersion = entity?.version ?? null;
     const importedTask = entity?.entityType === "task" ? tasksById.get(entity.sourceId) : undefined;
     const createdTaskVersion =
-      importedTask && resetsSourceExecution(importedTask)
+      importedTask && resetsSourceExecution(importedTask, activeTaskIds)
         ? sourceVersion === null
           ? null
           : sourceVersion + 1

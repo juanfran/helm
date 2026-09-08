@@ -446,7 +446,11 @@ function parseIntent(
   conflicts: ProjectImportConflict[],
 ) {
   const parsed = bulkTaskIntentSchema.safeParse(intentInput);
-  if (parsed.success) return parsed.data;
+  if (parsed.success) {
+    if (parsed.data.kind === "reconcile")
+      throw new Error("CSV rows only compile to create or update intents.");
+    return parsed.data;
+  }
   conflicts.push(
     conflict("invalid_value", issueMessage(parsed.error), {
       rowNumber: row.rowNumber,

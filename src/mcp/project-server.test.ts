@@ -420,7 +420,7 @@ describe("MCP project contract", () => {
         const result = validator.getValidator(tool!.inputSchema)(call.data.arguments);
         expect(result.errorMessage).toBeUndefined();
         expect(result.valid).toBe(true);
-        examples.set(call.data.tool, call.data.arguments);
+        if (!examples.has(call.data.tool)) examples.set(call.data.tool, call.data.arguments);
       } else {
         content = richTextDocumentSchema.parse(parsed);
       }
@@ -1307,6 +1307,155 @@ describe("MCP project customization contract", () => {
 });
 
 describe("MCP bulk task contract", () => {
+  it("refreshes matched external tasks through advertised schemas, context, search, and attributed events", async () => {
+    const sqliteBulkStore = createSqliteBulkTaskStore(projectStore.database);
+    bulkPreviewOperation = (...arguments_) => sqliteBulkStore.preview(...arguments_);
+    bulkExecuteOperation = (...arguments_) => sqliteBulkStore.execute(...arguments_);
+    const registration = successfulRegistrationSchema.parse(
+      (
+        await client.callTool({
+          name: "register_agent_run",
+          arguments: {
+            profileKey: "importer",
+            displayName: "Importer",
+            capabilities: [],
+            idempotencyKey: "register-importer",
+          },
+        })
+      ).structuredContent,
+    ).registration;
+    const task = successfulTaskSchema.parse(
+      (
+        await client.callTool({
+          name: "create_task",
+          arguments: {
+            projectId,
+            title: "Yesterday's imported title",
+            lifecycle: "backlog",
+            expectedVersion: 0,
+            idempotencyKey: "create-imported-task",
+            description: emptyRichTextDocument,
+            expectedOutcome: "",
+            acceptanceCriteria: "Yesterday's criteria",
+            agentContext: "Keep this context",
+            checklist: [],
+          },
+        })
+      ).structuredContent,
+    ).task;
+    const catalog = await client.listTools();
+    const validator = new AjvJsonSchemaValidator();
+    const previewSchema = catalog.tools.find(
+      ({ name }) => name === "preview_bulk_tasks",
+    )!.inputSchema;
+    const executeSchema = catalog.tools.find(
+      ({ name }) => name === "execute_bulk_tasks",
+    )!.inputSchema;
+    const previewAndExecute = async (intent: Record<string, unknown>, key: string) => {
+      expect(validator.getValidator(previewSchema)(intent).valid).toBe(true);
+      const preview = successfulBulkTaskPreviewSchema.parse(
+        (await client.callTool({ name: "preview_bulk_tasks", arguments: intent }))
+          .structuredContent,
+      ).preview;
+      expect(preview.executable).toBe(true);
+      const input = { intent, previewToken: preview.previewToken, idempotencyKey: key };
+      expect(validator.getValidator(executeSchema)(input).valid).toBe(true);
+      const response = await client.callTool({ name: "execute_bulk_tasks", arguments: input });
+      expect(response.isError).not.toBe(true);
+      const retry = await client.callTool({ name: "execute_bulk_tasks", arguments: input });
+      expect(retry.structuredContent).toEqual(response.structuredContent);
+      return successfulBulkTaskExecutionSchema.parse(response.structuredContent).result;
+    };
+    const updated = await previewAndExecute(
+      {
+        schemaVersion: 1,
+        kind: "update",
+        projectId,
+        reason: "Refresh the imported content",
+        selection: { type: "ids", taskIds: [task.id] },
+        patch: {
+          title: "Refreshed import",
+          description: activityContent("Nebulous importer description"),
+          acceptanceCriteria: "Today's criteria",
+        },
+      },
+      "refresh-import-content",
+    );
+    let version = updated.items[0]!.version;
+    async function reconcileLifecycle(lifecycle: string) {
+      const reconciled = await previewAndExecute(
+        {
+          schemaVersion: 1,
+          kind: "reconcile",
+          projectId,
+          reason: "Reconcile the authorized source snapshot",
+          items: [
+            {
+              taskId: task.id,
+              expectedVersion: version,
+              sourceRef: "tracker:ITEM-144",
+              patch: { lifecycle, acceptanceCriteria: `Criteria for ${lifecycle}` },
+            },
+          ],
+        },
+        `reconcile-${lifecycle}`,
+      );
+      version = reconciled.items[0]!.version;
+      const context = successfulContextSchema.parse(
+        (
+          await client.callTool({
+            name: "get_task_context",
+            arguments: { projectId, taskId: task.id },
+          })
+        ).structuredContent,
+      ).context;
+      expect(context.task).toMatchObject({
+        title: "Refreshed import",
+        lifecycle,
+        version,
+        acceptanceCriteria: `Criteria for ${lifecycle}`,
+        agentContext: "Keep this context",
+        claim: null,
+        reviewAttemptId: null,
+      });
+      expect(context.priorAttempts).toEqual([]);
+    }
+    await reconcileLifecycle("in_progress");
+    await reconcileLifecycle("done");
+    await reconcileLifecycle("cancelled");
+    const search = successfulTaskSearchSchema.parse(
+      (
+        await client.callTool({
+          name: "search_tasks",
+          arguments: {
+            filter: {
+              schemaVersion: 1,
+              projectId,
+              lifecycles: ["cancelled"],
+              search: { text: "Nebulous", mode: "all" },
+            },
+          },
+        })
+      ).structuredContent,
+    ).page;
+    expect(search.items.map(({ task: itemTask }) => itemTask.id)).toEqual([task.id]);
+    const page = successfulActivityEventsSchema.parse(
+      (
+        await client.callTool({
+          name: "read_events",
+          arguments: { projectId, afterCursor: updated.parentEventCursor },
+        })
+      ).structuredContent,
+    ).payload;
+    const reconciliations = page.events.filter(({ kind }) => kind === "task.reconciled");
+    expect(reconciliations).toHaveLength(3);
+    for (const event of reconciliations) {
+      expect(event.actor).toEqual({ type: "agent", id: registration.run.id });
+      expect(event.payload).toMatchObject({ sourceRef: "tracker:ITEM-144", execution: "external" });
+      expect(event.changes.taskIds).toContain(task.id);
+    }
+  });
+
   it("requires a registered run and derives attribution and capabilities outside tool input", async () => {
     const previewToken = `btp1:${"a".repeat(64)}:${"b".repeat(64)}`;
     const previewActors: Array<{ type: string; id: string }> = [];

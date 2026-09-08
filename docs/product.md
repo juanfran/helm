@@ -86,6 +86,7 @@ Helm does not execute agents. External agents connect to the local server and de
 - Realtime UI updates use a local ordered event stream. Toasts are reserved for failures, blockers, expired claims, and requested reviews.
 - UI and MCP call the same semantic command and query modules. Generic read operations never mutate state.
 - MCP offers explicit discovery, claim, lease, progress, completion, relation, comment, and bulk tools. It also exposes cursor-based event reads.
+- Bulk updates can refresh task content as well as planning metadata. An explicit, previewed reconciliation intent lets an authorized importer refresh matched external work with individual task versions, source references, and content/state patches. External in-progress and completed states record source progress without creating Helm leases, attempts, verification evidence, or review approval. Reconciliation cannot overwrite active Helm execution or pending review; source attribution and before/after changes remain in the audit trail.
 - Bulk commands support ID and filter selection, a dry run, stable affected counts, and a parent audit event.
 - Full-text search covers task content, acceptance criteria, comments, and reports. Structured filtering is shared by UI, views, bulk commands, and MCP.
 - Installation targets Node.js developers: `pnpm install`, `pnpm dev`, `pnpm build`, and `pnpm start`. A small shell launcher is included.

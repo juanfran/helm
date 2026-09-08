@@ -4,6 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import { AlertTriangle, History, RotateCcw, ShieldCheck, XCircle } from "lucide-react";
 
 import { Button } from "../../components/ui/button";
+import { cancelledTaskRestoreDestination } from "../../domain/tasks";
 import type {
   ApproveTaskReviewInput,
   CancelTaskInput,
@@ -50,7 +51,7 @@ function lifecycleLabel(lifecycle: NonNullable<Task["cancelledFromLifecycle"]>) 
 }
 
 function restoreDestination(task: Task) {
-  return task.cancelledFromLifecycle === "in_progress" ? "ready" : task.cancelledFromLifecycle;
+  return cancelledTaskRestoreDestination(task);
 }
 
 function ReportList({ label, values }: { label: string; values: readonly string[] }) {

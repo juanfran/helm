@@ -62,6 +62,12 @@ export type BulkTaskControlsProps = {
 
 const fieldLabels: Record<BulkTaskProjectedChange["field"], string> = {
   task: "Task",
+  title: "Title",
+  description: "Description",
+  expectedOutcome: "Expected outcome",
+  acceptanceCriteria: "Acceptance criteria",
+  agentContext: "Agent context",
+  checklist: "Checklist",
   lifecycle: "Lifecycle",
   priority: "Priority",
   notBefore: "Start date",

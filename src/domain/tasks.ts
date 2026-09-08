@@ -982,6 +982,16 @@ export function findBlockingPath(
   return null;
 }
 
+export function cancelledTaskRestoreDestination(
+  task: Pick<
+    Task,
+    "cancelledFromLifecycle" | "expectedOutcome" | "acceptanceCriteria" | "checklist"
+  >,
+) {
+  if (task.cancelledFromLifecycle !== "in_progress") return task.cancelledFromLifecycle;
+  return missingReadyPreparation(task).length === 0 ? "ready" : "backlog";
+}
+
 export function isIncompleteBlockingDependency(task: {
   readonly lifecycle: TaskLifecycle;
   readonly archivedAt: string | null;

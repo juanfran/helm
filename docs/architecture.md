@@ -86,6 +86,24 @@ successful claim.
 
 Keeping these axes separate prevents contradictory combinations and makes queries explainable.
 
+Explicit external reconciliation is a separate command intent from execution. The shared bulk engine
+accepts a bounded list of existing task IDs, expected versions, external source references, and individual
+content/metadata/lifecycle patches. It requires a state-bound preview and a semantic reason. Supported
+external states are backlog, ready, in_progress, done, and cancelled. Ready still requires full
+preparation. External in_progress may have no Helm attempt or lease; it records progress elsewhere and
+is not claimable. External done records source status, not Helm verification or review approval.
+
+Reconciliation rejects archived tasks, active attempt or lease rows (even if lease cleanup is pending),
+and pending review, including cancelled reviews. It preserves all prior attempts and reports and never
+creates execution authority or evidence. Each changed task advances once and receives a task.reconciled
+event with the source reference, reason, and exact before/after changes, linked to a task.bulk.reconciled
+parent event. Unchanged rows retain their versions. Dependents are included in realtime change hints so
+eligibility refreshes immediately. Source references are audit provenance, not an automatically fetched
+or synchronized external source of truth. Normal claim/completion/review commands retain their rules.
+Humans can cancel unleased external progress. Restoring such work returns it to backlog when its
+preparation is incomplete, otherwise ready. Reopening externally completed work to ready also requires
+full preparation; incomplete imports must reopen to backlog first.
+
 ## Ranking
 
 Candidate ordering is deterministic:
@@ -248,8 +266,9 @@ Portability has two deliberately different trust and fidelity boundaries:
   tags, custom-field definitions and explicit values, tasks, relations, saved views, relevant agent
   identities, attempts, activity, blockers, and source-event provenance. It intentionally excludes
   preferences, idempotency records, lease rows, token hashes, and MCP session identifiers. Active source
-  runs are represented as closed history, active attempts as abandoned history, and in-progress work is
-  made ready on import so an archive can never resume execution authority.
+  runs are represented as closed history, active attempts as abandoned history, and work with an active source attempt is
+  made ready on import so an archive can never resume execution authority. Unleased external progress
+  retains its in_progress state; externally done/cancelled tasks require no invented attempt history.
 
 JSON and task-oriented CSV imports are local-human commands. Preview parses and validates the complete
 source, reports creates, updates, no-ops, conflicts, and unsupported data, then binds that result to the

@@ -563,3 +563,81 @@ describe("bulk task contract", () => {
     expect(() => bulkTaskPreviewTokenSchema.parse("btp1:not-a-preview")).toThrow();
   });
 });
+
+describe("Reconciliation schema contract", () => {
+  const item = {
+    taskId: "task-a",
+    expectedVersion: 3,
+    sourceRef: "tracker:ITEM-1",
+    patch: { lifecycle: "done", title: "Current title" },
+  };
+  const intent = {
+    schemaVersion: 1,
+    kind: "reconcile",
+    projectId: "project-1",
+    reason: "Import the authorized external snapshot",
+    items: [item],
+  };
+  it("keeps compiled and normal parsing aligned for content and external lifecycle patches", () => {
+    for (const lifecycle of ["backlog", "ready", "in_progress", "done", "cancelled"]) {
+      const input = {
+        ...intent,
+        items: [
+          {
+            ...item,
+            patch: { ...item.patch, lifecycle, description: emptyRichTextDocument, checklist: [] },
+          },
+        ],
+      };
+      expect(compiledBulkTaskIntentSchema.parse(input)).toEqual(bulkTaskIntentSchema.parse(input));
+      const command = {
+        intent: input,
+        previewToken: `btp1:${"a".repeat(64)}:${"b".repeat(64)}`,
+        idempotencyKey: "reconciliation",
+      };
+      expect(compiledExecuteBulkTasksInputSchema.parse(command)).toEqual(
+        executeBulkTasksInputSchema.parse(command),
+      );
+    }
+  });
+  it("rejects duplicate tasks, missing provenance/versions, unsupported states, empty patches, and oversized batches", () => {
+    const invalid = [
+      { ...intent, items: [item, item] },
+      { ...intent, items: [{ ...item, sourceRef: "" }] },
+      { ...intent, items: [{ ...item, expectedVersion: 0 }] },
+      { ...intent, items: [{ taskId: item.taskId, sourceRef: item.sourceRef, patch: item.patch }] },
+      { ...intent, items: [{ ...item, patch: { lifecycle: "review" } }] },
+      { ...intent, items: [{ ...item, patch: {} }] },
+      { ...intent, items: [{ ...item, patch: { title: "" } }] },
+      {
+        ...intent,
+        items: Array.from({ length: 201 }, (_, index) => ({ ...item, taskId: `task-${index}` })),
+      },
+      { ...updateIntent(), patch: { lifecycle: "done" } },
+    ];
+    for (const input of invalid) {
+      expect(bulkTaskIntentSchema.safeParse(input).success).toBe(false);
+      expect(compiledBulkTaskIntentSchema.safeParse(input).success).toBe(false);
+    }
+  });
+  it("canonicalizes item order and metadata sets while preserving checklist order", () => {
+    const first = {
+      ...item,
+      patch: {
+        ...item.patch,
+        capabilities: { add: [" TypeScript ", "browser"], remove: [] },
+        checklist: [
+          { id: "b", text: "First", checked: false },
+          { id: "a", text: "Second", checked: false },
+        ],
+      },
+    };
+    const second = { ...item, taskId: "task-b", sourceRef: "tracker:ITEM-2" };
+    const left = canonicalizeBulkTaskIntent({ ...intent, items: [second, first] });
+    const right = canonicalizeBulkTaskIntent({ ...intent, items: [first, second] });
+    expect(left).toEqual(right);
+    if (left.kind !== "reconcile") throw new Error("Expected reconciliation");
+    expect(left.items[0]?.patch.capabilities?.add).toEqual(["browser", "typescript"]);
+    expect(left.items[0]?.patch.checklist?.map(({ id }) => id)).toEqual(["b", "a"]);
+  });
+});

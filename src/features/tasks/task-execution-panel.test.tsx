@@ -250,6 +250,29 @@ describe("task execution panel", () => {
     });
   });
 
+  it("shows backlog as the restore destination for incomplete external work", () => {
+    render(
+      <TaskExecutionPanel
+        {...props({
+          task: {
+            ...task,
+            lifecycle: "cancelled",
+            cancelledFromLifecycle: "in_progress",
+            reviewAttemptId: null,
+            expectedOutcome: "",
+            acceptanceCriteria: "",
+            checklist: [],
+          },
+          attempts: [],
+        })}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Restore to Backlog" })).toBeDefined();
+    expect(screen.getByRole("form", { name: "Restore cancelled task" }).textContent).toContain(
+      "returns the task to Backlog",
+    );
+  });
+
   it("restores cancelled work to its recorded lifecycle and reopens done work with a destination", async () => {
     const user = userEvent.setup();
     const cancelled: Task = {

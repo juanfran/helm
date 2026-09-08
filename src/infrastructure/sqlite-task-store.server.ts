@@ -18,6 +18,7 @@ import {
   TaskNotFoundError,
   TaskPathError,
   TaskPersistenceError,
+  TaskPreparationError,
   TaskRelationError,
   TaskReviewError,
   TaskTagConstraintError,
@@ -83,6 +84,8 @@ import {
   evaluateTaskEligibility,
   findBlockingPath,
   isIncompleteBlockingDependency,
+  cancelledTaskRestoreDestination,
+  missingReadyPreparation,
   normalizeCapabilities,
   richTextDocumentSchema,
   richTextToPlainText,
@@ -1361,6 +1364,7 @@ function commandError(error: unknown): TaskCommandError {
     error instanceof TaskNestingError ||
     error instanceof TaskNotFoundError ||
     error instanceof TaskPathError ||
+    error instanceof TaskPreparationError ||
     error instanceof TaskRelationError ||
     error instanceof TaskReviewError ||
     error instanceof TaskTagConstraintError ||
@@ -3190,11 +3194,19 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
                 .where(and(eq(leases.taskId, row.id), eq(leases.status, "active")))
                 .limit(1)
                 .get();
-              if (row.lifecycle === "in_progress" && !activeLease) {
+              const orphanedAttempt =
+                !activeLease &&
+                tx
+                  .select({ id: attempts.id })
+                  .from(attempts)
+                  .where(and(eq(attempts.taskId, row.id), eq(attempts.status, "active")))
+                  .limit(1)
+                  .get();
+              if (orphanedAttempt) {
                 throw new TaskLeaseError({
                   taskId: row.id,
                   reason: "required",
-                  message: "The in-progress task no longer has an active lease.",
+                  message: "The active Helm attempt no longer has an active lease.",
                 });
               }
               let cancelledAttempt: AttemptRow | null = null;
@@ -3317,8 +3329,8 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
                   message: "Only explicitly cancelled work can be restored.",
                 });
               }
-              const destination =
-                row.cancelledFromLifecycle === "in_progress" ? "ready" : row.cancelledFromLifecycle;
+              const destination = cancelledTaskRestoreDestination(taskFromRow(tx, row, context));
+              if (!destination) throw new Error("The cancelled task has no restore destination.");
               let reviewAttempt: AttemptRow | null = null;
               if (destination === "review") {
                 if (!row.reviewAttemptId) {
@@ -3420,6 +3432,15 @@ export function createSqliteTaskStore(database: Database.Database): TaskStore {
                   taskId: row.id,
                   lifecycle: row.lifecycle,
                   message: "Only complete tasks can be reopened.",
+                });
+              }
+
+              const missingFields = missingReadyPreparation(taskFromRow(tx, row, context));
+              if (input.destination === "ready" && missingFields.length > 0) {
+                throw new TaskPreparationError({
+                  missingFields,
+                  message:
+                    "This task lacks ready preparation. Reopen it to backlog and prepare it first.",
                 });
               }
 
